@@ -809,6 +809,14 @@ Implementation must document one of these outcomes before building beyond Phase 
   stable command/result contract.
 - Deprecate or replace an existing bridge only after an explicit user decision.
 
+**Decision (2026-07-04):** keep `ccodex` as a separate global CLI (outcome 2). The Claude
+environment's existing bridge (the `codex` plugin's `codex:codex-rescue` subagent /
+`codex:rescue` skill) is session-embedded procedural guidance around a shared runtime: it has no
+stable command/exit-code contract, no global job directories, no debuggable per-job artifacts, and
+is not pipeable from arbitrary project directories. `ccodex` provides exactly that layer and does not
+replace the plugin; the two coexist (plugin for in-session rescue flows, `ccodex` for stable
+delegation with job state). Re-evaluate after Phase 3 usage stabilizes.
+
 This gate prevents two independent Claude-to-Codex bridges from evolving conflicting conventions for
 permissions, job storage, logs, and result handoff.
 
@@ -892,6 +900,53 @@ Verification:
   separately as `codex_exit_code`.
 - No heartbeat, health monitoring, locks, debug/tail commands, orphan recovery, background backend,
   or tmux required.
+
+### Phase 2 scope amendment (2026-07-04)
+
+Phase 2 is split into two increments so the riskiest platform assumption (detached worker
+survival on Windows) is proven inside the smallest useful product loop. Inputs to this decision:
+a live second-opinion round-trip through `ccodex run --mode brainstorm` itself (Codex advised
+shipping a narrow "async result channel" first and deferring even `cancel` until process-tree
+ownership is reliable), plus two local feasibility probes (a detached `pwsh` child survived its
+parent's exit via plain `Start-Process`, and `Win32_Process.Create` via CIM launches workers
+outside the caller's Job Object by construction).
+
+**Phase 2a — async result channel (next):**
+
+```text
+ccodex submit                      # native backend only
+ccodex worker --job-id <job_id>    # internal only
+ccodex status <job_id>
+ccodex wait <job_id>
+ccodex read <job_id>
+```
+
+- Native backend launches the worker through CIM `Win32_Process.Create` (parented outside the
+  caller's Job Object) with `Start-Process` as a test/fallback mechanism, then verifies survival
+  through a startup sentinel: the worker must move `status.json` off `created` within the startup
+  window or `submit` fails with wrapper code `23`.
+- Single-writer status discipline instead of locks: after launch only the worker mutates
+  `status.json` (always via atomic temp-file + rename). `status`/`wait`/`read` are read-only,
+  except a narrowly gated orphan reconciliation: rewrite terminal state only when status is
+  `running`, the recorded worker (pid + process start time) is definitely gone, AND completion
+  evidence (`worker-complete.json` / `exit_code.txt` + `result.md`) exists; otherwise report
+  "possibly stale" without writing. The per-job `.lock` directory is deferred to Phase 2b when
+  multiple writers (cancel, monitors) appear.
+- `status.json` keeps the Phase 1 field set plus `backend`, `backend_id` (`<pid>;<start-time>`),
+  `started_at`, and `finished_at`. Deferred to 2b: `health`, `warnings`, pid lists,
+  `command_hash`, heartbeat/output timestamps, timeout fields, `terminated_at`, `cancelled_at`.
+- Wrapper exit codes added in 2a: `3` (job not found), `4` (not terminal yet), `20` (wait
+  timeout), `23` (backend failed to start/survive). Still out of scope: `21`, `22`, `24`.
+
+**Phase 2b — operability (later):** `cancel` (process-tree termination with pid+start-time
+identity), `tail`, `debug`, `doctor`, per-job locks, heartbeat/health/staleness, retention.
+
+Phase 3's user-level `/ccodex` Claude command ships with 2a (it is a thin procedural file and is
+what makes both product goals — delegation and second opinions — usable from any project).
+
+Future note: `codex exec resume <session-id>|--last` exists in codex-cli 0.142.5; a multi-turn
+"discussion" mode reusing a worker's Codex session is a candidate for a later phase once job
+metadata records the Codex session id.
 
 ### Phase 2: Background Jobs
 
