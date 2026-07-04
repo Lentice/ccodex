@@ -82,8 +82,8 @@ ccodex run --mode review --prompt-file .\review-task.md
 ```
 
 Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
-`worker-complete.json`, `codex-events.jsonl`, and `stderr.log` under
-`%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`, plus an index entry at
+`worker-complete.json`, `codex-events.jsonl`, `stderr.log`, `exit_code.txt`, and (on success)
+`result.md` under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`, plus an index entry at
 `%LOCALAPPDATA%\ccodex\index\<job_id>.json` — even though Phase 1 only exposes the synchronous
 result on stdout; `status`/`read`/`debug` commands to inspect that state come in Phase 2.
 
