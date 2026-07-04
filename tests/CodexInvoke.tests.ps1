@@ -7,6 +7,17 @@ Assert-Equal (ConvertTo-CcodexWin32QuotedArgument 'plain') 'plain' 'no quoting n
 Assert-Equal (ConvertTo-CcodexWin32QuotedArgument 'a b') '"a b"' 'wraps an argument containing a space'
 Assert-Equal (ConvertTo-CcodexWin32QuotedArgument 'a"b') '"a\"b"' 'escapes an embedded quote'
 Assert-Equal (ConvertTo-CcodexWin32QuotedArgument '') '""' 'empty argument becomes an empty quoted pair'
+Assert-Equal (ConvertTo-CcodexWin32QuotedArgument 'a&b') 'a&b' 'a cmd metacharacter alone does not trigger Win32 quoting'
+Assert-Equal (ConvertTo-CcodexWin32QuotedArgument -Argument 'plain' -ForceQuote) '"plain"' '-ForceQuote quotes an otherwise-plain argument'
+
+Write-Host "ConvertTo-CcodexCmdInnerArgument force-quotes cmd metacharacters"
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'plain') 'plain' 'plain argument is left bare for the cmd inner line'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'D:\A&B\repo') '"D:\A&B\repo"' 'ampersand (command separator) forces quoting'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'D:\A|B\repo') '"D:\A|B\repo"' 'pipe forces quoting'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'D:\A>B') '"D:\A>B"' 'redirection forces quoting'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'D:\A^B') '"D:\A^B"' 'caret (escape) forces quoting'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'D:\A%B') '"D:\A%B"' 'percent (var expansion) forces quoting'
+Assert-Equal (ConvertTo-CcodexCmdInnerArgument 'a b') '"a b"' 'whitespace still triggers quoting via the Win32 path'
 
 Write-Host "Get-CcodexProcessLaunchPlan for a .cmd target"
 $plan = Get-CcodexProcessLaunchPlan -CodexPath 'C:\npm\codex.cmd' -Arguments @('exec', '--sandbox', 'read-only', '-C', 'D:\Repo With Space')
@@ -16,6 +27,11 @@ Assert-Equal $plan.ArgumentList[1] '/s' 'second cmd.exe arg is /s'
 Assert-Equal $plan.ArgumentList[2] '/c' 'third cmd.exe arg is /c'
 Assert-True ($plan.ArgumentList[3] -like '*codex.cmd*') 'the wrapped command includes the codex.cmd path'
 Assert-True ($plan.ArgumentList[3] -like '*"D:\Repo With Space"*') 'the wrapped command quotes the space-containing repo path'
+
+Write-Host "Get-CcodexProcessLaunchPlan quotes cmd metacharacters in the wrapped command"
+$planMeta = Get-CcodexProcessLaunchPlan -CodexPath 'C:\npm\codex.cmd' -Arguments @('-C', 'D:\A&B\repo')
+Assert-True ($planMeta.ArgumentList[3] -like '*"D:\A&B\repo"*') 'a repo path containing & is quoted so cmd.exe cannot treat it as a command separator'
+Assert-True (-not ($planMeta.ArgumentList[3] -like '*-C D:\A&B\repo*')) 'the & path is never left bare in the inner command line'
 
 Write-Host "Get-CcodexProcessLaunchPlan for a non-.cmd target"
 $plan2 = Get-CcodexProcessLaunchPlan -CodexPath 'C:\codex.exe' -Arguments @('exec')

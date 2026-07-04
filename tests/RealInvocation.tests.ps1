@@ -25,6 +25,15 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $exitLine = 'exit /' + 'b %ERRORLEVEL%'  # split literal to keep it plain text
 # codex.cmd on PATH resolves to the fake-codex fixture.
 [System.IO.File]::WriteAllText((Join-Path $binDir 'codex.cmd'), "@echo off`r`npwsh -NoProfile -File `"$fakePs`" %*`r`n$exitLine", $utf8NoBom)
+# Regression guard for the codex-resolution defect: a standard npm install ships
+# codex, codex.cmd AND codex.ps1. PowerShell command precedence ranks the .ps1
+# (ExternalScript) ABOVE the .cmd (Application), so a bare `Get-Command codex`
+# returns the .ps1 — which Process.Start (UseShellExecute=$false) cannot launch.
+# Stage BOTH shims (npm-shaped) so this test fails unless ccodex restricts
+# resolution to CommandType Application and reaches the launchable codex.cmd. The
+# .ps1 body deliberately exits nonzero WITHOUT writing result.md, so if ccodex
+# ever resolves to it again the exit-0/result assertions below break loudly.
+[System.IO.File]::WriteAllText((Join-Path $binDir 'codex.ps1'), "param() Write-Error 'ccodex resolved codex.ps1 instead of codex.cmd'; exit 3`r`n", $utf8NoBom)
 # ccodex.cmd shim mirrors the installed PATH shim exactly.
 [System.IO.File]::WriteAllText((Join-Path $binDir 'ccodex.cmd'), "@echo off`r`nsetlocal`r`npwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ccodexPs`" %*`r`n$exitLine", $utf8NoBom)
 
@@ -40,11 +49,12 @@ try {
     $env:CCODEX_FAKE_EXIT_CODE = '0'
     $env:CCODEX_FAKE_RESULT = 'OK'
 
-    Write-Host "piped ASCII task via pwsh -File reaches codex and prints only result"
+    Write-Host "piped ASCII task via pwsh -File reaches codex.cmd (not codex.ps1) and prints only result"
     $out = "Reply with exactly the word OK." | & pwsh -NoLogo -NoProfile -File $ccodexPs run --mode review --repo $targetRepo
-    Assert-Equal $LASTEXITCODE 0 'piped ASCII task exits 0'
+    Assert-Equal $LASTEXITCODE 0 'piped ASCII task exits 0 even with codex.ps1 shadowing codex.cmd on PATH'
     Assert-True ($out -join "`n" -like '*OK*') 'result.md content is printed to stdout'
     Assert-True (-not (($out -join "`n") -like '*fake-codex ran*')) 'raw JSONL events never reach stdout'
+    Assert-True (-not (($out -join "`n") -like '*codex.ps1 instead*')) 'ccodex never resolved the shadowing codex.ps1'
 
     Write-Host "piped Traditional Chinese is written byte-exact to prompt.md (no mojibake)"
     $zh = '請用一句話總結你能做什麼，並且只回覆這一句話。'
