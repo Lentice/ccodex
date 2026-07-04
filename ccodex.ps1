@@ -1,27 +1,36 @@
 # ccodex.ps1
-[CmdletBinding()]
+#
+# NOTE: This is a plain `param()` script on purpose — it is NOT an advanced
+# ([CmdletBinding()]) script, and it deliberately never references the automatic
+# `$input` variable. Both choices are load-bearing for redirected-stdin handling:
+#
+#   * The tool is only ever launched as `pwsh -NoProfile -File ccodex.ps1 ...`
+#     (via the ccodex.cmd PATH shim). Piping a task (`"text" | ccodex run ...`)
+#     therefore reaches the script as OS-level redirected stdin.
+#   * If this were an advanced script, PowerShell would attempt to bind that
+#     redirected stdin to a pipeline parameter before the body runs; with no
+#     ValueFromPipeline parameter the bind fails, the stdin bytes are consumed
+#     and discarded, and the OS-stream reader below sees 0 bytes.
+#   * Merely referencing `$input` (even in a plain script) makes PowerShell route
+#     stdin into the pipeline enumerator, again draining the OS console stream.
+#
+# By staying a plain script and leaving `$input` untouched, redirected stdin
+# remains fully readable via [Console]::OpenStandardInput(), so
+# Read-CcodexStdinWithTimeout (dot-sourced from lib/StdinTimeout.ps1) can read the
+# raw bytes and decode them as UTF-8 exactly — which the PowerShell `$input`
+# path cannot guarantee (it depends on [Console]::InputEncoding, which we must
+# not force). Task 12 Steps 4/5 (piped task + Traditional Chinese) depend on this.
 param(
-    [Parameter(Position = 0)]
     [string]$Command,
-
-    [Parameter(Position = 1)]
     [string]$PositionalTask,
-
     [string]$Mode,
     [string]$Access,
     [string]$Repo,
     [string]$PromptFile,
-
     [switch]$ImportOnly
 )
 
 $ErrorActionPreference = 'Stop'
-
-$pipelineExpected = $MyInvocation.ExpectingInput
-$pipelineObjects = $null
-if ($pipelineExpected) {
-    $pipelineObjects = @($input)
-}
 
 . (Join-Path $PSScriptRoot 'lib\Paths.ps1')
 . (Join-Path $PSScriptRoot 'lib\Repo.ps1')
@@ -142,7 +151,12 @@ $exitCode = 12
 try {
     switch ($Command) {
         'run' {
-            $runResult = Invoke-CcodexRun -Mode $Mode -Access $Access -RepoOverride $Repo -PromptFile $PromptFile -PositionalTask $PositionalTask -PipelineExpected $pipelineExpected -PipelineObjects $pipelineObjects
+            # Redirected stdin is read directly from the OS stream by
+            # Get-CcodexPromptContent (via [Console]::OpenStandardInput); the
+            # PowerShell pipeline ($input) path is intentionally not used here.
+            # See the header comment for why. The PipelineExpected/PipelineObjects
+            # parameters remain on Invoke-CcodexRun for direct/test callers.
+            $runResult = Invoke-CcodexRun -Mode $Mode -Access $Access -RepoOverride $Repo -PromptFile $PromptFile -PositionalTask $PositionalTask -PipelineExpected $false -PipelineObjects $null
             if ($runResult.WrapperExitCode -eq 0) {
                 Write-Output $runResult.Stdout
             } else {
