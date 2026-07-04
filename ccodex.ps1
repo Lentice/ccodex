@@ -84,6 +84,25 @@ function Invoke-CcodexRun {
         return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $jobDir; Message = "$Message`n  job:      $jobId`n  job dir:  $jobDir" }
     }
 
+    function Complete-CcodexInternalFailure {
+        # A wrapper-internal failure after the job dir is reserved (codex path
+        # resolution or the launch/process step itself) must still leave the
+        # design's completion evidence: a worker-complete.json and a terminal
+        # failed status.json, both stamped wrapper_exit_code=12. codex_exit_code
+        # stays null because Codex never produced one.
+        param([string]$Message, [string]$AccessForStatus)
+        $completedAt = (Get-Date).ToString('o')
+        $accessForStatus = if ($AccessForStatus) { $AccessForStatus } else { 'unknown' }
+        try {
+            $resultPresent = Test-Path -LiteralPath $resultPath -PathType Leaf
+        } catch { $resultPresent = $false }
+        $completeObj = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
+        Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'worker-complete.json') -Object $completeObj
+        $statusObj = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $Mode -Access $accessForStatus -Repo $repoRoot -CreatedAt $createdAt -WrapperExitCode 12 -ErrorMessage $Message
+        Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $jobDir; Message = "ccodex: internal error: $Message`n  job dir: $jobDir" }
+    }
+
     try {
         $resolvedAccess = Resolve-CcodexAccess -Mode $Mode -Access $Access
     } catch {
@@ -113,7 +132,11 @@ function Invoke-CcodexRun {
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
 
     $resultPath = Join-Path $jobDir 'result.md'
-    $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { (Get-Command 'codex' -ErrorAction Stop).Source }
+    try {
+        $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
+    } catch {
+        return Complete-CcodexInternalFailure -Message $_.Exception.Message -AccessForStatus $resolvedAccess
+    }
     $codexArgs = Build-CcodexCodexArgs -Access $resolvedAccess -RepoRoot $repoRoot -ResultPath $resultPath
 
     Write-CcodexTextFile -Path (Join-Path $jobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
@@ -124,7 +147,11 @@ function Invoke-CcodexRun {
     $stderrPath = Join-Path $jobDir 'stderr.log'
     $exitCodeFilePath = Join-Path $jobDir 'exit_code.txt'
 
-    $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $workerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath
+    try {
+        $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $workerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath
+    } catch {
+        return Complete-CcodexInternalFailure -Message $_.Exception.Message -AccessForStatus $resolvedAccess
+    }
 
     $preliminaryComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate $(if ($codexExitCode -eq 0) { 'done' } else { 'failed' }) -CodexExitCode $codexExitCode -WrapperExitCode $null -ResultPresent (Test-Path -LiteralPath $resultPath -PathType Leaf) -CompletedAt (Get-Date).ToString('o')
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'worker-complete.json') -Object $preliminaryComplete

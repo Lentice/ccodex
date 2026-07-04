@@ -88,6 +88,22 @@ $result5 = Invoke-CcodexRunForTest
 Assert-Equal $result5.WrapperExitCode 10 'wrapper exit code is 10 when codex exits nonzero'
 Assert-True (Test-Path -LiteralPath (Join-Path $result5.JobDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json exists on the failure path too'
 
+Write-Host "codex launch failure -> wrapper exit 12 with terminal failed status.json + worker-complete.json"
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+$missingCodex = Join-Path $tempRoot 'no-such-codex.exe'
+$result6 = Invoke-CcodexRunForTest -Overrides @{ CodexPath = $missingCodex }
+Assert-Equal $result6.WrapperExitCode 12 'wrapper exit code is 12 when the codex process cannot be launched'
+$failDir = $result6.JobDir
+Assert-True (Test-Path -LiteralPath (Join-Path $failDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json is written on the launch-failure path'
+Assert-True (Test-Path -LiteralPath (Join-Path $failDir 'status.json') -PathType Leaf) 'status.json is written on the launch-failure path'
+$failStatus = Get-Content -LiteralPath (Join-Path $failDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $failStatus.status 'failed' 'launch-failure status.json is terminal failed'
+Assert-Equal $failStatus.wrapper_exit_code 12 'launch-failure status.json records wrapper_exit_code 12'
+Assert-True ($null -eq $failStatus.codex_exit_code) 'launch-failure status.json leaves codex_exit_code null'
+$failComplete = Get-Content -LiteralPath (Join-Path $failDir 'worker-complete.json') -Raw | ConvertFrom-Json
+Assert-Equal $failComplete.status_candidate 'failed' 'launch-failure worker-complete.json status_candidate is failed'
+Assert-Equal $failComplete.wrapper_exit_code 12 'launch-failure worker-complete.json records wrapper_exit_code 12'
+
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests
