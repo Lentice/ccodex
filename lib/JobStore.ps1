@@ -36,7 +36,11 @@ function New-CcodexStatusObject {
         [Parameter(Mandatory)][string]$CreatedAt,
         [Nullable[int]]$CodexExitCode = $null,
         [Nullable[int]]$WrapperExitCode = $null,
-        [string]$ErrorMessage = $null
+        [string]$ErrorMessage = $null,
+        [string]$Backend = 'sync',
+        [string]$BackendId = $null,
+        [string]$StartedAt = $null,
+        [string]$FinishedAt = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -47,6 +51,10 @@ function New-CcodexStatusObject {
         access            = $Access
         repo              = $Repo
         created_at        = $CreatedAt
+        backend           = $Backend
+        backend_id        = $BackendId
+        started_at        = $StartedAt
+        finished_at       = $FinishedAt
         codex_exit_code   = $CodexExitCode
         wrapper_exit_code = $WrapperExitCode
         error             = $ErrorMessage
@@ -61,7 +69,8 @@ function New-CcodexDebugObject {
         [Parameter(Mandatory)][string]$Mode,
         [Parameter(Mandatory)][string]$Access,
         [Parameter(Mandatory)][string]$CodexPath,
-        [Parameter(Mandatory)][string[]]$CodexArgs
+        [Parameter(Mandatory)][string[]]$CodexArgs,
+        [string]$Backend = 'sync'
     )
     return [ordered]@{
         job_id              = $JobId
@@ -71,7 +80,7 @@ function New-CcodexDebugObject {
         job_dir             = $JobDir
         mode                = $Mode
         access              = $Access
-        backend             = 'sync'
+        backend             = $Backend
         codex_path          = $CodexPath
         codex_args          = $CodexArgs
     }

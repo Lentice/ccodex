@@ -31,10 +31,35 @@ Assert-Equal $status.job_id 'job1' 'status object carries job_id'
 Assert-Equal $status.status 'running' 'status object carries status'
 Assert-Equal $status.codex_exit_code $null 'codex_exit_code defaults to null'
 
+Write-Host "New-CcodexStatusObject defaults the new backend fields"
+Assert-Equal $status.backend 'sync' 'backend defaults to sync when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.backend_id)) 'backend_id defaults to null/empty when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.started_at)) 'started_at defaults to null/empty when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.finished_at)) 'finished_at defaults to null/empty when not specified'
+
+Write-Host "New-CcodexStatusObject round-trips explicit backend fields"
+$status2 = New-CcodexStatusObject -JobId 'job2' -Status 'running' -Mode 'review' -Access 'read-only' -Repo 'D:\Repo' -CreatedAt '2026-07-03T00:00:00Z' -Backend 'native' -BackendId '1234;2026-07-03T00:00:00.0000000Z' -StartedAt '2026-07-03T00:00:01Z' -FinishedAt '2026-07-03T00:05:00Z'
+Assert-Equal $status2.backend 'native' 'backend round-trips'
+Assert-Equal $status2.backend_id '1234;2026-07-03T00:00:00.0000000Z' 'backend_id round-trips'
+Assert-Equal $status2.started_at '2026-07-03T00:00:01Z' 'started_at round-trips'
+Assert-Equal $status2.finished_at '2026-07-03T00:05:00Z' 'finished_at round-trips'
+
+$statusKeys = [System.Collections.Generic.List[string]]::new()
+foreach ($key in $status2.Keys) { $statusKeys.Add($key) }
+$createdAtIndex = $statusKeys.IndexOf('created_at')
+Assert-Equal $statusKeys[$createdAtIndex + 1] 'backend' 'backend key is ordered immediately after created_at'
+Assert-Equal $statusKeys[$createdAtIndex + 2] 'backend_id' 'backend_id key follows backend'
+Assert-Equal $statusKeys[$createdAtIndex + 3] 'started_at' 'started_at key follows backend_id'
+Assert-Equal $statusKeys[$createdAtIndex + 4] 'finished_at' 'finished_at key follows started_at'
+
 Write-Host "New-CcodexDebugObject"
 $debugObj = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'review' -Access 'read-only' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec')
 Assert-Equal $debugObj.backend 'sync' 'debug object records sync backend'
 Assert-Equal $debugObj.codex_path 'C:\codex.cmd' 'debug object records resolved codex path'
+
+Write-Host "New-CcodexDebugObject honors an explicit -Backend"
+$debugObj2 = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'review' -Access 'read-only' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec') -Backend 'native'
+Assert-Equal $debugObj2.backend 'native' 'debug object honors -Backend native'
 
 Write-Host "New-CcodexWorkerCompleteObject"
 $complete = New-CcodexWorkerCompleteObject -JobId 'job1' -StatusCandidate 'done' -CodexExitCode 0 -WrapperExitCode 0 -ResultPresent $true -CompletedAt '2026-07-03T00:01:00Z'
