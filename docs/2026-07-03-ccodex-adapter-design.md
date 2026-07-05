@@ -948,6 +948,96 @@ Future note: `codex exec resume <session-id>|--last` exists in codex-cli 0.142.5
 "discussion" mode reusing a worker's Codex session is a candidate for a later phase once job
 metadata records the Codex session id.
 
+### Failure-mode handling amendment (2026-07-05)
+
+User requirement: the wrapper must handle Codex-side failure modes first-class — quota/rate-limit
+exhaustion, Codex stalling on a question/approval, permission problems, hangs — so Claude can act
+on a failure without reading logs.
+
+| Failure mode | Detection | Wrapper behavior |
+|---|---|---|
+| Quota / rate limit exhausted | nonzero exit + stderr/events signature (`usage limit`, `rate limit`, `quota`, `429`) | status `failed`, exit `10`, `status.json.failure_reason = "quota_or_rate_limit"`, hint: report to user, do not auto-retry |
+| Auth broken / logged out | signature (`login`, `auth`, `401`, `unauthorized`, `credential`) | `failed`/`10`, `failure_reason = "auth"`, hint `codex login` |
+| Sandbox / permission denial | signature (`sandbox`, `denied`, `approval`, `permission`) | `failed`/`10` (or `11`), `failure_reason = "permission_or_sandbox"`, hint: consider `--access workspace` or narrow the task |
+| Network failure | signature (`network`, `connection`, `dns`, `502`, `503`) | `failed`/`10`, `failure_reason = "network"`, hint: one retry is safe |
+| Codex waits for interactive input | prevented by construction: `--ask-for-approval never` + wrapper closes stdin after writing the prompt (Codex sees EOF). A clarifying *question as the final answer* is a valid `done` result; future `codex exec resume <thread_id>` can answer it in-session | documentation only |
+| Codex hangs (no exit) | job-level `--hard-timeout-sec <n>` (default `0` = never) | on expiry: kill the process tree, status `timed_out`, `timeout_reason`, `terminated_at`, wrapper exit `24`; artifacts kept |
+| Codex CLI missing / not launchable | `Resolve-CcodexCodexPath` failure | `failed`/`12` with completion evidence — including in `submit`, which must write a terminal failed `status.json` + `worker-complete.json` before returning (a job must never sit at `created` after a known-fatal internal failure) |
+| Worker dies without evidence | narrow orphan reconciliation (2a) | evidence → terminal state; no evidence → `possibly-stale`; corrupt/empty `exit_code.txt` degrades to `possibly-stale`, never an uncaught throw |
+| Empty/missing result with exit 0 | 2a validation | `failed`/`11` |
+
+Contract points: `failure_reason` is a conservative, append-only HINT (may be absent); exit codes
+stay authoritative. Signatures match case-insensitively over the tail of `stderr.log` and
+error-bearing events. `status.json.codex_thread_id` is captured from the `thread.started` event
+(success and failure) to enable future `codex exec resume` integration and post-mortem debugging.
+This amendment pulls exit code `24` and status `timed_out` forward from Phase 2b; `21`/`22` stay
+out of scope. Phase 2b `ccodex doctor` should delegate to the built-in `codex doctor` plus
+wrapper-specific checks.
+
+A live dogfood review of Phase 2a (run through `ccodex run --mode review` itself, 2026-07-05)
+contributed two of these requirements: the `submit` stuck-at-`created` fix and the
+corrupt-evidence reconciliation guard. Its third finding (Start-Process stdout inheritance) was
+triaged as a false positive (`-WindowStyle Hidden` allocates a separate hidden console) and is
+addressed by a code comment plus the existing E2E stdout-exactness assertions; its fourth
+(embedded quotes in CIM command lines) is guarded with a clear error since Windows paths cannot
+contain quotes.
+
+### Scoped review and delegation policy (2026-07-05)
+
+User use cases: (1) after Claude completes a feature/fix, optionally have Codex review exactly
+those changes scoped to paths or a submodule (the existing Claude-side codex plugin cannot scope
+reviews); (2) reduce Claude-token consumption and the user's per-instance decision burden by
+routing codex-suitable work via predefined policy, without meaningfully lowering quality.
+
+Scoped review:
+
+- Submodule scoping works by construction: a submodule is a repository, so `--repo
+  <submodule-path>` targets it directly.
+- Path scoping strategy: instruct Codex to generate the diff ITSELF inside its read-only sandbox
+  (`git diff <base>..<head> -- <paths>`) — Codex demonstrably executes read-only commands there.
+  This gives exact scoping, a tiny prompt, and lets Codex open surrounding files for context.
+  Fallback `--embed-diff` embeds a size-capped diff for unusual git states.
+- New subcommand (sugar over the `run` pipeline, mode `review`, access `read-only`):
+
+```text
+ccodex review [--repo <path>] (--range <base>..<head> | --staged | --working)
+              [--path <p>]... [--intent "<change intent>"] [--focus "<extra focus>"]
+              [--embed-diff]
+```
+
+Delegation policy — the USER sets policy once per project; Claude applies it at fixed
+checkpoints and stays the final judge; nothing generative is auto-delegated:
+
+- Config in project-local `.ccodex/ccodex.json`:
+
+```json
+{
+  "delegation": {
+    "review_after_changes": "ask",
+    "review_min_changed_lines": 50,
+    "review_default_paths": [],
+    "plan_second_opinion": "ask",
+    "max_codex_calls_per_task": 2
+  }
+}
+```
+
+- Fixed checkpoints only (no mid-task auto-routing): (1) after Claude completes a feature/fix,
+  before declaring done → `review_after_changes`; (2) after Claude writes/updates a plan or spec
+  → `plan_second_opinion`; (3) explicit user request → always honored.
+- Semantics: `auto` = run the scoped review at the checkpoint, triage findings (verify each
+  before acting), fold into the final report. `ask` = offer a one-keystroke choice. `off` = only
+  on explicit request.
+- Quality guarantees: codex review is additive (Claude's own tests/self-review still run); Claude
+  triages every finding; only review/summary/second-opinion tasks are eligible for `auto`.
+- Cost guards: `review_min_changed_lines`, `max_codex_calls_per_task`, and failure-class
+  short-circuits (quota → note and skip, never retry-loop).
+- A user-level rules file (`~/.claude/rules/ccodex-delegation.md`, installed by `install.ps1`)
+  teaches every Claude session the policy so the user never has to re-prompt it.
+- Token honesty: savings come from large inputs (diffs/files) flowing to Codex without entering
+  Claude's context while Codex returns small findings; `auto` vs `ask` changes decision burden,
+  not token cost. Bulk implementation delegation arrives with Phase 4 worktrees.
+
 ### Phase 2: Background Jobs
 
 Implement:
