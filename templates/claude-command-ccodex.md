@@ -23,24 +23,35 @@ conversation.
    "<task text>" | ccodex run --mode review --repo <path>
    ```
 
-3. **For a scoped code review**, prefer `ccodex review` over hand-writing a review prompt — it
-   has Codex generate the diff itself (inside its read-only sandbox) and scopes it exactly:
+3. **For a scoped code review**, prefer `ccodex review` over hand-writing a review prompt.
+
+   Default to `--embed-diff`: the wrapper runs `git diff` itself and embeds a size-capped diff in
+   the prompt. Use this by default — on some hosts Codex's own sandbox cannot spawn processes, so
+   asking Codex to run `git diff` itself fails (observed signature: `CreateProcessWithLogonW
+   failed: 1385`).
 
    ```powershell
-   ccodex review --range <base>..<head> --path <p> --intent "<one-line change intent>"
-   ccodex review --staged --path <p> --intent "<intent>"
-   ccodex review --working --path <p> --intent "<intent>"
+   ccodex review --range <base>..<head> --path <p> --intent "<one-line change intent>" --embed-diff
+   ccodex review --staged --path <p> --intent "<intent>" --embed-diff
+   ccodex review --working --path <p> --intent "<intent>" --embed-diff
    ```
 
    Target a submodule directly with `--repo` instead of the superproject:
 
    ```powershell
-   ccodex review --repo <submodule-path> --range <base>..<head> --path <p> --intent "<intent>"
+   ccodex review --repo <submodule-path> --range <base>..<head> --path <p> --intent "<intent>" --embed-diff
    ```
 
-   `--path` is repeatable; add `--focus "<extra focus>"` for a specific angle, or `--embed-diff`
-   to have the wrapper embed a size-capped diff itself instead of relying on Codex to run
-   `git diff`. See `~/.claude/rules/ccodex-delegation.md` for when to run this automatically.
+   If you've confirmed Codex can spawn processes in its sandbox on this host, the lighter-weight
+   no-flag (self-diff) form works too — it has Codex generate the diff itself (inside its
+   read-only sandbox) instead of the wrapper embedding it:
+
+   ```powershell
+   ccodex review --range <base>..<head> --path <p> --intent "<one-line change intent>"
+   ```
+
+   `--path` is repeatable; add `--focus "<extra focus>"` for a specific angle. See
+   `~/.claude/rules/ccodex-delegation.md` for when to run this automatically.
 
 4. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
    at once), submit it in the background instead of blocking on `run`:

@@ -62,16 +62,22 @@ running your own tests and self-review regardless of what Codex reports.
 Scope the review to exactly the changes being evaluated:
 
 ```powershell
-ccodex review --range <base>..HEAD --path <changed-path> --intent "<one-line change intent>"
+ccodex review --range <base>..HEAD --path <changed-path> --intent "<one-line change intent>" --embed-diff
 ```
 
+- Default to `--embed-diff` — the wrapper runs `git diff` itself and embeds a size-capped diff in
+  the prompt. This is the reliable form: on some hosts Codex's own sandbox cannot spawn
+  processes, so asking Codex to run `git diff` itself fails (observed signature:
+  `CreateProcessWithLogonW failed: 1385`). If you've confirmed this host's Codex sandbox can spawn
+  processes, the lighter-weight no-flag (self-diff) form works too — Codex generates the diff
+  itself instead of the wrapper embedding it.
 - Use `--path` once per changed area (directory or file) instead of reviewing the whole repo.
 - Use `review_default_paths` from the config as the default `--path` set when the caller hasn't
   narrowed it further.
 - When the change lives in a submodule, target it directly instead of the superproject:
 
   ```powershell
-  ccodex review --repo <submodule-path> --range <base>..HEAD --path <changed-path> --intent "<intent>"
+  ccodex review --repo <submodule-path> --range <base>..HEAD --path <changed-path> --intent "<intent>" --embed-diff
   ```
 
 - For a plan/spec second opinion, describe the plan's intent in `--intent`/`--focus` and scope
