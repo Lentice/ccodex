@@ -42,6 +42,9 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\JobStore.ps1')
 . (Join-Path $PSScriptRoot 'lib\CodexInvoke.ps1')
 . (Join-Path $PSScriptRoot 'lib\ResultValidation.ps1')
+. (Join-Path $PSScriptRoot 'lib\JobIndex.ps1')
+. (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
+. (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 
 function Invoke-CcodexJobExecution {
     # Shared execution core for both the synchronous `run` path and the
@@ -199,6 +202,22 @@ function Invoke-CcodexRun {
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $jobDir; Message = $coreResult.Message }
 }
 
+function Get-CcodexArgValue {
+    # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
+    # hyphens that PowerShell's native named-parameter binder cannot match against a
+    # script param name, so any such unbound tokens land in the automatic $args array
+    # (see the header comment: this script deliberately stays a plain, non-CmdletBinding
+    # script). This helper pulls a flag's value back out of that array.
+    param([object[]]$ArgumentList, [Parameter(Mandatory)][string]$FlagName)
+    if (-not $ArgumentList) { return $null }
+    for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
+        if ($ArgumentList[$i] -eq $FlagName -and ($i + 1) -lt $ArgumentList.Count) {
+            return $ArgumentList[$i + 1]
+        }
+    }
+    return $null
+}
+
 if ($ImportOnly) { return }
 
 $exitCode = 12
@@ -218,8 +237,28 @@ try {
             }
             $exitCode = $runResult.WrapperExitCode
         }
+        'worker' {
+            # Internal entrypoint only: launched by the (future) `submit` detached
+            # process, or directly in tests. Not documented/Claude-facing.
+            $workerJobId = Get-CcodexArgValue -ArgumentList $args -FlagName '--job-id'
+            $workerStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $workerCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+            if (-not $workerJobId) {
+                Write-Host "ccodex: worker requires --job-id <id>."
+                $exitCode = 2
+                break
+            }
+            $workerParams = @{ JobId = $workerJobId }
+            if ($workerStateRoot) { $workerParams['StateRoot'] = $workerStateRoot }
+            if ($workerCodexPath) { $workerParams['CodexPath'] = $workerCodexPath }
+            $workerResult = Invoke-CcodexWorker @workerParams
+            if ($workerResult.Message) {
+                Write-Host $workerResult.Message
+            }
+            $exitCode = $workerResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 1. Supported commands: run."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, worker."
             $exitCode = 2
         }
     }
