@@ -407,6 +407,53 @@ function Invoke-CcodexWaitCommand {
     }
 }
 
+function Invoke-CcodexReadCommand {
+    # Result-channel accessor: unlike `wait`, this never blocks. Reconciles a
+    # narrowly-gated orphan (dead worker + completion evidence) via
+    # Update-CcodexOrphanStatus once, same as `status`/`wait`, then branches on the
+    # (possibly-reconciled) status. Non-terminal -> exit 4 with a status line + a
+    # `ccodex wait <job_id>` hint, no result content. Terminal (done OR failed) with
+    # a non-empty result.md -> print it, exit 0 (read is the result channel
+    # regardless of which terminal status produced it). Terminal with a
+    # missing/empty result.md -> a concise failure, exit 11.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $jobDir = $record.JobDir
+    $resultPath = Join-Path $jobDir 'result.md'
+
+    $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+    $statusObj = Read-CcodexStatusFile -JobDir $jobDir
+    $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
+    if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+    if ($statusText -notin @('done', 'failed')) {
+        $line = "$JobId $statusText"
+        if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
+        $message = "$line`nccodex: job $JobId is not finished yet; run ``ccodex wait $JobId`` to block until it completes."
+        return [pscustomobject]@{ WrapperExitCode = 4; Stdout = $null; Message = $message }
+    }
+
+    $resultExists = Test-Path -LiteralPath $resultPath -PathType Leaf
+    $resultContent = if ($resultExists) { Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 } else { '' }
+    $resultNonEmpty = $resultExists -and $resultContent.Trim().Length -gt 0
+
+    if ($resultNonEmpty) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $resultContent; Message = $null }
+    }
+
+    $failureMessage = "ccodex: job $JobId $statusText but result.md is missing or empty`n  job dir: $jobDir`n  result:  $resultPath"
+    return [pscustomobject]@{ WrapperExitCode = 11; Stdout = $null; Message = $failureMessage }
+}
+
 function Get-CcodexArgValue {
     # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
     # hyphens that PowerShell's native named-parameter binder cannot match against a
@@ -535,8 +582,28 @@ try {
             }
             $exitCode = $waitResult.WrapperExitCode
         }
+        'read' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait` use). --state-root is a hidden test flag.
+            $readJobId = $PositionalTask
+            $readStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $readJobId) {
+                Write-Host "ccodex: read requires a job id."
+                $exitCode = 2
+                break
+            }
+            $readParams = @{ JobId = $readJobId }
+            if ($readStateRoot) { $readParams['StateRoot'] = $readStateRoot }
+            $readResult = Invoke-CcodexReadCommand @readParams
+            if ($readResult.WrapperExitCode -eq 0) {
+                Write-Output $readResult.Stdout
+            } else {
+                Write-Host $readResult.Message
+            }
+            $exitCode = $readResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, wait, worker."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, wait, read, worker."
             $exitCode = 2
         }
     }

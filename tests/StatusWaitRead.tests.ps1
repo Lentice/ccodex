@@ -234,5 +234,86 @@ $shellWaitOutLines = @($shellWaitOut | Where-Object { $_ -ne $null -and $_ -ne '
 Assert-Equal $shellWaitOutLines.Count 1 'shell-level wait prints exactly one line'
 Assert-Equal $shellWaitOutLines[0] 'the result' 'shell-level wait prints the result.md content'
 
+# ============================================================
+# Invoke-CcodexReadCommand
+# ============================================================
+
+# --- done-with-result -> exit 0, content printed ---
+
+Write-Host "Invoke-CcodexReadCommand: done job with result.md -> exit 0, content on stdout"
+$jobReadDone = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -WithResultFile
+$resultReadDone = Invoke-CcodexReadCommand -JobId $jobReadDone.JobId -StateRoot $localAppData
+Assert-Equal $resultReadDone.WrapperExitCode 0 'done job with result.md -> exit 0'
+Assert-Equal $resultReadDone.Stdout 'the result' 'done job -> stdout carries result.md content'
+
+# --- failed-with-result -> exit 0, content printed (read is the result channel regardless) ---
+
+Write-Host "Invoke-CcodexReadCommand: failed job with result.md -> exit 0, content on stdout"
+$jobReadFailed = New-CcodexTestJobWithStatus -Status 'failed' -CodexExitCode 1 -WrapperExitCode 10 -WithResultFile
+$resultReadFailed = Invoke-CcodexReadCommand -JobId $jobReadFailed.JobId -StateRoot $localAppData
+Assert-Equal $resultReadFailed.WrapperExitCode 0 'failed job with result.md -> exit 0'
+Assert-Equal $resultReadFailed.Stdout 'the result' 'failed job -> stdout carries result.md content'
+
+# --- running (non-terminal) -> exit 4 with status+hint, no content ---
+
+Write-Host "Invoke-CcodexReadCommand: running job -> exit 4 with status line and wait hint"
+$jobReadRunning = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+$resultReadRunning = Invoke-CcodexReadCommand -JobId $jobReadRunning.JobId -StateRoot $localAppData
+Assert-Equal $resultReadRunning.WrapperExitCode 4 'running job -> exit 4'
+Assert-True (-not [string]::IsNullOrEmpty($resultReadRunning.Message)) 'running job returns a diagnostic message'
+Assert-True ($resultReadRunning.Message -like "*running*") 'running job message includes status'
+Assert-True ($resultReadRunning.Message -like "*ccodex wait $($jobReadRunning.JobId)*") 'running job message hints at ccodex wait <job_id>'
+Assert-True ([string]::IsNullOrEmpty($resultReadRunning.Stdout)) 'running job returns no stdout content'
+
+# --- created (non-terminal) -> exit 4 ---
+
+Write-Host "Invoke-CcodexReadCommand: created job -> exit 4 with status line and wait hint"
+$jobReadCreated = New-CcodexTestJobWithStatus -Status 'created'
+$resultReadCreated = Invoke-CcodexReadCommand -JobId $jobReadCreated.JobId -StateRoot $localAppData
+Assert-Equal $resultReadCreated.WrapperExitCode 4 'created job -> exit 4'
+Assert-True ($resultReadCreated.Message -like "*created*") 'created job message includes status'
+Assert-True ($resultReadCreated.Message -like "*ccodex wait $($jobReadCreated.JobId)*") 'created job message hints at ccodex wait <job_id>'
+
+# --- terminal but missing/empty result.md -> exit 11 ---
+
+Write-Host "Invoke-CcodexReadCommand: done job with missing result.md -> exit 11"
+$jobReadNoResult = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0
+$resultReadNoResult = Invoke-CcodexReadCommand -JobId $jobReadNoResult.JobId -StateRoot $localAppData
+Assert-Equal $resultReadNoResult.WrapperExitCode 11 'done job with missing result.md -> exit 11'
+Assert-True (-not [string]::IsNullOrEmpty($resultReadNoResult.Message)) 'missing-result job returns a diagnostic message'
+Assert-True ([string]::IsNullOrEmpty($resultReadNoResult.Stdout)) 'missing-result job returns no stdout content'
+
+Write-Host "Invoke-CcodexReadCommand: failed job with empty result.md -> exit 11"
+$jobReadFailedEmpty = New-CcodexTestJobWithStatus -Status 'failed' -CodexExitCode 1 -WrapperExitCode 10
+Write-CcodexTextFile -Path (Join-Path $jobReadFailedEmpty.JobDir 'result.md') -Content '   '
+$resultReadFailedEmpty = Invoke-CcodexReadCommand -JobId $jobReadFailedEmpty.JobId -StateRoot $localAppData
+Assert-Equal $resultReadFailedEmpty.WrapperExitCode 11 'failed job with empty result.md -> exit 11'
+
+# --- unknown job id -> exit 3 ---
+
+Write-Host "Invoke-CcodexReadCommand: unknown job id -> exit 3"
+$resultReadUnknown = Invoke-CcodexReadCommand -JobId 'does-not-exist-99999' -StateRoot $localAppData
+Assert-Equal $resultReadUnknown.WrapperExitCode 3 'unknown job id -> exit 3'
+Assert-True (-not [string]::IsNullOrEmpty($resultReadUnknown.Message)) 'unknown job id returns a diagnostic message'
+
+# --- shell-level: pwsh -File ccodex.ps1 read <id> --state-root ... ---
+
+Write-Host "shell-level: ccodex.ps1 read <id> --state-root <root> on a running job -> exit 4, no result content"
+$jobReadShellRunning = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+$shellReadRunningOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read $jobReadShellRunning.JobId --state-root $localAppData
+$shellReadRunningExit = $LASTEXITCODE
+Assert-Equal $shellReadRunningExit 4 'shell-level read on running job exits 4'
+$shellReadRunningLines = @($shellReadRunningOut | Where-Object { $_ -ne $null -and $_ -ne '' })
+Assert-True (-not (($shellReadRunningLines -join "`n") -like '*the result*')) 'shell-level read on running job prints no result content'
+
+Write-Host "shell-level: ccodex.ps1 read <id> --state-root <root> prints result.md content, exit 0"
+$jobReadShell = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -WithResultFile
+$shellReadOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read $jobReadShell.JobId --state-root $localAppData
+$shellReadExit = $LASTEXITCODE
+Assert-Equal $shellReadExit 0 'shell-level read invocation exits 0'
+$shellReadOutLines = @($shellReadOut | Where-Object { $_ -ne $null -and $_ -ne '' })
+Assert-Equal $shellReadOutLines.Count 1 'shell-level read prints exactly one line'
+Assert-Equal $shellReadOutLines[0] 'the result' 'shell-level read prints the result.md content'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
