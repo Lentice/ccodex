@@ -104,7 +104,9 @@ Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 `result.md` under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`, plus an index entry at
 `%LOCALAPPDATA%\ccodex\index\<job_id>.json` that lets `status`/`wait`/`read` find the job from any
 directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
-`submit`/`worker`), `backend_id`, `started_at`, and `finished_at`.
+`submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,
+`codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, and `terminated_at` (see "Failure
+classes" and "Hard timeout" below).
 
 ### Exit codes
 
@@ -121,9 +123,47 @@ Callers can rely on these wrapper exit codes:
 | `12` | Wrapper-internal error (unexpected I/O/serialization failure). |
 | `20` | `wait` timed out (`--wait-timeout-sec`) before the job reached a terminal status; the job's lifecycle is unaffected — re-run `wait` to keep waiting. |
 | `23` | The background worker failed to launch, or never stamped a startup sentinel, during `submit`. |
+| `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
 
-Codes `21`, `22`, and `24` are reserved for Phase 2b (`cancel`/`tail`/`debug`) and are not produced
-today.
+Codes `21` and `22` are reserved for Phase 2b (`cancel`/`tail`) and are not produced today.
+
+### Failure classes
+
+When `codex exec` itself fails (wrapper exit `10`) or a pre-launch internal failure occurs
+(exit `12`), `status.json` may carry a `failure_reason` — a conservative, best-effort HINT
+derived from matching known signatures in the tail of `stderr.log` and any `"error"`-bearing
+event lines. It is never stamped on a successful run, and exit codes remain authoritative;
+treat `failure_reason` as a shortcut to the right reaction, not a guarantee:
+
+| `failure_reason` | Meaning | Recommended reaction |
+| ---- | ------- | ------- |
+| `quota_or_rate_limit` | Codex usage/rate limit reached (signature: `usage limit`, `rate limit`, `quota`, `429`). | Report to the user; do not auto-retry. |
+| `auth` | Codex auth/credential problem (signature: `login`, `auth`, `401`, `unauthorized`, `credential`). | Suggest running `codex login`. |
+| `permission_or_sandbox` | Sandbox or approval denial (signature: `sandbox`, `denied`, `approval`, `permission`). | Consider `--access workspace` or narrow the task. |
+| `network` | Transient network failure (signature: `network`, `connection`, `dns`, `502`, `503`). | One retry is safe. |
+| *(absent)* | No recognized signature, or the run succeeded. | Fall back to the exit code and `error` message. |
+
+Classification precedence when multiple signatures are present in the same failure: quota beats
+auth beats permission beats network. `status.json` also records `codex_thread_id` (the Codex
+`thread_id`, captured on both success and failure whenever the events log carries one) for
+future resume/debugging use.
+
+### Hard timeout
+
+Pass `--hard-timeout-sec <n>` to `run` or `submit` to bound how long Codex is allowed to run
+before the wrapper kills its whole process tree:
+
+```powershell
+"Run the full test suite." | ccodex run --mode test --access workspace --hard-timeout-sec 120
+"Run the full test suite." | ccodex submit --mode test --access workspace --hard-timeout-sec 120
+```
+
+On expiry the job becomes terminal `timed_out` with `timeout_reason` (e.g.
+`hard_timeout_sec=120 exceeded`) and `terminated_at` recorded in `status.json`,
+`codex_exit_code` stays `null` (Codex never produced one), and the wrapper/`wait` exit code is
+`24`. All artifacts (`prompt.md`, `codex-events.jsonl`, `stderr.log`, `status.json`) are kept for
+inspection. The default is `0`, meaning no hard timeout is applied — a quiet job is not assumed
+dead.
 
 ### Long-running or parallel work
 

@@ -55,6 +55,28 @@ conversation.
    | `12` | Wrapper-internal error. |
    | `20` | `wait` timed out; the job is still running — re-run `wait` to keep waiting. |
    | `23` | The background worker failed to start. |
+   | `24` | The job hit `--hard-timeout-sec` and was killed. |
 
-5. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
+5. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
+   `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
+   react accordingly:
+
+   | Signal | Reaction |
+   | --- | --- |
+   | `10` + `failure_reason: quota_or_rate_limit` | Report the limit to the user; do not auto-retry. |
+   | `10` + `failure_reason: auth` | Suggest the user run `codex login`. |
+   | `10` + `failure_reason: network` | Safe to retry once. |
+   | `10` + `failure_reason` absent | Read `error` in `status.json` / stderr; use judgment. |
+   | `24` (`timed_out`) | Raise `--hard-timeout-sec` or split the task into smaller pieces; don't just retry unchanged. |
+   | `20` | The job is still running — re-run `wait` rather than treating it as failed. |
+   | `23` | Backend/environment issue — inspect the job directory (`status.json`, `stderr.log`) before retrying. |
+
+   For long-running work, pass `--hard-timeout-sec <n>` on `run`/`submit` to bound how long Codex
+   may run before the wrapper kills it:
+
+   ```powershell
+   "<task text>" | ccodex run --mode test --access workspace --hard-timeout-sec 120
+   ```
+
+6. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.
