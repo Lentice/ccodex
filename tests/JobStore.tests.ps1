@@ -52,6 +52,15 @@ Assert-Equal $statusKeys[$createdAtIndex + 2] 'backend_id' 'backend_id key follo
 Assert-Equal $statusKeys[$createdAtIndex + 3] 'started_at' 'started_at key follows backend_id'
 Assert-Equal $statusKeys[$createdAtIndex + 4] 'finished_at' 'finished_at key follows started_at'
 
+Write-Host "New-CcodexStatusObject defaults FailureReason/CodexThreadId to null/absent"
+Assert-True ([string]::IsNullOrEmpty($status.failure_reason)) 'failure_reason defaults to null when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.codex_thread_id)) 'codex_thread_id defaults to null when not specified'
+
+Write-Host "New-CcodexStatusObject round-trips FailureReason and CodexThreadId"
+$status3 = New-CcodexStatusObject -JobId 'job3' -Status 'failed' -Mode 'review' -Access 'read-only' -Repo 'D:\Repo' -CreatedAt '2026-07-05T00:00:00Z' -FailureReason 'quota_or_rate_limit' -CodexThreadId 'thread-abc-123'
+Assert-Equal $status3.failure_reason 'quota_or_rate_limit' 'failure_reason round-trips'
+Assert-Equal $status3.codex_thread_id 'thread-abc-123' 'codex_thread_id round-trips'
+
 Write-Host "New-CcodexDebugObject"
 $debugObj = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'review' -Access 'read-only' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec')
 Assert-Equal $debugObj.backend 'sync' 'debug object records sync backend'

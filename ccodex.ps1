@@ -40,12 +40,57 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\WorkerPrompt.ps1')
 . (Join-Path $PSScriptRoot 'lib\ModeAccess.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobStore.ps1')
+. (Join-Path $PSScriptRoot 'lib\FailureClassify.ps1')
 . (Join-Path $PSScriptRoot 'lib\CodexInvoke.ps1')
 . (Join-Path $PSScriptRoot 'lib\ResultValidation.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobIndex.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
+
+function Complete-CcodexInternalFailure {
+    # A wrapper-internal failure after the job dir is reserved (codex path
+    # resolution, or the launch/process step itself in the execution core, or
+    # codex-path resolution inside `submit` before any worker is launched)
+    # must still leave the design's completion evidence: a worker-complete.json
+    # and a terminal failed status.json, both stamped wrapper_exit_code=12.
+    # codex_exit_code stays null because Codex never produced one. A job must
+    # never remain at a non-terminal status (e.g. `created`) after this runs.
+    # Shared by the execution core and `submit`; each caller is the sole
+    # active writer for JobDir at the point it calls this, so writing
+    # status.json/worker-complete.json here is single-writer-safe.
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Mode,
+        [Parameter(Mandatory)][string]$Access,
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$CreatedAt,
+        [Parameter(Mandatory)][string]$Message,
+        [string]$Backend = 'sync',
+        [string]$BackendId = $null,
+        [string]$StartedAt = $null,
+        [string]$ResultPath = $null,
+        [string]$EventsPath = $null,
+        [string]$StderrPath = $null
+    )
+    $completedAt = (Get-Date).ToString('o')
+    $resultPresent = $false
+    if ($ResultPath) {
+        try { $resultPresent = Test-Path -LiteralPath $ResultPath -PathType Leaf } catch { $resultPresent = $false }
+    }
+    $completeObj = New-CcodexWorkerCompleteObject -JobId $JobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
+    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $completeObj
+
+    $failureReason = Get-CcodexFailureReason -CodexExitCode $null -StderrPath $StderrPath -EventsPath $EventsPath
+    $codexThreadId = Get-CcodexCodexThreadId -EventsPath $EventsPath
+    $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
+    $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
+
+    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId
+    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
+    return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $hintedMessage`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
+}
 
 function Invoke-CcodexJobExecution {
     # Shared execution core for both the synchronous `run` path and the
@@ -69,29 +114,20 @@ function Invoke-CcodexJobExecution {
 
     $jobId = Split-Path -Leaf $JobDir
     $resultPath = Join-Path $JobDir 'result.md'
+    $eventsPath = Join-Path $JobDir 'codex-events.jsonl'
+    $stderrPath = Join-Path $JobDir 'stderr.log'
+    $exitCodeFilePath = Join-Path $JobDir 'exit_code.txt'
 
-    function Complete-CcodexInternalFailure {
-        # A wrapper-internal failure after the job dir is reserved (codex path
-        # resolution or the launch/process step itself) must still leave the
-        # design's completion evidence: a worker-complete.json and a terminal
-        # failed status.json, both stamped wrapper_exit_code=12. codex_exit_code
-        # stays null because Codex never produced one.
-        param([string]$Message)
-        $completedAt = (Get-Date).ToString('o')
-        try {
-            $resultPresent = Test-Path -LiteralPath $resultPath -PathType Leaf
-        } catch { $resultPresent = $false }
-        $completeObj = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
-        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $completeObj
-        $statusObj = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $Message -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt
-        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
-        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $Message`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
+    $internalFailureParams = @{
+        JobDir = $JobDir; JobId = $jobId; Mode = $Mode; Access = $Access; RepoRoot = $RepoRoot
+        CreatedAt = $CreatedAt; Backend = $Backend; BackendId = $BackendId; StartedAt = $StartedAt
+        ResultPath = $resultPath; EventsPath = $eventsPath; StderrPath = $stderrPath
     }
 
     try {
         $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
     } catch {
-        return Complete-CcodexInternalFailure -Message $_.Exception.Message
+        return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
     $codexArgs = Build-CcodexCodexArgs -Access $Access -RepoRoot $RepoRoot -ResultPath $resultPath
 
@@ -99,14 +135,10 @@ function Invoke-CcodexJobExecution {
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt)
 
-    $eventsPath = Join-Path $JobDir 'codex-events.jsonl'
-    $stderrPath = Join-Path $JobDir 'stderr.log'
-    $exitCodeFilePath = Join-Path $JobDir 'exit_code.txt'
-
     try {
         $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath
     } catch {
-        return Complete-CcodexInternalFailure -Message $_.Exception.Message
+        return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
 
     $preliminaryComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate $(if ($codexExitCode -eq 0) { 'done' } else { 'failed' }) -CodexExitCode $codexExitCode -WrapperExitCode $null -ResultPresent (Test-Path -LiteralPath $resultPath -PathType Leaf) -CompletedAt (Get-Date).ToString('o')
@@ -118,14 +150,23 @@ function Invoke-CcodexJobExecution {
     $finalComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate $validation.Status -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -ResultPresent $validation.ResultPresent -CompletedAt $finishedAt
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $finalComplete
 
-    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt
+    # failure_reason is only ever stamped on a failure terminal status (never
+    # on a successful run); codex_thread_id is stamped whenever present,
+    # regardless of success/failure (design: "stamp codex_thread_id on BOTH
+    # success and failure whenever present").
+    $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
+
+    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $finalStatusObj
 
     if ($validation.WrapperExitCode -eq 0) {
         return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null; CodexExitCode = $codexExitCode; Status = $validation.Status }
     }
 
+    $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $failureMessage = "ccodex: job $jobId $($validation.Status) (codex_exit_code=$codexExitCode, wrapper_exit_code=$($validation.WrapperExitCode))`n  job dir: $JobDir`n  result:  $resultPath"
+    if ($hintLine) { $failureMessage += "`n  $hintLine" }
     return [pscustomobject]@{ WrapperExitCode = $validation.WrapperExitCode; Stdout = $null; Message = $failureMessage; CodexExitCode = $codexExitCode; Status = $validation.Status }
 }
 
@@ -286,8 +327,24 @@ function Invoke-CcodexSubmit {
 
     try {
         $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
+        # An explicit -CodexPath override is trusted verbatim by the sync `run`
+        # path (which discovers a bad path via the process-launch failure once
+        # it tries to invoke Codex). `submit` never invokes Codex itself — it
+        # only hands off to a detached worker — so a bad codex path must be
+        # caught HERE, before that hand-off, or the job would launch a worker
+        # doomed to fail asynchronously while `submit` itself reports success.
+        if (-not (Test-Path -LiteralPath $resolvedCodexPath -PathType Leaf)) {
+            throw "could not find an executable codex at path: $resolvedCodexPath"
+        }
     } catch {
-        $message = "ccodex: internal error: $($_.Exception.Message)`n  job:      $jobId`n  job dir:  $jobDir"
+        # Dogfood finding #1: a job must never remain at `created` after a
+        # known-fatal internal failure. Write terminal failure evidence
+        # (status.json + worker-complete.json) before returning — submit is
+        # the sole active writer for jobDir at this point (no worker has been
+        # launched yet), so this is single-writer-safe.
+        $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $init.ResolvedAccess `
+            -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath
+        $message = "$($failure.Message)`n  job:      $jobId"
         return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
     }
 

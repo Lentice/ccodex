@@ -40,7 +40,9 @@ function New-CcodexStatusObject {
         [string]$Backend = 'sync',
         [string]$BackendId = $null,
         [string]$StartedAt = $null,
-        [string]$FinishedAt = $null
+        [string]$FinishedAt = $null,
+        [string]$FailureReason = $null,
+        [string]$CodexThreadId = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -58,6 +60,8 @@ function New-CcodexStatusObject {
         codex_exit_code   = $CodexExitCode
         wrapper_exit_code = $WrapperExitCode
         error             = $ErrorMessage
+        failure_reason    = $FailureReason
+        codex_thread_id   = $CodexThreadId
     }
 }
 

@@ -144,5 +144,26 @@ try {
     Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 }
 
+# --- (f) nonexistent --codex-path fails pre-launch: never leaves the job stuck at created ---
+
+Write-Host "Invoke-CcodexSubmit: nonexistent --codex-path fails pre-launch with 12, writes terminal failed status.json + worker-complete.json, no worker launched"
+$missingCodexPath = Join-Path $tempRoot 'no-such-codex.exe'
+$resultF = Invoke-CcodexSubmitForTest -Overrides @{ CodexPath = $missingCodexPath }
+Assert-Equal $resultF.WrapperExitCode 12 'wrapper exit code is 12 when the codex path cannot be resolved/launched'
+Assert-True (-not [string]::IsNullOrEmpty($resultF.JobDir)) 'job dir was still reserved before the codex-path failure'
+$statusF = Get-Content -LiteralPath (Join-Path $resultF.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusF.status 'failed' 'submit pre-launch codex-path failure leaves a terminal failed status.json (never stuck at created)'
+Assert-Equal $statusF.wrapper_exit_code 12 'terminal failed status.json records wrapper_exit_code 12'
+Assert-True (Test-Path -LiteralPath (Join-Path $resultF.JobDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json evidence is written pre-launch on codex-path failure'
+$completeF = Get-Content -LiteralPath (Join-Path $resultF.JobDir 'worker-complete.json') -Raw | ConvertFrom-Json
+Assert-Equal $completeF.status_candidate 'failed' 'worker-complete.json status_candidate is failed'
+Assert-Equal $completeF.wrapper_exit_code 12 'worker-complete.json records wrapper_exit_code 12'
+
+$statusResultF = Invoke-CcodexStatusCommand -JobId $resultF.JobId -StateRoot $localAppData
+Assert-True ($statusResultF.Stdout -like "*failed*") 'status command reports failed, not created, after the submit fix'
+
+$readResultF = Invoke-CcodexReadCommand -JobId $resultF.JobId -StateRoot $localAppData
+Assert-Equal $readResultF.WrapperExitCode 11 'read exits 11 for a terminal failed job with no result.md'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
