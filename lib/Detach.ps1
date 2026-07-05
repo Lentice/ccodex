@@ -19,6 +19,28 @@
 # treats the launch as successful. Callers map both launch failures (Start-CcodexDetachedWorker
 # throwing) and sentinel timeouts (Wait-CcodexWorkerLaunch throwing) to wrapper exit code 23.
 
+function Get-CcodexWorkerArgumentLine {
+    # Shared quoting builder for the worker launch command line: `worker --job-id <id>`
+    # plus the optional `--state-root`/`--codex-path` overrides, hand-quoted exactly once
+    # here. ScriptPath/StateRoot/CodexPath are always wrapped in double quotes (harmless
+    # for space-free paths, load-bearing for paths that contain spaces); JobId is never
+    # quoted because job ids are wrapper-generated and never contain whitespace. Both the
+    # `cim` (raw Win32_Process CommandLine) and `startprocess` (Start-Process -ArgumentList)
+    # mechanisms below build their launch command from this SAME string so a space in
+    # StateRoot/CodexPath/ScriptPath can never be re-split into extra argv entries by
+    # either backend.
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot,
+        [string]$CodexPath
+    )
+    $line = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" worker --job-id $JobId"
+    if ($StateRoot) { $line += " --state-root `"$StateRoot`"" }
+    if ($CodexPath) { $line += " --codex-path `"$CodexPath`"" }
+    return $line
+}
+
 function Start-CcodexDetachedWorker {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
@@ -39,10 +61,10 @@ function Start-CcodexDetachedWorker {
         }
     }
 
+    $argumentLine = Get-CcodexWorkerArgumentLine -ScriptPath $ScriptPath -JobId $JobId -StateRoot $StateRoot -CodexPath $CodexPath
+
     if ($Mechanism -eq 'cim') {
-        $commandLine = "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" worker --job-id $JobId"
-        if ($StateRoot) { $commandLine += " --state-root `"$StateRoot`"" }
-        if ($CodexPath) { $commandLine += " --codex-path `"$CodexPath`"" }
+        $commandLine = "pwsh $argumentLine"
 
         $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
             CommandLine      = $commandLine
@@ -54,17 +76,19 @@ function Start-CcodexDetachedWorker {
         return [int]$result.ProcessId
     }
 
-    $argumentList = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath, 'worker', '--job-id', $JobId)
-    if ($StateRoot) { $argumentList += @('--state-root', $StateRoot) }
-    if ($CodexPath) { $argumentList += @('--codex-path', $CodexPath) }
-
     # Dogfood #3 (triaged false positive): -WindowStyle Hidden allocates the child its own
     # separate (hidden) console, rather than sharing the caller's console/stdout handles.
     # The worker's own stdout/stderr therefore cannot interleave with the submitting
     # process's stdout — Wait-CcodexWorkerLaunch/status polling, not shared streams, is how
     # the caller observes worker progress. tests/AsyncE2E.tests.ps1 asserts submit's stdout
     # is exactly the job-id/job-dir lines for this reason.
-    $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argumentList -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+    #
+    # -ArgumentList is passed a SINGLE pre-quoted string (not a string[] of raw elements):
+    # Start-Process joins a multi-element -ArgumentList with plain spaces and quotes
+    # nothing, so a StateRoot/CodexPath containing a space would otherwise be re-split into
+    # extra argv entries by the child process. Passing the whole already-quoted line as one
+    # element sidesteps that re-join entirely, matching the `cim` command line exactly.
+    $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argumentLine -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
     return $proc.Id
 }
 

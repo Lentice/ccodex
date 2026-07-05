@@ -48,13 +48,31 @@ function Get-CcodexProjectConfig {
                 }
             }
             'review_min_changed_lines' {
-                $value = [int]$value
+                try {
+                    $value = [int]$value
+                } catch {
+                    throw "ccodex: invalid .ccodex/ccodex.json: delegation.review_min_changed_lines must be an integer: $($_.Exception.Message)"
+                }
             }
             'max_codex_calls_per_task' {
-                $value = [int]$value
+                try {
+                    $value = [int]$value
+                } catch {
+                    throw "ccodex: invalid .ccodex/ccodex.json: delegation.max_codex_calls_per_task must be an integer: $($_.Exception.Message)"
+                }
             }
             'review_default_paths' {
+                # `@()` alone never throws (it happily wraps a bad scalar/object into a
+                # bogus 1-element array instead of rejecting it), so the array-of-strings
+                # contract needs an explicit element check. This also tolerates the known
+                # ConvertFrom-Json quirk where a single-element JSON array of strings
+                # unwraps to a bare string: @('lib/') round-trips through here unchanged.
                 $value = @($value)
+                foreach ($item in $value) {
+                    if ($item -isnot [string]) {
+                        throw "ccodex: invalid .ccodex/ccodex.json: delegation.review_default_paths must be an array of strings."
+                    }
+                }
             }
         }
 

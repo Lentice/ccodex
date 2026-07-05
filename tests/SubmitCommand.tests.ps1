@@ -165,5 +165,29 @@ Assert-True ($statusResultF.Stdout -like "*failed*") 'status command reports fai
 $readResultF = Invoke-CcodexReadCommand -JobId $resultF.JobId -StateRoot $localAppData
 Assert-Equal $readResultF.WrapperExitCode 11 'read exits 11 for a terminal failed job with no result.md'
 
+# --- (g) shell-level: submit --hard-timeout-sec -1 / non-numeric is a usage error (exit 2) ---
+
+Write-Host "ConvertTo-CcodexHardTimeoutSec: 0 and positive integers parse; negative/non-numeric throw naming the flag"
+Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '0') 0 '0 (never) parses as a valid value'
+Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '120') 120 'a positive integer parses through unchanged'
+Assert-Throws { ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '-1' } 'a negative value throws instead of silently becoming 0/never'
+Assert-True ($script:CcodexLastError -like '*--hard-timeout-sec*') 'the negative-value error names the flag'
+Assert-Throws { ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText 'abc' } 'non-numeric text throws instead of an unrelated internal error'
+Assert-True ($script:CcodexLastError -like '*--hard-timeout-sec*') 'the non-numeric-value error names the flag'
+
+Write-Host "shell-level: submit --hard-timeout-sec -1 / non-numeric is a usage error (exit 2), no worker ever launched"
+# Dispatcher-level check (mirrors RunCommand.tests.ps1): the flag-parsing/validation lives
+# in ccodex.ps1's own `switch ($Command)` block, before Invoke-CcodexSubmit is ever called,
+# so it can only be exercised through a real process invocation. --state-root/--codex-path
+# are passed defensively (never the real profile / never a real codex launch) in case
+# validation regresses and control falls through to job creation.
+$negativeSubmitOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --hard-timeout-sec -1
+Assert-Equal $LASTEXITCODE 2 'submit --hard-timeout-sec -1 exits 2'
+Assert-True ((($negativeSubmitOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (negative value)'
+
+$nonNumericSubmitOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --hard-timeout-sec abc
+Assert-Equal $LASTEXITCODE 2 'submit --hard-timeout-sec abc exits 2'
+Assert-True ((($nonNumericSubmitOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (non-numeric value)'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests

@@ -135,4 +135,70 @@ try {
     Remove-Item -Recurse -Force $repoRoot
 }
 
+Write-Host "non-numeric review_min_changed_lines throws the friendly contract message, not a raw cast error"
+$repoRoot = New-CcodexTempRepo
+try {
+    New-Item -ItemType Directory -Path (Join-Path $repoRoot '.ccodex') -Force | Out-Null
+    $json = @'
+{
+  "delegation": {
+    "review_min_changed_lines": "abc"
+  }
+}
+'@
+    Set-Content -Path (Join-Path $repoRoot '.ccodex/ccodex.json') -Value $json -NoNewline -Encoding utf8
+    Assert-Throws { Get-CcodexProjectConfig -RepoRoot $repoRoot } 'non-numeric review_min_changed_lines throws'
+    try {
+        Get-CcodexProjectConfig -RepoRoot $repoRoot
+    } catch {
+        Assert-True ($_.Exception.Message -like 'ccodex: invalid .ccodex/ccodex.json:*') 'error message has the expected prefix'
+    }
+} finally {
+    Remove-Item -Recurse -Force $repoRoot
+}
+
+Write-Host "non-numeric max_codex_calls_per_task throws the friendly contract message, not a raw cast error"
+$repoRoot = New-CcodexTempRepo
+try {
+    New-Item -ItemType Directory -Path (Join-Path $repoRoot '.ccodex') -Force | Out-Null
+    $json = @'
+{
+  "delegation": {
+    "max_codex_calls_per_task": "nope"
+  }
+}
+'@
+    Set-Content -Path (Join-Path $repoRoot '.ccodex/ccodex.json') -Value $json -NoNewline -Encoding utf8
+    Assert-Throws { Get-CcodexProjectConfig -RepoRoot $repoRoot } 'non-numeric max_codex_calls_per_task throws'
+    try {
+        Get-CcodexProjectConfig -RepoRoot $repoRoot
+    } catch {
+        Assert-True ($_.Exception.Message -like 'ccodex: invalid .ccodex/ccodex.json:*') 'error message has the expected prefix'
+    }
+} finally {
+    Remove-Item -Recurse -Force $repoRoot
+}
+
+Write-Host "non-array review_default_paths throws the friendly contract message, not a raw cast error"
+$repoRoot = New-CcodexTempRepo
+try {
+    New-Item -ItemType Directory -Path (Join-Path $repoRoot '.ccodex') -Force | Out-Null
+    $json = @'
+{
+  "delegation": {
+    "review_default_paths": { "not": "an array" }
+  }
+}
+'@
+    Set-Content -Path (Join-Path $repoRoot '.ccodex/ccodex.json') -Value $json -NoNewline -Encoding utf8
+    Assert-Throws { Get-CcodexProjectConfig -RepoRoot $repoRoot } 'non-array review_default_paths throws'
+    try {
+        Get-CcodexProjectConfig -RepoRoot $repoRoot
+    } catch {
+        Assert-True ($_.Exception.Message -like 'ccodex: invalid .ccodex/ccodex.json:*') 'error message has the expected prefix'
+    }
+} finally {
+    Remove-Item -Recurse -Force $repoRoot
+}
+
 Complete-CcodexTests

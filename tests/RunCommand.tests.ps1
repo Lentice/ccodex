@@ -23,6 +23,7 @@ $repoRoot = Join-Path $tempRoot 'repo'
 New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
 
 $fixtureCmd = Join-Path $PSScriptRoot 'fixtures\fake-codex.cmd'
+$ccodexScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\ccodex.ps1')).Path
 
 function Invoke-CcodexRunForTest {
     param([hashtable]$Overrides = @{})
@@ -123,6 +124,41 @@ $timeoutComplete = Get-Content -LiteralPath (Join-Path $timeoutDir 'worker-compl
 Assert-Equal $timeoutComplete.status_candidate 'timed_out' 'worker-complete.json status_candidate is timed_out'
 Assert-Equal $timeoutComplete.wrapper_exit_code 24 'worker-complete.json records wrapper_exit_code 24'
 Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "ConvertTo-CcodexHardTimeoutSec: 0 and positive integers parse; negative/non-numeric throw naming the flag"
+Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '0') 0 '0 (never) parses as a valid value'
+Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '120') 120 'a positive integer parses through unchanged'
+Assert-Throws { ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '-1' } 'a negative value throws instead of silently becoming 0/never'
+Assert-True ($script:CcodexLastError -like '*--hard-timeout-sec*') 'the negative-value error names the flag'
+Assert-Throws { ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText 'abc' } 'non-numeric text throws instead of an unrelated internal error'
+Assert-True ($script:CcodexLastError -like '*--hard-timeout-sec*') 'the non-numeric-value error names the flag'
+
+Write-Host "shell-level: run --hard-timeout-sec -1 / non-numeric is a usage error (exit 2), never reaches codex"
+# Dispatcher-level check: the flag-parsing/validation lives in ccodex.ps1's own `switch
+# ($Command)` block (before Invoke-CcodexRun is ever called), so it can only be exercised
+# through a real process invocation, not through Invoke-CcodexRun directly (that function
+# already takes a typed [int]$HardTimeoutSec, hence the direct ConvertTo-CcodexHardTimeoutSec
+# unit test above for the parsing rule itself). LOCALAPPDATA/APPDATA are still pointed at the
+# temp roots (never the real profile) purely as a defensive measure in case validation
+# regresses and control falls through to job creation; stdin is piped so a regression can
+# never block waiting for interactive input either.
+$savedLocalAppDataForHardTimeout = $env:LOCALAPPDATA
+$savedAppDataForHardTimeout = $env:APPDATA
+try {
+    $env:LOCALAPPDATA = $localAppData
+    $env:APPDATA = $appData
+
+    $negativeOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --hard-timeout-sec -1
+    Assert-Equal $LASTEXITCODE 2 '--hard-timeout-sec -1 exits 2'
+    Assert-True ((($negativeOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (negative value)'
+
+    $nonNumericOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --hard-timeout-sec abc
+    Assert-Equal $LASTEXITCODE 2 '--hard-timeout-sec abc exits 2'
+    Assert-True ((($nonNumericOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (non-numeric value)'
+} finally {
+    $env:LOCALAPPDATA = $savedLocalAppDataForHardTimeout
+    $env:APPDATA = $savedAppDataForHardTimeout
+}
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force

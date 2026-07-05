@@ -29,18 +29,20 @@ function New-CcodexTestJob {
     param(
         [string]$Mode = 'review',
         [string]$Access = 'read-only',
-        [string]$PromptContent = 'test worker prompt body'
+        [string]$PromptContent = 'test worker prompt body',
+        [string]$Root = $localAppData,
+        [string]$RepoRoot = $targetRepo
     )
-    $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
-    $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
+    $repoKey = Get-CcodexRepoKey -RepoRoot $RepoRoot
+    $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $Root
     $jobId = $reservation.JobId
     $jobDir = $reservation.JobDir
-    $indexPath = Get-CcodexIndexPath -JobId $jobId -Root $localAppData
+    $indexPath = Get-CcodexIndexPath -JobId $jobId -Root $Root
     New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $PromptContent
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt)
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $createdAt)
     return [pscustomobject]@{ JobId = $jobId; JobDir = $jobDir }
 }
 
@@ -143,6 +145,50 @@ try {
     # Per the task brief, unavailability of CIM in the test environment must fail loudly,
     # never be silently skipped.
     Assert-True $false "cim mechanism smoke failed loudly: $($_.Exception.Message)"
+}
+
+# --- (d) startprocess regression: --state-root under a space-bearing directory ---
+#
+# Reproduces the bug directly: Start-Process -ArgumentList used to take a raw string[]
+# and let Start-Process join it with plain spaces (no quoting), so a StateRoot containing
+# a space was re-split by the child process into two argv entries, corrupting --state-root.
+# The worker would then either fail to parse its args or write status.json under the WRONG
+# (truncated) state root, so the sentinel below would time out waiting for it to move off
+# 'created'. A pass here proves the fix's shared quoting builder is actually wired in.
+
+Write-Host "Start-CcodexDetachedWorker (startprocess): a space in --state-root is not re-split into extra args"
+$spaceRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex detach space test $([Guid]::NewGuid().ToString('N'))"
+$spaceLocalAppData = Join-Path $spaceRoot 'Local'
+$spaceTargetRepo = Join-Path $spaceRoot 'repo'
+New-Item -ItemType Directory -Path $spaceLocalAppData, $spaceTargetRepo -Force | Out-Null
+Assert-True ($spaceLocalAppData -match '\s') 'sanity: the space-bearing state root actually contains whitespace'
+
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'DETACH SPACE ROOT OK'
+$jobD = New-CcodexTestJob -Root $spaceLocalAppData -RepoRoot $spaceTargetRepo
+
+try {
+    $childPidD = Start-CcodexDetachedWorker -ScriptPath $ccodexPs -JobId $jobD.JobId -WorkingDirectory $spaceTargetRepo -StateRoot $spaceLocalAppData -CodexPath $fixtureCmd -Mechanism startprocess
+    Assert-True ($childPidD -gt 0) 'startprocess launch with a space-bearing state-root returns a positive child pid'
+
+    $launchStatusD = $null
+    try {
+        $launchStatusD = Wait-CcodexWorkerLaunch -JobDir $jobD.JobDir -TimeoutSec 20
+        Assert-True $true 'sentinel observed the worker move off created before timing out (space-bearing state-root)'
+    } catch {
+        Assert-True $false "sentinel unexpectedly timed out with a space-bearing state-root: $($_.Exception.Message)"
+    }
+    Assert-True ($launchStatusD -and $launchStatusD.status -ne 'created') 'sentinel-returned status is no longer created (space-bearing state-root)'
+
+    $terminalD = Wait-CcodexTestTerminalStatus -JobDir $jobD.JobDir -TimeoutSec 20
+    Assert-True ($terminalD -ne $null) 'job reached a terminal status object (space-bearing state-root)'
+    Assert-Equal $terminalD.status 'done' 'worker launched via startprocess with a space in --state-root reaches terminal done'
+
+    $resultMdD = Get-Content -LiteralPath (Join-Path $jobD.JobDir 'result.md') -Raw
+    Assert-True ($resultMdD -like '*DETACH SPACE ROOT OK*') 'result.md carries the fixture result content despite the space in --state-root'
+} finally {
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $spaceRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

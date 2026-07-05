@@ -44,8 +44,17 @@ function Build-CcodexReviewPrompt {
     $pathArgs = @()
     if ($Paths -and $Paths.Count -gt 0) { $pathArgs = @('--') + $Paths }
 
-    # Human-readable command line embedded in the prompt (and asserted by tests).
-    $diffCommand = (@('git', 'diff') + $selectorArgs + $pathArgs) -join ' '
+    # Human-readable command line embedded in the prompt (self-diff instruction AND the
+    # embed form's "produced by" line, both below). Any path containing whitespace is
+    # wrapped in double quotes so the rendered line reads unambiguously; $pathArgs itself
+    # (used for the real `git diff` invocation in the embed form further down) is passed
+    # as separate array elements straight to the process and is left unquoted there.
+    $displayPathArgs = @()
+    if ($Paths -and $Paths.Count -gt 0) {
+        $displayPaths = $Paths | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+        $displayPathArgs = @('--') + $displayPaths
+    }
+    $diffCommand = (@('git', 'diff') + $selectorArgs + $displayPathArgs) -join ' '
 
     $metaLines = @()
     if ($Intent) { $metaLines += "Change intent: $Intent" }
@@ -99,8 +108,8 @@ Diff:
 
 $diffOut
 
-Note: the embedded diff is capped at 100 KB; any file whose diff exceeds the cap is
-truncated with a per-file marker.
+Note: the embedded diff is capped at 100 KB total (the whole diff above, not per file); if
+the cap is exceeded, the diff is truncated at that point with a single marker.
 
 $metaBlock$instructions
 "@

@@ -39,6 +39,20 @@ $working = Build-CcodexReviewPrompt -Range $null -Staged $false -Working $true -
 Assert-True ($working -like '*git diff -- lib/*') 'working form embeds `git diff -- lib/`'
 Assert-True (-not ($working -like '*--staged*')) 'working form never mentions --staged'
 
+# --- Unit tests: whitespace-bearing paths are quoted in the rendered command -------
+
+Write-Host "self-diff form quotes a path containing whitespace"
+$spacePath = Build-CcodexReviewPrompt -Range 'abc..def' -Staged $false -Working $false -Paths @('lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $false -RepoRoot 'C:\repo'
+Assert-True ($spacePath -like '*git diff abc..def -- "lib/My File.ps1"*') 'path with whitespace is wrapped in double quotes in the rendered command'
+
+Write-Host "self-diff form quotes only the paths that contain whitespace, leaving normal paths bare"
+$mixedPaths = Build-CcodexReviewPrompt -Range 'abc..def' -Staged $false -Working $false -Paths @('lib/', 'lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $false -RepoRoot 'C:\repo'
+Assert-True ($mixedPaths -like '*git diff abc..def -- lib/ "lib/My File.ps1"*') 'normal paths stay unquoted while the whitespace-bearing path is quoted'
+
+Write-Host "embed form quotes a whitespace-bearing path in the 'produced by' line too"
+$embedSpace = Build-CcodexReviewPrompt -Range $null -Staged $false -Working $true -Paths @('lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $true -RepoRoot 'C:\repo'
+Assert-True ($embedSpace -like '*produced by: git diff -- "lib/My File.ps1"*') 'embed form quotes the whitespace-bearing path in the produced-by line'
+
 # --- Unit tests: validation --------------------------------------------------
 
 Write-Host "validation: exactly one of range/staged/working"
@@ -70,7 +84,8 @@ try {
     Assert-True ($embed -like '*git diff --stat*') 'embed form includes a git diff --stat block'
     Assert-True ($embed -like '*sample.txt*') 'embed stat/diff references the changed file'
     Assert-True ($embed -like '*line2-added*') 'embed form contains the actual added diff content'
-    Assert-True ($embed -like '*capped at 100 KB*') 'embed form carries the 100 KB cap note'
+    Assert-True ($embed -like '*capped at 100 KB total*') 'embed form carries the whole-diff 100 KB cap note'
+    Assert-True (-not ($embed -like '*per-file*')) 'cap note does not claim per-file truncation (the implementation caps the whole diff, not per file)'
 } finally {
     Set-Location ([System.IO.Path]::GetTempPath())
     Remove-Item -Recurse -Force -LiteralPath $gitRepo -ErrorAction SilentlyContinue

@@ -2,6 +2,7 @@
 . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 . (Join-Path $PSScriptRoot '..\lib\JobStore.ps1')
 . (Join-Path $PSScriptRoot '..\lib\ResultValidation.ps1')
+. (Join-Path $PSScriptRoot '..\lib\FailureClassify.ps1')
 . (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-jobstatus-test-$([Guid]::NewGuid().ToString('N'))"
@@ -198,6 +199,8 @@ Assert-Equal $rewrittenSuccess.job_id 'job1' 'rewritten status.json preserves jo
 Assert-Equal $rewrittenSuccess.mode 'review' 'rewritten status.json preserves mode'
 Assert-Equal $rewrittenSuccess.access 'read-only' 'rewritten status.json preserves access'
 Assert-Equal $rewrittenSuccess.repo 'D:\Repo' 'rewritten status.json preserves repo'
+Assert-Equal $rewrittenSuccess.failure_reason $null 'rewritten status.json failure_reason stays null on a successful reconciliation'
+Assert-Equal $rewrittenSuccess.codex_thread_id $null 'rewritten status.json codex_thread_id is null when no codex-events.jsonl is present'
 
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + exit_code.txt nonzero -> reconcile to failed with error"
 $dirDeadFailed = New-TestJobDir 'orphan-dead-failed'
@@ -217,6 +220,24 @@ Assert-Equal $rewrittenFailed.job_id 'job1' 'rewritten status.json preserves job
 Assert-Equal $rewrittenFailed.mode 'review' 'rewritten status.json preserves mode on failure path'
 Assert-Equal $rewrittenFailed.access 'read-only' 'rewritten status.json preserves access on failure path'
 Assert-Equal $rewrittenFailed.repo 'D:\Repo' 'rewritten status.json preserves repo on failure path'
+Assert-Equal $rewrittenFailed.failure_reason $null 'rewritten status.json failure_reason stays null when no stderr/events evidence carries a signature'
+Assert-Equal $rewrittenFailed.codex_thread_id $null 'rewritten status.json codex_thread_id is null when no codex-events.jsonl is present'
+
+Write-Host "Update-CcodexOrphanStatus: running + worker dead + failure evidence + stderr/events signatures -> reconciled status carries failure_reason and codex_thread_id"
+$dirDeadEvidenceSignals = New-TestJobDir 'orphan-dead-evidence-signals'
+$deadEvidenceSignalsStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadEvidenceSignals 'status.json') -Object $deadEvidenceSignalsStatus
+Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'exit_code.txt') -Content '1'
+Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'stderr.log') -Content 'Rate limit exceeded (429)'
+Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'codex-events.jsonl') -Content "{`"type`":`"thread.started`",`"thread_id`":`"thread-evidence-999`"}`n{`"type`":`"event`",`"msg`":`"other`"}"
+$resultDeadEvidenceSignals = Update-CcodexOrphanStatus -JobDir $dirDeadEvidenceSignals
+Assert-Equal $resultDeadEvidenceSignals.Status 'failed' 'dead worker w/ failure evidence + signatures reconciles to failed'
+Assert-Equal $resultDeadEvidenceSignals.Reconciled $true 'dead worker w/ failure evidence + signatures is reconciled'
+Assert-Equal $resultDeadEvidenceSignals.PossiblyStale $false 'reconciled failed w/ signatures is not possibly stale'
+$rewrittenEvidenceSignals = Get-Content -LiteralPath (Join-Path $dirDeadEvidenceSignals 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $rewrittenEvidenceSignals.status 'failed' 'rewritten status.json status is failed (evidence + signatures)'
+Assert-Equal $rewrittenEvidenceSignals.failure_reason 'quota_or_rate_limit' 'rewritten status.json carries failure_reason derived from the stderr.log signature'
+Assert-Equal $rewrittenEvidenceSignals.codex_thread_id 'thread-evidence-999' 'rewritten status.json carries codex_thread_id derived from codex-events.jsonl'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

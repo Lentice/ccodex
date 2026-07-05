@@ -572,6 +572,20 @@ function Get-CcodexArgValue {
     return $null
 }
 
+function ConvertTo-CcodexHardTimeoutSec {
+    # --hard-timeout-sec must be a non-negative whole number of seconds (0 = never). Before
+    # this guard, a negative value silently fell back to "never" (since only >0 is ever
+    # armed downstream) and non-numeric text threw a raw .NET cast error surfaced as an
+    # unrelated wrapper-internal failure (exit 12) instead of a usage error naming the
+    # flag. Both are usage errors now (exit 2), and 0 stays valid.
+    param([Parameter(Mandatory)][string]$FlagName, [Parameter(Mandatory)][string]$ValueText)
+    $parsed = 0
+    if (-not [int]::TryParse($ValueText, [ref]$parsed) -or $parsed -lt 0) {
+        throw "ccodex: $FlagName must be a non-negative whole number of seconds (0 = never); got '$ValueText'."
+    }
+    return $parsed
+}
+
 function Get-CcodexArgValues {
     # Repeatable-flag counterpart to Get-CcodexArgValue: collects EVERY value that
     # follows an occurrence of $FlagName in $args (e.g. `--path a --path b`). Always
@@ -609,7 +623,15 @@ try {
                 PipelineExpected = $false
                 PipelineObjects  = $null
             }
-            if ($runHardTimeoutSecText) { $runParams['HardTimeoutSec'] = [int]$runHardTimeoutSecText }
+            if ($runHardTimeoutSecText) {
+                try {
+                    $runParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $runHardTimeoutSecText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
             $runResult = Invoke-CcodexRun @runParams
             if ($runResult.WrapperExitCode -eq 0) {
                 Write-Output $runResult.Stdout
@@ -641,7 +663,15 @@ try {
             if ($submitStateRoot) { $submitParams['LocalAppDataRoot'] = $submitStateRoot }
             if ($submitCodexPath) { $submitParams['CodexPath'] = $submitCodexPath }
             if ($submitDetachMechanism) { $submitParams['DetachMechanism'] = $submitDetachMechanism }
-            if ($submitHardTimeoutSecText) { $submitParams['HardTimeoutSec'] = [int]$submitHardTimeoutSecText }
+            if ($submitHardTimeoutSecText) {
+                try {
+                    $submitParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $submitHardTimeoutSecText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
 
             $submitResult = Invoke-CcodexSubmit @submitParams
             if ($submitResult.WrapperExitCode -eq 0) {
