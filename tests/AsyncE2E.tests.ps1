@@ -219,6 +219,101 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $targetRepo '.ccodex'))) 'the target repo gained no .ccodex directory'
     $repoContents = Get-ChildItem -Path $targetRepo -Force
     Assert-Equal $repoContents.Count 0 'the target repo directory remains empty end-to-end'
+
+    # ============================================================
+    # (g) quota/rate-limit stderr signature + exit 1 -> wait exits 10, status.json
+    # carries failure_reason "quota_or_rate_limit" (Failure-mode handling amendment).
+    # ============================================================
+
+    Write-Host "shim: quota/rate-limit stderr signature + exit 1 -> wait exits 10, failure_reason quota_or_rate_limit"
+    $env:CCODEX_FAKE_EXIT_CODE = '1'
+    $env:CCODEX_FAKE_STDERR = 'Rate limit exceeded (429)'
+    Remove-Item Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+    $submitQuota = Invoke-CcodexShim -Arguments @('submit', '--mode', 'review', '--repo', $targetRepo, '--state-root', $localAppData, '--detach-mechanism', 'startprocess') -StdinText 'trigger a quota failure'
+    Assert-Equal $submitQuota.ExitCode 0 'quota-failure submit still exits 0 (submit only reserves/launches)'
+    $jobIdQuota = $submitQuota.Lines[0]
+
+    $pollQuota = Wait-CcodexShimStatus -JobId $jobIdQuota -TimeoutSec 20
+    Assert-Equal $pollQuota.Seen[$pollQuota.Seen.Count - 1] 'failed' 'status polling through the shim eventually reports failed'
+
+    $waitQuota = Invoke-CcodexShim -Arguments @('wait', $jobIdQuota, '--state-root', $localAppData)
+    Assert-Equal $waitQuota.ExitCode 10 'wait on the quota-failed job exits 10'
+
+    $jobDirQuota = Get-CcodexJobDir -RepoKey (Get-CcodexRepoKey -RepoRoot $targetRepo) -JobId $jobIdQuota -Root $localAppData
+    $statusQuota = Read-CcodexStatusFile -JobDir $jobDirQuota
+    Assert-Equal $statusQuota.failure_reason 'quota_or_rate_limit' 'status.json carries failure_reason quota_or_rate_limit'
+
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_STDERR -ErrorAction SilentlyContinue
+
+    # ============================================================
+    # (h) --hard-timeout-sec 1 against a sleeping fixture -> worker marks timed_out,
+    # wait exits 24, the codex child process is dead, artifacts are preserved.
+    # ============================================================
+
+    Write-Host "shim: --hard-timeout-sec 1 -> worker marks timed_out, wait exits 24, codex child killed, artifacts preserved"
+    $env:CCODEX_FAKE_EXIT_CODE = '0'
+    $env:CCODEX_FAKE_DELAY_MS = '8000'
+    Remove-Item Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+    $timeoutPidFile = Join-Path $tempRoot 'timeout-fake.pid'
+    $env:CCODEX_FAKE_PIDFILE = $timeoutPidFile
+
+    $submitTimeout = Invoke-CcodexShim -Arguments @('submit', '--mode', 'review', '--repo', $targetRepo, '--state-root', $localAppData, '--detach-mechanism', 'startprocess', '--hard-timeout-sec', '1') -StdinText 'trigger a hard timeout'
+    Assert-Equal $submitTimeout.ExitCode 0 'hard-timeout submit exits 0'
+    $jobIdTimeout = $submitTimeout.Lines[0]
+    $jobDirTimeout = Get-CcodexJobDir -RepoKey (Get-CcodexRepoKey -RepoRoot $targetRepo) -JobId $jobIdTimeout -Root $localAppData
+
+    $timeoutDeadline = (Get-Date).AddSeconds(20)
+    $statusTimeout = $null
+    while ((Get-Date) -lt $timeoutDeadline) {
+        $statusTimeout = Read-CcodexStatusFile -JobDir $jobDirTimeout
+        if ($statusTimeout.status -eq 'timed_out') { break }
+        Start-Sleep -Milliseconds 250
+    }
+    Assert-Equal $statusTimeout.status 'timed_out' 'the worker eventually marks the job timed_out'
+    Assert-True ($null -ne $statusTimeout.timeout_reason) 'status.json carries a timeout_reason'
+    Assert-True ($null -ne $statusTimeout.terminated_at) 'status.json carries a terminated_at'
+    Assert-True ($null -eq $statusTimeout.codex_exit_code) 'codex_exit_code stays null on a hard timeout'
+
+    $waitTimeout = Invoke-CcodexShim -Arguments @('wait', $jobIdTimeout, '--state-root', $localAppData)
+    Assert-Equal $waitTimeout.ExitCode 24 'wait on the timed_out job exits 24'
+
+    Assert-True (Test-Path -LiteralPath $timeoutPidFile -PathType Leaf) 'the fixture recorded its pid before the hard timeout killed it'
+    $timeoutChildPid = [int]((Get-Content -LiteralPath $timeoutPidFile -Raw).Trim())
+    $timeoutAliveDeadline = (Get-Date).AddSeconds(5)
+    $timeoutAlive = $true
+    while ((Get-Date) -lt $timeoutAliveDeadline) {
+        if (-not (Get-Process -Id $timeoutChildPid -ErrorAction SilentlyContinue)) { $timeoutAlive = $false; break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True (-not $timeoutAlive) 'the fake-codex child process is dead after the hard timeout'
+
+    foreach ($artifact in @('prompt.md', 'codex-events.jsonl', 'status.json')) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $jobDirTimeout $artifact) -PathType Leaf) "artifact $artifact is preserved after a hard timeout"
+    }
+
+    Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_PIDFILE -ErrorAction SilentlyContinue
+
+    # ============================================================
+    # (i) shim-level `run` with an auth-signature stderr + exit 1 -> failure message
+    # contains the `codex login` hint (run has no --state-root flag, so LOCALAPPDATA
+    # is overridden directly, matching RealInvocation.tests.ps1's pattern for `run`).
+    # ============================================================
+
+    Write-Host "shim: run with an auth-signature stderr + exit 1 -> exit 10, failure message hints codex login"
+    $savedLocalAppDataForRun = $env:LOCALAPPDATA
+    $env:LOCALAPPDATA = $localAppData
+    $env:CCODEX_FAKE_EXIT_CODE = '1'
+    $env:CCODEX_FAKE_STDERR = 'Authentication failed (401): please run codex login'
+    Remove-Item Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+    try {
+        $runAuth = Invoke-CcodexShim -Arguments @('run', '--mode', 'review', '--repo', $targetRepo) -StdinText 'trigger an auth failure'
+        Assert-Equal $runAuth.ExitCode 10 'run against an auth-signature failure exits 10'
+        Assert-True ($runAuth.Stdout -like '*codex login*') 'the failure message printed by run contains the codex login hint'
+    } finally {
+        $env:LOCALAPPDATA = $savedLocalAppDataForRun
+    }
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_STDERR -ErrorAction SilentlyContinue
 } finally {
     $env:PATH = $savedPath
     $env:APPDATA = $savedAppData

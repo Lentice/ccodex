@@ -14,7 +14,11 @@ if ($env:CCODEX_FAKE_PIDFILE) {
 }
 if ($env:CCODEX_FAKE_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CCODEX_FAKE_DELAY_MS) }
 Write-Output '{"type":"event","msg":"fake-codex ran"}'
-[Console]::Error.WriteLine('fake-codex stderr line')
+if ($env:CCODEX_FAKE_STDERR) {
+    [Console]::Error.WriteLine($env:CCODEX_FAKE_STDERR)
+} else {
+    [Console]::Error.WriteLine('fake-codex stderr line')
+}
 $exitCode = 0
 if ($env:CCODEX_FAKE_EXIT_CODE) { $exitCode = [int]$env:CCODEX_FAKE_EXIT_CODE }
 $resultText = if ($env:CCODEX_FAKE_RESULT) { $env:CCODEX_FAKE_RESULT } else { 'FAKE_RESULT_OK' }
