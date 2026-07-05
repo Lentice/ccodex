@@ -312,6 +312,39 @@ function Invoke-CcodexSubmit {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$jobId`n$jobDir"; JobDir = $jobDir; JobId = $jobId; Message = $null }
 }
 
+function Invoke-CcodexStatusCommand {
+    # Read-only lifecycle report for a job id, callable from any directory. Reconciles
+    # a narrowly-gated orphan (dead worker + completion evidence) via
+    # Update-CcodexOrphanStatus before composing the line; never writes otherwise.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $reconciliation = Update-CcodexOrphanStatus -JobDir $record.JobDir
+    $statusObj = Read-CcodexStatusFile -JobDir $record.JobDir
+
+    $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
+    if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+    if ($statusText -in @('done', 'failed')) {
+        $codexExitText = if ($null -eq $statusObj.codex_exit_code) { 'null' } else { $statusObj.codex_exit_code }
+        $wrapperExitText = if ($null -eq $statusObj.wrapper_exit_code) { 'null' } else { $statusObj.wrapper_exit_code }
+        $line = "$JobId $statusText codex_exit_code=$codexExitText wrapper_exit_code=$wrapperExitText"
+    } else {
+        $line = "$JobId $statusText"
+        if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
+    }
+
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $line; Message = $null }
+}
+
 function Get-CcodexArgValue {
     # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
     # hyphens that PowerShell's native named-parameter binder cannot match against a
@@ -398,8 +431,28 @@ try {
             }
             $exitCode = $workerResult.WrapperExitCode
         }
+        'status' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit` use for their task text). --state-root is a hidden test flag.
+            $statusJobId = $PositionalTask
+            $statusStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $statusJobId) {
+                Write-Host "ccodex: status requires a job id."
+                $exitCode = 2
+                break
+            }
+            $statusParams = @{ JobId = $statusJobId }
+            if ($statusStateRoot) { $statusParams['StateRoot'] = $statusStateRoot }
+            $statusResult = Invoke-CcodexStatusCommand @statusParams
+            if ($statusResult.WrapperExitCode -eq 0) {
+                Write-Output $statusResult.Stdout
+            } else {
+                Write-Host $statusResult.Message
+            }
+            $exitCode = $statusResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, worker."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, worker."
             $exitCode = 2
         }
     }
