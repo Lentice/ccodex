@@ -45,6 +45,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\JobIndex.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
+. (Join-Path $PSScriptRoot 'lib\Detach.ps1')
 
 function Invoke-CcodexJobExecution {
     # Shared execution core for both the synchronous `run` path and the
@@ -128,7 +129,15 @@ function Invoke-CcodexJobExecution {
     return [pscustomobject]@{ WrapperExitCode = $validation.WrapperExitCode; Stdout = $null; Message = $failureMessage; CodexExitCode = $codexExitCode; Status = $validation.Status }
 }
 
-function Invoke-CcodexRun {
+function Initialize-CcodexJob {
+    # Shared job-preparation core for both `run` (sync) and `submit` (native/detached).
+    # Covers everything from mode/access validation through prompt rendering and the
+    # initial status.json write. Callers receive JobId/JobDir/RepoRoot/ResolvedAccess/
+    # WorkerPrompt/CreatedAt on success (WrapperExitCode 0); usage-error paths return
+    # WrapperExitCode 2 with the exact same messages/status side effects as before this
+    # extraction (mode/repo failures precede job-dir reservation and touch no job state;
+    # access/prompt-source failures happen after reservation and write a terminal failed
+    # status.json, matching Complete-CcodexUsageError's prior behavior).
     param(
         [string]$Mode,
         [string]$Access,
@@ -137,20 +146,26 @@ function Invoke-CcodexRun {
         [string]$PositionalTask,
         [bool]$PipelineExpected,
         [object[]]$PipelineObjects,
-        [string]$CodexPath,
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
-        [string]$AppDataRoot = $env:APPDATA
+        [string]$AppDataRoot = $env:APPDATA,
+        [string]$InitialStatus = 'created',
+        [string]$Backend = 'sync'
     )
+
+    function Complete-CcodexInitFailure {
+        param([Nullable[int]]$WrapperExitCode = 2, [string]$Message)
+        return [pscustomobject]@{ WrapperExitCode = $WrapperExitCode; JobId = $null; JobDir = $null; RepoRoot = $null; ResolvedAccess = $null; WorkerPrompt = $null; CreatedAt = $null; Message = $Message }
+    }
 
     if (-not $Mode -or $Mode -notin @('review', 'brainstorm', 'test', 'implement')) {
         $message = "ccodex: --mode is required and must be one of: review, brainstorm, test, implement."
-        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $null; Message = $message }
+        return Complete-CcodexInitFailure -Message $message
     }
 
     try {
         $repoRoot = Resolve-CcodexRepo -RepoOverride $RepoOverride
     } catch {
-        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $null; Message = $_.Exception.Message }
+        return Complete-CcodexInitFailure -Message $_.Exception.Message
     }
 
     $repoKey = Get-CcodexRepoKey -RepoRoot $repoRoot
@@ -164,9 +179,9 @@ function Invoke-CcodexRun {
 
     function Complete-CcodexUsageError {
         param([string]$Message, [string]$AccessForStatus)
-        $statusObj = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $Mode -Access ($(if ($AccessForStatus) { $AccessForStatus } else { 'unknown' })) -Repo $repoRoot -CreatedAt $createdAt -WrapperExitCode 2 -ErrorMessage $Message
+        $statusObj = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $Mode -Access ($(if ($AccessForStatus) { $AccessForStatus } else { 'unknown' })) -Repo $repoRoot -CreatedAt $createdAt -WrapperExitCode 2 -ErrorMessage $Message -Backend $Backend
         Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
-        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $jobDir; Message = "$Message`n  job:      $jobId`n  job dir:  $jobDir" }
+        return [pscustomobject]@{ WrapperExitCode = 2; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $AccessForStatus; WorkerPrompt = $null; CreatedAt = $createdAt; Message = "$Message`n  job:      $jobId`n  job dir:  $jobDir" }
     }
 
     try {
@@ -197,9 +212,104 @@ function Invoke-CcodexRun {
     $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $repoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
 
-    $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $repoRoot -Mode $Mode -Access $resolvedAccess -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $createdAt
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend)
 
-    return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $jobDir; Message = $coreResult.Message }
+    return [pscustomobject]@{ WrapperExitCode = 0; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $workerPrompt; CreatedAt = $createdAt; Message = $null }
+}
+
+function Invoke-CcodexRun {
+    param(
+        [string]$Mode,
+        [string]$Access,
+        [string]$RepoOverride,
+        [string]$PromptFile,
+        [string]$PositionalTask,
+        [bool]$PipelineExpected,
+        [object[]]$PipelineObjects,
+        [string]$CodexPath,
+        [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
+        [string]$AppDataRoot = $env:APPDATA
+    )
+
+    $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
+        -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
+        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'sync'
+
+    if ($init.WrapperExitCode -ne 0) {
+        return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; Message = $init.Message }
+    }
+
+    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt
+
+    return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
+}
+
+function Invoke-CcodexSubmit {
+    # Asynchronous counterpart to Invoke-CcodexRun: prepares the job exactly as `run`
+    # does (backend 'native', initial status 'created'), writes command.txt/debug.json
+    # pre-launch so the job is diagnosable even if the worker never starts, then hands
+    # off to a detached `ccodex.ps1 worker --job-id <id>` process. Never invokes Codex
+    # itself and never passes prompt text on the launch command line — the worker reads
+    # prompt.md back out of the prepared job directory.
+    param(
+        [string]$Mode,
+        [string]$Access,
+        [string]$RepoOverride,
+        [string]$PromptFile,
+        [string]$PositionalTask,
+        [bool]$PipelineExpected,
+        [object[]]$PipelineObjects,
+        [ValidateSet('cim', 'startprocess')][string]$DetachMechanism = 'cim',
+        [string]$CodexPath,
+        [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
+        [string]$AppDataRoot = $env:APPDATA,
+        [int]$StartupTimeoutSec = 20,
+        # Test-support only: the production path always launches the currently-running
+        # ccodex.ps1 (via $PSCommandPath, which resolves to this file regardless of the
+        # caller's own script, since PowerShell binds it per script-defining file). Tests
+        # that need to force a deterministic startup-sentinel timeout (exit 23) without
+        # depending on a race against a real worker process point this at a stub script.
+        [string]$WorkerScriptPath = $PSCommandPath
+    )
+
+    $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
+        -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
+        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'native'
+
+    if ($init.WrapperExitCode -ne 0) {
+        return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; JobId = $init.JobId; Message = $init.Message }
+    }
+
+    $jobId = $init.JobId
+    $jobDir = $init.JobDir
+    $resultPath = Join-Path $jobDir 'result.md'
+
+    try {
+        $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
+    } catch {
+        $message = "ccodex: internal error: $($_.Exception.Message)`n  job:      $jobId`n  job dir:  $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
+    }
+
+    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $init.RepoRoot -ResultPath $resultPath
+    Write-CcodexTextFile -Path (Join-Path $jobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
+    Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $Mode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native')
+
+    $stateRootOverride = if ($PSBoundParameters.ContainsKey('LocalAppDataRoot')) { $LocalAppDataRoot } else { $null }
+    $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }
+
+    try {
+        Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
+            -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism | Out-Null
+        Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec | Out-Null
+    } catch {
+        # Do NOT rewrite status.json here: a slow-but-alive worker may still be starting,
+        # and the job must stay diagnosable in its current ('created') state.
+        $message = "ccodex: $($_.Exception.Message)`n  job:      $jobId`n  job dir:  $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 23; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
+    }
+
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$jobId`n$jobDir"; JobDir = $jobDir; JobId = $jobId; Message = $null }
 }
 
 function Get-CcodexArgValue {
@@ -237,6 +347,37 @@ try {
             }
             $exitCode = $runResult.WrapperExitCode
         }
+        'submit' {
+            # Mirrors `run`'s pipeline/stdin capture (see the header comment). --state-root,
+            # --codex-path, --detach-mechanism are hidden test-support flags; production calls
+            # never pass them, so LocalAppDataRoot/AppDataRoot default to the real
+            # LOCALAPPDATA/APPDATA and the detached worker is launched via `cim` with no
+            # env-var dependence.
+            $submitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+            $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
+
+            $submitParams = @{
+                Mode             = $Mode
+                Access           = $Access
+                RepoOverride     = $Repo
+                PromptFile       = $PromptFile
+                PositionalTask   = $PositionalTask
+                PipelineExpected = $false
+                PipelineObjects  = $null
+            }
+            if ($submitStateRoot) { $submitParams['LocalAppDataRoot'] = $submitStateRoot }
+            if ($submitCodexPath) { $submitParams['CodexPath'] = $submitCodexPath }
+            if ($submitDetachMechanism) { $submitParams['DetachMechanism'] = $submitDetachMechanism }
+
+            $submitResult = Invoke-CcodexSubmit @submitParams
+            if ($submitResult.WrapperExitCode -eq 0) {
+                Write-Output $submitResult.Stdout
+            } else {
+                Write-Host $submitResult.Message
+            }
+            $exitCode = $submitResult.WrapperExitCode
+        }
         'worker' {
             # Internal entrypoint only: launched by the (future) `submit` detached
             # process, or directly in tests. Not documented/Claude-facing.
@@ -258,7 +399,7 @@ try {
             $exitCode = $workerResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, worker."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, worker."
             $exitCode = 2
         }
     }
