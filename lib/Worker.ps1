@@ -38,13 +38,19 @@ function Invoke-CcodexWorker {
     $backendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime $currentProcess.StartTime
     $startedAt = (Get-Date).ToString('o')
 
+    # The job-level hard timeout is data on the job, written into status.json by
+    # `submit` (`--hard-timeout-sec <n>`); the worker picks it up here rather than
+    # from the command line. Absent/0 means never kill.
+    $hardTimeoutSec = if ($status.hard_timeout_sec) { [int]$status.hard_timeout_sec } else { 0 }
+    $hardTimeoutSecOrNull = if ($hardTimeoutSec -gt 0) { $hardTimeoutSec } else { $null }
+
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
-        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt)
+        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull)
 
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
-        -Backend 'native' -BackendId $backendId -StartedAt $startedAt
+        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

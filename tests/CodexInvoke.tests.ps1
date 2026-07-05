@@ -70,5 +70,36 @@ Assert-Equal $exitCode2 7 'nonzero exit code survives the cmd.exe wrapping path'
 Assert-Equal (Get-Content -LiteralPath $exitCodeFilePath2 -Raw) '7' 'exit_code.txt reflects the wrapped process exit code'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE -ErrorAction SilentlyContinue
+
+Write-Host "Invoke-CcodexCodexProcess hard timeout kills the process tree and returns the null sentinel"
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+$env:CCODEX_FAKE_DELAY_MS = '8000'
+$timeoutRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-codexinvoke-timeout-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $timeoutRoot -Force | Out-Null
+$toEvents = Join-Path $timeoutRoot 'codex-events.jsonl'
+$toStderr = Join-Path $timeoutRoot 'stderr.log'
+$toExit = Join-Path $timeoutRoot 'exit_code.txt'
+$toResult = Join-Path $timeoutRoot 'result.md'
+$toPidFile = Join-Path $timeoutRoot 'fake.pid'
+$env:CCODEX_FAKE_PIDFILE = $toPidFile
+
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+$toExitCode = Invoke-CcodexCodexProcess -CodexPath $pwshPath -Arguments @('-NoProfile', '-File', $fixturePs1, '--output-last-message', $toResult) -PromptContent 'slow prompt' -EventsLogPath $toEvents -StderrLogPath $toStderr -ExitCodeFilePath $toExit -HardTimeoutMs 1500
+$sw.Stop()
+Assert-True ($null -eq $toExitCode) 'hard timeout returns the null (sentinel) exit code'
+Assert-True ($sw.ElapsedMilliseconds -lt 6000) 'hard timeout returns well before the 8s fake delay would elapse'
+Assert-True (-not (Test-Path -LiteralPath $toExit -PathType Leaf)) 'no exit_code.txt is written on hard timeout'
+Assert-True (Test-Path -LiteralPath $toPidFile -PathType Leaf) 'the fixture recorded its pid before being killed'
+$toChildPid = [int]((Get-Content -LiteralPath $toPidFile -Raw).Trim())
+$toDeadline = (Get-Date).AddSeconds(5)
+$toAlive = $true
+while ((Get-Date) -lt $toDeadline) {
+    if (-not (Get-Process -Id $toChildPid -ErrorAction SilentlyContinue)) { $toAlive = $false; break }
+    Start-Sleep -Milliseconds 100
+}
+Assert-True (-not $toAlive) 'the fake-codex process tree was terminated by the hard timeout'
+
+Remove-Item Env:\CCODEX_FAKE_PIDFILE, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $timeoutRoot -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

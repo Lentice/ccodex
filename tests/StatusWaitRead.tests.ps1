@@ -127,6 +127,14 @@ $resultFailed = Invoke-CcodexStatusCommand -JobId $jobFailed.JobId -StateRoot $l
 Assert-Equal $resultFailed.WrapperExitCode 0 'failed job -> exit 0 (printing status is success)'
 Assert-Equal $resultFailed.Stdout "$($jobFailed.JobId) failed codex_exit_code=1 wrapper_exit_code=10" 'failed job status line shows both codes'
 
+# --- status: timed_out (terminal) ---
+
+Write-Host "Invoke-CcodexStatusCommand: timed_out job -> lifecycle-only line, exit 0"
+$jobTimedOut = New-CcodexTestJobWithStatus -Status 'timed_out' -WrapperExitCode 24
+$resultTimedOut = Invoke-CcodexStatusCommand -JobId $jobTimedOut.JobId -StateRoot $localAppData
+Assert-Equal $resultTimedOut.WrapperExitCode 0 'timed_out job -> exit 0 (printing status is success)'
+Assert-Equal $resultTimedOut.Stdout "$($jobTimedOut.JobId) timed_out" 'timed_out status line is lifecycle-only (no codes, no health)'
+
 # --- status: unknown job id -> 3 ---
 
 Write-Host "Invoke-CcodexStatusCommand: unknown job id -> exit 3"
@@ -216,6 +224,15 @@ try {
     Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
 }
 
+# --- (d2) timed_out job -> exit 24 (recorded) ---
+
+Write-Host "Invoke-CcodexWaitCommand: timed_out job with recorded wrapper_exit_code=24 -> exit 24"
+$jobWaitTimedOut = New-CcodexTestJobWithStatus -Status 'timed_out' -WrapperExitCode 24
+$resultWaitTimedOut = Invoke-CcodexWaitCommand -JobId $jobWaitTimedOut.JobId -StateRoot $localAppData
+Assert-Equal $resultWaitTimedOut.WrapperExitCode 24 'timed_out job -> exit 24'
+Assert-True ($resultWaitTimedOut.Message -like "*$($jobWaitTimedOut.JobId)*") 'timed_out wait message includes the job id'
+Assert-True ($resultWaitTimedOut.Message -like '*timed_out*') 'timed_out wait message names the timed_out status'
+
 # --- (e) unknown job id -> exit 3 ---
 
 Write-Host "Invoke-CcodexWaitCommand: unknown job id -> exit 3"
@@ -288,6 +305,20 @@ $jobReadFailedEmpty = New-CcodexTestJobWithStatus -Status 'failed' -CodexExitCod
 Write-CcodexTextFile -Path (Join-Path $jobReadFailedEmpty.JobDir 'result.md') -Content '   '
 $resultReadFailedEmpty = Invoke-CcodexReadCommand -JobId $jobReadFailedEmpty.JobId -StateRoot $localAppData
 Assert-Equal $resultReadFailedEmpty.WrapperExitCode 11 'failed job with empty result.md -> exit 11'
+
+# --- timed_out (terminal): missing result -> 11, present result -> 0 ---
+
+Write-Host "Invoke-CcodexReadCommand: timed_out job with missing result.md -> exit 11"
+$jobReadTimedOut = New-CcodexTestJobWithStatus -Status 'timed_out' -WrapperExitCode 24
+$resultReadTimedOut = Invoke-CcodexReadCommand -JobId $jobReadTimedOut.JobId -StateRoot $localAppData
+Assert-Equal $resultReadTimedOut.WrapperExitCode 11 'timed_out job with missing result.md -> exit 11'
+Assert-True ([string]::IsNullOrEmpty($resultReadTimedOut.Stdout)) 'timed_out-with-no-result read returns no stdout content'
+
+Write-Host "Invoke-CcodexReadCommand: timed_out job with a result.md -> exit 0, content on stdout"
+$jobReadTimedOutResult = New-CcodexTestJobWithStatus -Status 'timed_out' -WrapperExitCode 24 -WithResultFile
+$resultReadTimedOutResult = Invoke-CcodexReadCommand -JobId $jobReadTimedOutResult.JobId -StateRoot $localAppData
+Assert-Equal $resultReadTimedOutResult.WrapperExitCode 0 'timed_out job with result.md -> exit 0 (read is the result channel)'
+Assert-Equal $resultReadTimedOutResult.Stdout 'the result' 'timed_out job -> stdout carries result.md content'
 
 # --- unknown job id -> exit 3 ---
 

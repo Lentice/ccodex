@@ -109,7 +109,8 @@ function Invoke-CcodexJobExecution {
         [Parameter(Mandatory)][string]$CreatedAt,
         [string]$Backend = 'sync',
         [string]$BackendId = $null,
-        [string]$StartedAt = $null
+        [string]$StartedAt = $null,
+        [int]$HardTimeoutSec = 0
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -117,6 +118,7 @@ function Invoke-CcodexJobExecution {
     $eventsPath = Join-Path $JobDir 'codex-events.jsonl'
     $stderrPath = Join-Path $JobDir 'stderr.log'
     $exitCodeFilePath = Join-Path $JobDir 'exit_code.txt'
+    $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
 
     $internalFailureParams = @{
         JobDir = $JobDir; JobId = $jobId; Mode = $Mode; Access = $Access; RepoRoot = $RepoRoot
@@ -133,12 +135,32 @@ function Invoke-CcodexJobExecution {
 
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt)
+    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
 
     try {
-        $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath
+        $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath -HardTimeoutMs ($HardTimeoutSec * 1000)
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
+    }
+
+    if ($null -eq $codexExitCode) {
+        # Hard-timeout sentinel: Invoke-CcodexCodexProcess killed the process tree
+        # after $HardTimeoutSec elapsed. Codex never produced an exit code, so
+        # codex_exit_code stays null; the job goes terminal `timed_out` with
+        # wrapper exit 24, a timeout_reason, and terminated_at. Artifacts kept.
+        $terminatedAt = (Get-Date).ToString('o')
+        $timeoutReason = "hard_timeout_sec=$HardTimeoutSec exceeded"
+        $resultPresent = Test-Path -LiteralPath $resultPath -PathType Leaf
+
+        $timeoutComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate 'timed_out' -CodexExitCode $null -WrapperExitCode 24 -ResultPresent $resultPresent -CompletedAt $terminatedAt
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $timeoutComplete
+
+        $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
+        $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $timeoutStatusObj
+
+        $timeoutMessage = "ccodex: job $jobId timed_out ($timeoutReason)`n  job dir: $JobDir"
+        return [pscustomobject]@{ WrapperExitCode = 24; Stdout = $null; Message = $timeoutMessage; CodexExitCode = $null; Status = 'timed_out' }
     }
 
     $preliminaryComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate $(if ($codexExitCode -eq 0) { 'done' } else { 'failed' }) -CodexExitCode $codexExitCode -WrapperExitCode $null -ResultPresent (Test-Path -LiteralPath $resultPath -PathType Leaf) -CompletedAt (Get-Date).ToString('o')
@@ -157,7 +179,7 @@ function Invoke-CcodexJobExecution {
     $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
-    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId
+    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $finalStatusObj
 
     if ($validation.WrapperExitCode -eq 0) {
@@ -190,7 +212,8 @@ function Initialize-CcodexJob {
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
         [string]$InitialStatus = 'created',
-        [string]$Backend = 'sync'
+        [string]$Backend = 'sync',
+        [int]$HardTimeoutSec = 0
     )
 
     function Complete-CcodexInitFailure {
@@ -253,7 +276,8 @@ function Initialize-CcodexJob {
     $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $repoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
 
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend)
+    $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend -HardTimeoutSec $hardTimeoutSecOrNull)
 
     return [pscustomobject]@{ WrapperExitCode = 0; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $workerPrompt; CreatedAt = $createdAt; Message = $null }
 }
@@ -269,18 +293,19 @@ function Invoke-CcodexRun {
         [object[]]$PipelineObjects,
         [string]$CodexPath,
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
-        [string]$AppDataRoot = $env:APPDATA
+        [string]$AppDataRoot = $env:APPDATA,
+        [int]$HardTimeoutSec = 0
     )
 
     $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
         -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
-        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'sync'
+        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'sync' -HardTimeoutSec $HardTimeoutSec
 
     if ($init.WrapperExitCode -ne 0) {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; Message = $init.Message }
     }
 
-    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt
+    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
 }
@@ -305,6 +330,7 @@ function Invoke-CcodexSubmit {
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
         [int]$StartupTimeoutSec = 20,
+        [int]$HardTimeoutSec = 0,
         # Test-support only: the production path always launches the currently-running
         # ccodex.ps1 (via $PSCommandPath, which resolves to this file regardless of the
         # caller's own script, since PowerShell binds it per script-defining file). Tests
@@ -315,7 +341,7 @@ function Invoke-CcodexSubmit {
 
     $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
         -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
-        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'native'
+        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'native' -HardTimeoutSec $HardTimeoutSec
 
     if ($init.WrapperExitCode -ne 0) {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; JobId = $init.JobId; Message = $init.Message }
@@ -453,6 +479,14 @@ function Invoke-CcodexWaitCommand {
             return [pscustomobject]@{ WrapperExitCode = $exitCodeToReturn; Stdout = $null; Message = $failureMessage }
         }
 
+        if ($statusText -eq 'timed_out') {
+            # Terminal hard-timeout: return the recorded wrapper exit code (24).
+            $recordedWrapperExitCode = if ($statusObj -and $null -ne $statusObj.wrapper_exit_code) { [int]$statusObj.wrapper_exit_code } else { 24 }
+            $timeoutReasonText = if ($statusObj -and $statusObj.timeout_reason) { " ($($statusObj.timeout_reason))" } else { '' }
+            $timeoutMessage = "ccodex: job $JobId timed_out$timeoutReasonText`n  job dir: $jobDir"
+            return [pscustomobject]@{ WrapperExitCode = $recordedWrapperExitCode; Stdout = $null; Message = $timeoutMessage }
+        }
+
         if ($deadline -and (Get-Date) -ge $deadline) {
             $line = "$JobId $statusText"
             if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
@@ -492,7 +526,7 @@ function Invoke-CcodexReadCommand {
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
 
-    if ($statusText -notin @('done', 'failed')) {
+    if ($statusText -notin @('done', 'failed', 'timed_out')) {
         $line = "$JobId $statusText"
         if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
         $message = "$line`nccodex: job $JobId is not finished yet; run ``ccodex wait $JobId`` to block until it completes."
@@ -538,7 +572,18 @@ try {
             # PowerShell pipeline ($input) path is intentionally not used here.
             # See the header comment for why. The PipelineExpected/PipelineObjects
             # parameters remain on Invoke-CcodexRun for direct/test callers.
-            $runResult = Invoke-CcodexRun -Mode $Mode -Access $Access -RepoOverride $Repo -PromptFile $PromptFile -PositionalTask $PositionalTask -PipelineExpected $false -PipelineObjects $null
+            $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            $runParams = @{
+                Mode             = $Mode
+                Access           = $Access
+                RepoOverride     = $Repo
+                PromptFile       = $PromptFile
+                PositionalTask   = $PositionalTask
+                PipelineExpected = $false
+                PipelineObjects  = $null
+            }
+            if ($runHardTimeoutSecText) { $runParams['HardTimeoutSec'] = [int]$runHardTimeoutSecText }
+            $runResult = Invoke-CcodexRun @runParams
             if ($runResult.WrapperExitCode -eq 0) {
                 Write-Output $runResult.Stdout
             } else {
@@ -555,6 +600,7 @@ try {
             $submitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
+            $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
 
             $submitParams = @{
                 Mode             = $Mode
@@ -568,6 +614,7 @@ try {
             if ($submitStateRoot) { $submitParams['LocalAppDataRoot'] = $submitStateRoot }
             if ($submitCodexPath) { $submitParams['CodexPath'] = $submitCodexPath }
             if ($submitDetachMechanism) { $submitParams['DetachMechanism'] = $submitDetachMechanism }
+            if ($submitHardTimeoutSecText) { $submitParams['HardTimeoutSec'] = [int]$submitHardTimeoutSecText }
 
             $submitResult = Invoke-CcodexSubmit @submitParams
             if ($submitResult.WrapperExitCode -eq 0) {

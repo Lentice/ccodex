@@ -28,7 +28,8 @@ function New-CcodexTestJob {
     param(
         [string]$Mode = 'review',
         [string]$Access = 'read-only',
-        [string]$PromptContent = 'test worker prompt body'
+        [string]$PromptContent = 'test worker prompt body',
+        [int]$HardTimeoutSec = 0
     )
     $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
     $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
@@ -39,7 +40,9 @@ function New-CcodexTestJob {
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $PromptContent
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt)
+    $statusParams = @{ JobId = $jobId; Status = 'created'; Mode = $Mode; Access = $Access; Repo = $targetRepo; CreatedAt = $createdAt }
+    if ($HardTimeoutSec -gt 0) { $statusParams['HardTimeoutSec'] = $HardTimeoutSec }
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject @statusParams)
     return [pscustomobject]@{ JobId = $jobId; JobDir = $jobDir }
 }
 
@@ -74,6 +77,23 @@ Assert-Equal $resultB.WrapperExitCode 10 'wrapper exit code is 10 when codex exi
 $statusB = Get-Content -LiteralPath (Join-Path $jobB.JobDir 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $statusB.status 'failed' 'final status is failed'
 Assert-Equal $statusB.backend 'native' 'backend is stamped native on the failure path too'
+
+# --- (b2) hard_timeout_sec in status.json -> worker kills the tree, wrapper 24, terminal timed_out ---
+
+Write-Host "Invoke-CcodexWorker: hard_timeout_sec exceeded -> wrapper 24, status timed_out, no exit_code.txt"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_DELAY_MS = '8000'
+Remove-Item Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+$jobT = New-CcodexTestJob -HardTimeoutSec 1
+$resultT = Invoke-CcodexWorker -JobId $jobT.JobId -StateRoot $localAppData -CodexPath $fixtureCmd
+Assert-Equal $resultT.WrapperExitCode 24 'worker exits 24 when hard_timeout_sec is exceeded'
+$statusT = Get-Content -LiteralPath (Join-Path $jobT.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusT.status 'timed_out' 'worker reaches terminal timed_out status'
+Assert-True ($null -eq $statusT.codex_exit_code) 'codex_exit_code stays null on a worker hard timeout'
+Assert-Equal $statusT.wrapper_exit_code 24 'worker timeout records wrapper_exit_code 24'
+Assert-True (-not [string]::IsNullOrEmpty($statusT.terminated_at)) 'worker timeout stamps terminated_at'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobT.JobDir 'exit_code.txt') -PathType Leaf)) 'no exit_code.txt on a worker hard timeout'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
 
 # --- (c) unknown job id -> wrapper 3 ---
 

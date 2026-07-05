@@ -87,14 +87,33 @@ function Get-CcodexProcessLaunchPlan {
     }
 }
 
+function Stop-CcodexProcessTree {
+    # Force-kill an entire process tree by root pid. `taskkill /T` walks the
+    # child chain (so the cmd.exe /d /s /c shim's launched codex/pwsh child is
+    # covered too) and `/F` terminates unconditionally. Best-effort: a tree that
+    # already exited yields a nonzero taskkill exit which is intentionally
+    # swallowed (native commands never throw, and there is nothing left to kill).
+    param([Parameter(Mandatory)][int]$ProcessId)
+    $taskkill = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    & $taskkill '/PID' $ProcessId '/T' '/F' 2>&1 | Out-Null
+}
+
 function Invoke-CcodexCodexProcess {
+    # Returns the raw Codex process exit code, or the $null sentinel when a
+    # job-level hard timeout ($HardTimeoutMs -gt 0) expired and the process tree
+    # was force-killed. Non-null return values behave exactly as before (existing
+    # callers treat non-null as the real exit code). On a hard-timeout kill,
+    # exit_code.txt is deliberately NOT written (Codex never exited), while any
+    # partial stdout/stderr already captured is still flushed to the log files so
+    # the job's artifacts stay diagnosable.
     param(
         [Parameter(Mandatory)][string]$CodexPath,
         [Parameter(Mandatory)][string[]]$Arguments,
         [Parameter(Mandatory)][AllowEmptyString()][string]$PromptContent,
         [Parameter(Mandatory)][string]$EventsLogPath,
         [Parameter(Mandatory)][string]$StderrLogPath,
-        [Parameter(Mandatory)][string]$ExitCodeFilePath
+        [Parameter(Mandatory)][string]$ExitCodeFilePath,
+        [int]$HardTimeoutMs = 0
     )
     $plan = Get-CcodexProcessLaunchPlan -CodexPath $CodexPath -Arguments $Arguments
 
@@ -129,6 +148,30 @@ function Invoke-CcodexCodexProcess {
 
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    if ($HardTimeoutMs -gt 0) {
+        if (-not $process.WaitForExit($HardTimeoutMs)) {
+            # Budget exceeded and Codex has not exited: kill the whole tree, then
+            # wait (parameterless) for the killed process object to reap so the
+            # async stdout/stderr readers can drain the now-closed pipes. Each
+            # await/close is guarded so a partial read never masks the timeout.
+            Stop-CcodexProcessTree -ProcessId $process.Id
+            try { $process.WaitForExit() } catch { }
+            $partialStdout = ''
+            $partialStderr = ''
+            try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
+            try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+            try { $process.StandardOutput.Close() } catch { }
+            try { $process.StandardError.Close() } catch { }
+            Write-CcodexTextFile -Path $EventsLogPath -Content $partialStdout
+            Write-CcodexTextFile -Path $StderrLogPath -Content $partialStderr
+            # NOTE: no exit_code.txt on a hard-timeout kill (Codex never exited).
+            return $null
+        }
+    }
+
+    # WaitForExit() (parameterless) after a WaitForExit(timeout) that returned
+    # true guarantees the async output handlers have fully flushed before we read.
     $process.WaitForExit()
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()

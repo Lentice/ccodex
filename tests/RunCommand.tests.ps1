@@ -104,6 +104,26 @@ $failComplete = Get-Content -LiteralPath (Join-Path $failDir 'worker-complete.js
 Assert-Equal $failComplete.status_candidate 'failed' 'launch-failure worker-complete.json status_candidate is failed'
 Assert-Equal $failComplete.wrapper_exit_code 12 'launch-failure worker-complete.json records wrapper_exit_code 12'
 
+Write-Host "run --hard-timeout-sec 1 against a sleeping fixture -> wrapper 24, terminal timed_out, codex_exit_code null"
+$env:CCODEX_FAKE_DELAY_MS = '8000'
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'should never be written'
+$resultTimeout = Invoke-CcodexRunForTest -Overrides @{ HardTimeoutSec = 1 }
+Assert-Equal $resultTimeout.WrapperExitCode 24 'wrapper exit code is 24 on a hard timeout'
+$timeoutDir = $resultTimeout.JobDir
+$timeoutStatus = Get-Content -LiteralPath (Join-Path $timeoutDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $timeoutStatus.status 'timed_out' 'status.json status is timed_out'
+Assert-True ($null -eq $timeoutStatus.codex_exit_code) 'codex_exit_code stays null on a hard timeout'
+Assert-Equal $timeoutStatus.wrapper_exit_code 24 'status.json records wrapper_exit_code 24'
+Assert-True ($timeoutStatus.timeout_reason -like '*hard_timeout_sec=1*') 'timeout_reason names the exceeded budget'
+Assert-True (-not [string]::IsNullOrEmpty($timeoutStatus.terminated_at)) 'terminated_at is stamped'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $timeoutDir 'exit_code.txt') -PathType Leaf)) 'no exit_code.txt is written on a hard timeout'
+Assert-True (Test-Path -LiteralPath (Join-Path $timeoutDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json is written on the timeout path'
+$timeoutComplete = Get-Content -LiteralPath (Join-Path $timeoutDir 'worker-complete.json') -Raw | ConvertFrom-Json
+Assert-Equal $timeoutComplete.status_candidate 'timed_out' 'worker-complete.json status_candidate is timed_out'
+Assert-Equal $timeoutComplete.wrapper_exit_code 24 'worker-complete.json records wrapper_exit_code 24'
+Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests
