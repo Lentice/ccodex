@@ -26,9 +26,15 @@ New-Item -ItemType Directory -Path $TemplatesDir -Force | Out-Null
 $templateDest = Join-Path $TemplatesDir 'worker-prompt.md'
 Copy-Item -Path (Join-Path $sourceRoot 'templates\worker-prompt.md') -Destination $templateDest -Force
 
+$claudeCommandsDir = Join-Path $env:USERPROFILE '.claude\commands'
+New-Item -ItemType Directory -Path $claudeCommandsDir -Force | Out-Null
+$claudeCommandDest = Join-Path $claudeCommandsDir 'ccodex.md'
+Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -Destination $claudeCommandDest -Force
+
 Write-Host "ccodex installed to $destScriptDir"
 Write-Host "shim: $shimPath"
 Write-Host "default template: $templateDest"
+Write-Host "claude command: $claudeCommandDest"
 if (($env:PATH -split ';') -notcontains $InstallDir) {
     Write-Host "WARNING: $InstallDir is not on PATH. Add it to your user PATH to use 'ccodex' from any directory." -ForegroundColor Yellow
 }

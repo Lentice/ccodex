@@ -14,19 +14,26 @@ treat it like any other command it shells out to.
 
 ## Status
 
-**Phase 1 (synchronous CLI) is done.** `ccodex run` is implemented and callable end-to-end. See
-[`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md)
-for the task-by-task build log and [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md)
+**Phase 1 (synchronous CLI) and Phase 2a (async result channel) are done**, along with the
+Phase 3 `/ccodex` Claude command. `ccodex run` is synchronous end-to-end; `ccodex submit` returns
+a job id immediately and hands the work to a detached background worker that survives the
+submitting process exiting, with `status`/`wait`/`read` to retrieve lifecycle and the final
+result from any directory. See
+[`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md) and
+[`docs/2026-07-04-ccodex-adapter-phase2a-plan.md`](docs/2026-07-04-ccodex-adapter-phase2a-plan.md)
+for the task-by-task build logs and [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md)
 for the full design across all planned phases.
 
 Implemented so far:
 
-- `ccodex.ps1` — dispatcher; supports the `run` subcommand with `--mode`, `--access`, `--repo`,
-  `--prompt-file`, a positional task argument, or a piped/redirected-stdin task
+- `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, and the internal
+  `worker` subcommand; `run`/`submit` accept `--mode`, `--access`, `--repo`, `--prompt-file`, a
+  positional task argument, or a piped/redirected-stdin task
 - `ccodex.cmd` — `PATH` shim that forwards to `pwsh -File ccodex.ps1`
 - `install.ps1` — copies `ccodex.ps1` + `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes the
-  `ccodex.cmd` shim there, and installs the default worker-prompt template to
-  `%APPDATA%\ccodex\templates\worker-prompt.md`
+  `ccodex.cmd` shim there, installs the default worker-prompt template to
+  `%APPDATA%\ccodex\templates\worker-prompt.md`, and installs the `/ccodex` Claude command to
+  `%USERPROFILE%\.claude\commands\ccodex.md`
 - `lib/Paths.ps1` — global state-root path helpers and `repo_key` hashing
 - `lib/Repo.ps1` — `--repo` override / `git rev-parse --show-toplevel` resolution
 - `lib/JobId.ps1` — job id generation and atomic job-directory reservation
@@ -38,13 +45,23 @@ Implemented so far:
   `worker-complete.json`)
 - `lib/CodexInvoke.ps1` — `codex exec` process invocation, event/stderr log capture
 - `lib/ResultValidation.ps1` — `result.md` validation into status + wrapper exit code
+- `lib/JobIndex.ps1` — global job-id → job-dir lookup, callable from any directory
+- `lib/JobStatus.ps1` — status.json read, worker liveness check, narrowly-gated orphan
+  reconciliation
+- `lib/Worker.ps1` — the internal worker entrypoint (`ccodex worker --job-id <id>`); runs the same
+  Codex flow as `run` but reads the prepared job directory instead of taking task text on the
+  command line
+- `lib/Detach.ps1` — detached-process launch (CIM `Win32_Process.Create` in production,
+  `Start-Process` for tests) plus a startup sentinel so `submit` can report exit `23` if the
+  worker never starts
 - `templates/worker-prompt.md` — default worker-prompt contract template
+- `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template
 - A full plain-PowerShell test suite under `tests/` (no Pester; see Testing below)
 
-Not yet implemented (Phase 2+): `submit`, `status`, `wait`, `read`, `tail`, `debug`, `cancel`,
-`doctor`, background/parallel jobs, alternate backends, and worktree-isolated `implement`
-mode / `--access worktree` (Phase 4). Running `ccodex` with any subcommand other than `run`
-currently exits 2 with a "not implemented in Phase 1" message. `--mode implement` and
+Not yet implemented (Phase 2b+): `tail`, `debug`, `cancel`, `doctor`, per-job locks,
+heartbeat/health monitoring, tmux, and worktree-isolated `implement` mode / `--access worktree`
+(Phase 4). Running `ccodex` with any subcommand other than `run`, `submit`, `status`, `wait`,
+`read`, or `worker` exits 2 with a "not implemented" message. `--mode implement` and
 `--access worktree` are also rejected today — they will be enabled in Phase 4.
 
 ## Why
@@ -61,9 +78,10 @@ currently exits 2 with a "not implemented in Phase 1" message. `--mode implement
 
 ## Usage
 
-`ccodex run` is the only implemented subcommand. It reads task text from exactly one of a piped
-or redirected stdin stream, `--prompt-file <path>`, or a positional task argument; sends it to
-`codex exec` non-interactively; and prints only the final result to stdout.
+`ccodex run` and `ccodex submit` both read task text from exactly one of a piped or redirected
+stdin stream, `--prompt-file <path>`, or a positional task argument. `run` sends it to `codex exec`
+non-interactively and blocks until it finishes; `submit` prepares the same job and hands it to a
+detached background worker, returning immediately.
 
 ```powershell
 # Synchronous, read-only review or brainstorming (defaults to --access read-only)
@@ -84,32 +102,47 @@ ccodex run --mode review --prompt-file .\review-task.md
 Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 `worker-complete.json`, `codex-events.jsonl`, `stderr.log`, `exit_code.txt`, and (on success)
 `result.md` under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`, plus an index entry at
-`%LOCALAPPDATA%\ccodex\index\<job_id>.json` — even though Phase 1 only exposes the synchronous
-result on stdout; `status`/`read`/`debug` commands to inspect that state come in Phase 2.
+`%LOCALAPPDATA%\ccodex\index\<job_id>.json` that lets `status`/`wait`/`read` find the job from any
+directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
+`submit`/`worker`), `backend_id`, `started_at`, and `finished_at`.
 
 ### Exit codes
 
-Callers can rely on these wrapper exit codes from `ccodex run` (Phase 1):
+Callers can rely on these wrapper exit codes:
 
 | Code | Meaning |
 | ---- | ------- |
-| `0`  | Success — `result.md` was produced and its content was printed to stdout. |
-| `2`  | Usage/validation error (bad `--mode`/`--access`, missing/ambiguous prompt source, repo resolution failure, etc.). |
+| `0`  | Success — `result.md` was produced and its content was printed to stdout (`run`/`wait`/`read`), or the job id + job dir were printed (`submit`). |
+| `2`  | Usage/validation error (bad `--mode`/`--access`, missing/ambiguous prompt source, repo resolution failure, unknown subcommand, etc.). |
+| `3`  | Job id not found (`status`/`wait`/`read`). |
+| `4`  | Job exists but has not reached a terminal status yet (`read` only — `wait` blocks instead). |
 | `10` | The `codex exec` process itself exited non-zero. |
 | `11` | `codex exec` exited zero but `result.md` is missing or empty. |
 | `12` | Wrapper-internal error (unexpected I/O/serialization failure). |
+| `20` | `wait` timed out (`--wait-timeout-sec`) before the job reached a terminal status; the job's lifecycle is unaffected — re-run `wait` to keep waiting. |
+| `23` | The background worker failed to launch, or never stamped a startup sentinel, during `submit`. |
 
-Codes `3, 4, 20-24` are reserved for Phase 2 commands (`submit`/`status`/`wait`/`cancel`) and are
-never produced by Phase 1.
+Codes `21`, `22`, and `24` are reserved for Phase 2b (`cancel`/`tail`/`debug`) and are not produced
+today.
 
-### Long-running or parallel work (Phase 2+, not yet implemented)
+### Long-running or parallel work
+
+`submit` returns as soon as the job is prepared and handed to a detached worker — it prints the
+job id then the job directory (two lines) and exits `0` without waiting for Codex to finish. Use
+`status`/`wait`/`read` from any directory to check on it later, including after the submitting
+process has exited:
 
 ```powershell
-ccodex submit --mode test --access workspace
-ccodex status <job_id>
-ccodex wait <job_id>
-ccodex read <job_id>
+"Run the full test suite and report failures." | ccodex submit --mode test --access workspace
+# -> <job_id>
+#    <job_dir>
+
+ccodex status <job_id>   # non-blocking lifecycle line, e.g. "<job_id> running"
+ccodex wait <job_id>      # blocks until terminal, then prints the result (or exits 10/11/20)
+ccodex read <job_id>      # non-blocking result read; exits 4 if not finished yet
 ```
+
+Submit several jobs before waiting on any of them to run independent tasks in parallel.
 
 ## Installing
 
@@ -119,18 +152,25 @@ D:\Documents\GitHub\ccodex\install.ps1
 ```
 
 This copies `ccodex.ps1` and `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes a `ccodex.cmd`
-shim there, and installs the default worker-prompt template to
-`%APPDATA%\ccodex\templates\worker-prompt.md`. Add `%USERPROFILE%\.local\bin` to your user `PATH`
-if it isn't already there (the script warns if it's missing) so `ccodex` is callable from any
-directory. Pass `-InstallDir`/`-TemplatesDir` to `install.ps1` to override either location.
+shim there, installs the default worker-prompt template to
+`%APPDATA%\ccodex\templates\worker-prompt.md`, and installs the `/ccodex` Claude command to
+`%USERPROFILE%\.claude\commands\ccodex.md` (overwriting any previous copy). Add
+`%USERPROFILE%\.local\bin` to your user `PATH` if it isn't already there (the script warns if it's
+missing) so `ccodex` is callable from any directory. Pass `-InstallDir`/`-TemplatesDir` to
+`install.ps1` to override the script/template locations (the Claude command destination is fixed
+at `%USERPROFILE%\.claude\commands\ccodex.md`).
+
+Once installed, `/ccodex` is available as a slash command in Claude Code: it summarizes the task,
+calls `ccodex run`/`submit`/`wait`/`read` as appropriate, and treats the wrapper's exit code as the
+source of truth for success/failure rather than parsing stderr prose.
 
 ## Repository layout
 
 ```text
-ccodex.ps1          # dispatcher: parses args, implements the `run` subcommand
+ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
-install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\
-templates/          # default worker-prompt contract template
+install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\ and ~\.claude\commands\ccodex.md
+templates/          # default worker-prompt contract + the /ccodex Claude command template
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
 docs/               # design spec and phase plans
@@ -154,8 +194,9 @@ pwsh -NoProfile -File tests/Paths.tests.ps1
 ## Roadmap
 
 - **Phase 1 — Synchronous CLI:** `ccodex run`, prompt transport, job files, install script. *(done)*
-- **Phase 2 — Background jobs:** `submit`, `status`, `wait`, `read`, `tail`, `debug`, `cancel`, `doctor`.
-- **Phase 3 — Claude slash command:** `.claude/commands/ccodex.md` wiring.
+- **Phase 2a — Async result channel:** `submit`, `status`, `wait`, `read`, internal `worker`, native detached backend with a startup sentinel. *(done)*
+- **Phase 3 — Claude slash command:** `/ccodex` installed to `~\.claude\commands\ccodex.md`. *(done)*
+- **Phase 2b — Job management:** `tail`, `debug`, `cancel`, `doctor`, retention.
 - **Phase 4 — Worktree isolation:** edit-capable workers in an isolated git worktree, with explicit `diff`/`apply`.
 
 See [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md) for the
