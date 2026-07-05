@@ -23,7 +23,26 @@ conversation.
    "<task text>" | ccodex run --mode review --repo <path>
    ```
 
-3. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
+3. **For a scoped code review**, prefer `ccodex review` over hand-writing a review prompt — it
+   has Codex generate the diff itself (inside its read-only sandbox) and scopes it exactly:
+
+   ```powershell
+   ccodex review --range <base>..<head> --path <p> --intent "<one-line change intent>"
+   ccodex review --staged --path <p> --intent "<intent>"
+   ccodex review --working --path <p> --intent "<intent>"
+   ```
+
+   Target a submodule directly with `--repo` instead of the superproject:
+
+   ```powershell
+   ccodex review --repo <submodule-path> --range <base>..<head> --path <p> --intent "<intent>"
+   ```
+
+   `--path` is repeatable; add `--focus "<extra focus>"` for a specific angle, or `--embed-diff`
+   to have the wrapper embed a size-capped diff itself instead of relying on Codex to run
+   `git diff`. See `~/.claude/rules/ccodex-delegation.md` for when to run this automatically.
+
+4. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
    at once), submit it in the background instead of blocking on `run`:
 
    ```powershell
@@ -41,7 +60,7 @@ conversation.
 
    Submit multiple jobs before waiting on any of them to run them in parallel.
 
-4. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
+5. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
    decide success or failure; use the exit code:
 
    | Exit code | Meaning |
@@ -57,7 +76,7 @@ conversation.
    | `23` | The background worker failed to start. |
    | `24` | The job hit `--hard-timeout-sec` and was killed. |
 
-5. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
+6. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
    `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
    react accordingly:
 
@@ -78,5 +97,5 @@ conversation.
    "<task text>" | ccodex run --mode test --access workspace --hard-timeout-sec 120
    ```
 
-6. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
+7. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.
