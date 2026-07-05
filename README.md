@@ -78,6 +78,40 @@ heartbeat/health monitoring, tmux, and worktree-isolated `implement` mode / `--a
 `read`, `review`, or `worker` exits 2 with a "not implemented" message. `--mode implement` and
 `--access worktree` are also rejected today — they will be enabled in Phase 4.
 
+## Quick reference
+
+One line per goal — full details in [Usage](#usage) below.
+
+| Goal | Command |
+| --- | --- |
+| Second opinion / brainstorm (sync) | `"<task>" \| ccodex run --mode brainstorm` |
+| Code/plan review (sync, free-form) | `"<task>" \| ccodex run --mode review` |
+| Review exactly the changes just made | `ccodex review --range <base>..HEAD --path lib/ --intent "<what changed>" --embed-diff` |
+| Review uncommitted work | `ccodex review --working --path <p> --intent "<what changed>" --embed-diff` |
+| Review inside a submodule | `ccodex review --repo <submodule-path> --range <base>..HEAD --embed-diff` |
+| Long / parallel background job | `"<task>" \| ccodex submit --mode test --access workspace` then `ccodex wait <job_id>` |
+| Check on a background job | `ccodex status <job_id>` (non-blocking) / `ccodex read <job_id>` (result if finished) |
+| Bound a possibly-hanging job | add `--hard-timeout-sec <n>` to `run`/`submit` (kills the tree, exit `24`) |
+| From Claude Code | `/ccodex <task>`; per-project automatic checkpoints via `.ccodex/ccodex.json` |
+
+Picking the right verb:
+
+- **`run`** — synchronous: you want the answer now and the task is one self-contained ask.
+- **`submit` + `wait`/`read`** — the task is long, or you want several Codex workers running in
+  parallel while you keep working; the worker survives the submitting shell exiting.
+- **`review`** — you want severity-ordered findings on a *diff* (path-scoped) rather than a
+  free-form answer. On hosts where Codex's sandbox cannot spawn processes (observed signature:
+  `CreateProcessWithLogonW failed: 1385`), always pass `--embed-diff` — it is the form verified
+  live on this machine; the default self-diff form is lighter where the sandbox allows process
+  execution.
+
+Exit codes at a glance: `0` ok · `2` usage · `3` unknown job · `4` not finished yet (`read`) ·
+`10` codex failed · `11` empty result · `12` internal · `20` wait timeout · `23` worker never
+started · `24` hard-timeout kill. On failure, `status.json.failure_reason` hints the reaction:
+`quota_or_rate_limit` → report it, don't retry · `auth` → run `codex login` ·
+`permission_or_sandbox` → consider `--access workspace` or narrow the task · `network` → one
+retry is safe.
+
 ## Why
 
 - **Simple interface.** Claude sends a task, waits for a result when appropriate, and reads
@@ -145,7 +179,9 @@ Other flags:
 - `--embed-diff` — instead of having Codex run `git diff` itself, the wrapper runs it up front
   (from `--repo`'s root) and embeds the diff plus a `git diff --stat` summary directly in the
   prompt, capped at 100 KB with a truncation note. Use this when Codex regenerating the diff
-  itself would be unreliable (unusual git states, detached worktrees, etc).
+  itself would be unreliable (unusual git states, detached worktrees, etc) — and treat it as the
+  default on hosts where Codex's sandbox cannot spawn processes at all (Codex reports
+  `CreateProcessWithLogonW failed: 1385`; the self-diff form cannot work there).
 - `--repo <path>` — as with `run`/`submit`, target a repository other than the current directory.
 
 Findings always come back severity-ordered (Critical, then Important, then Minor) with a
