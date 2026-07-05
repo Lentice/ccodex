@@ -47,6 +47,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
+. (Join-Path $PSScriptRoot 'lib\ReviewPrompt.ps1')
 
 function Complete-CcodexInternalFailure {
     # A wrapper-internal failure after the job dir is reserved (codex path
@@ -571,6 +572,22 @@ function Get-CcodexArgValue {
     return $null
 }
 
+function Get-CcodexArgValues {
+    # Repeatable-flag counterpart to Get-CcodexArgValue: collects EVERY value that
+    # follows an occurrence of $FlagName in $args (e.g. `--path a --path b`). Always
+    # returns an array (empty when the flag is absent) so callers can splat it into a
+    # [string[]] parameter without null-vs-scalar surprises.
+    param([object[]]$ArgumentList, [Parameter(Mandatory)][string]$FlagName)
+    $values = @()
+    if (-not $ArgumentList) { return , $values }
+    for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
+        if ($ArgumentList[$i] -eq $FlagName -and ($i + 1) -lt $ArgumentList.Count) {
+            $values += $ArgumentList[$i + 1]
+        }
+    }
+    return , $values
+}
+
 if ($ImportOnly) { return }
 
 $exitCode = 12
@@ -716,8 +733,65 @@ try {
             }
             $exitCode = $readResult.WrapperExitCode
         }
+        'review' {
+            # Sugar over the `run` pipeline (mode review, access read-only): compose a
+            # scoped-review prompt from the diff selector/paths, then hand the composed
+            # text to Invoke-CcodexRun as the positional task. No second execution path —
+            # same job artifacts, exit codes, and failure classification as `run`. Piped
+            # stdin is NOT consumed by review (the task text is the composed prompt).
+            # --repo binds to $Repo; --state-root/--codex-path are hidden test-support
+            # flags mirroring the other subcommands.
+            $reviewRange = Get-CcodexArgValue -ArgumentList $args -FlagName '--range'
+            $reviewStaged = ($args -contains '--staged')
+            $reviewWorking = ($args -contains '--working')
+            $reviewEmbedDiff = ($args -contains '--embed-diff')
+            $reviewIntent = Get-CcodexArgValue -ArgumentList $args -FlagName '--intent'
+            $reviewFocus = Get-CcodexArgValue -ArgumentList $args -FlagName '--focus'
+            $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
+            $reviewStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $reviewCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+
+            # Resolve the repo up front: the self-diff prompt names it and the embed form
+            # runs git from it. A bad --repo is a usage error (exit 2), same as `run`.
+            try {
+                $reviewRepoRoot = Resolve-CcodexRepo -RepoOverride $Repo
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
+
+            try {
+                $reviewPrompt = Build-CcodexReviewPrompt -Range $reviewRange -Staged $reviewStaged -Working $reviewWorking `
+                    -Paths $reviewPaths -Intent $reviewIntent -Focus $reviewFocus -EmbedDiff $reviewEmbedDiff -RepoRoot $reviewRepoRoot
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
+
+            $reviewParams = @{
+                Mode             = 'review'
+                Access           = $Access
+                RepoOverride     = $Repo
+                PromptFile       = $null
+                PositionalTask   = $reviewPrompt
+                PipelineExpected = $false
+                PipelineObjects  = $null
+            }
+            if ($reviewStateRoot) { $reviewParams['LocalAppDataRoot'] = $reviewStateRoot }
+            if ($reviewCodexPath) { $reviewParams['CodexPath'] = $reviewCodexPath }
+
+            $reviewResult = Invoke-CcodexRun @reviewParams
+            if ($reviewResult.WrapperExitCode -eq 0) {
+                Write-Output $reviewResult.Stdout
+            } else {
+                Write-Host $reviewResult.Message
+            }
+            $exitCode = $reviewResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, wait, read, worker."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, review, submit, status, wait, read, worker."
             $exitCode = 2
         }
     }
