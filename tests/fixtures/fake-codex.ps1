@@ -7,6 +7,7 @@ for ($i = 0; $i -lt $argsList.Count; $i++) {
         $resultPath = $argsList[$i + 1]
     }
 }
+if ($env:CCODEX_FAKE_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CCODEX_FAKE_DELAY_MS) }
 Write-Output '{"type":"event","msg":"fake-codex ran"}'
 [Console]::Error.WriteLine('fake-codex stderr line')
 $exitCode = 0

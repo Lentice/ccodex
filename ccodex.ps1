@@ -345,6 +345,68 @@ function Invoke-CcodexStatusCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $line; Message = $null }
 }
 
+function Invoke-CcodexWaitCommand {
+    # Blocks (by default indefinitely; bounded when -WaitTimeoutSec > 0) until a job
+    # reaches a terminal status, polling Update-CcodexOrphanStatus + a status re-read on
+    # each iteration so a dead-but-evidenced worker is reconciled along the way exactly as
+    # `status` would. On terminal `done` it validates result.md via Test-CcodexResult using
+    # the recorded codex exit code and returns that content on stdout; on terminal `failed`
+    # it returns a concise failure line, mapping the recorded wrapper_exit_code through
+    # ({10,11,12} else 10). A timeout prints the current (Task 7-format) status line and
+    # returns 20 WITHOUT writing status.json — the job's lifecycle is untouched by waiting.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [int]$WaitTimeoutSec = 0,
+        [int]$PollIntervalMs = 1000,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $jobDir = $record.JobDir
+    $resultPath = Join-Path $jobDir 'result.md'
+    $deadline = if ($WaitTimeoutSec -gt 0) { (Get-Date).AddSeconds($WaitTimeoutSec) } else { $null }
+
+    while ($true) {
+        $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+        $statusObj = Read-CcodexStatusFile -JobDir $jobDir
+        $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
+        if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+        if ($statusText -eq 'done') {
+            $recordedCodexExitCode = if ($statusObj -and $null -ne $statusObj.codex_exit_code) { [int]$statusObj.codex_exit_code } else { 0 }
+            $validation = Test-CcodexResult -CodexExitCode $recordedCodexExitCode -ResultPath $resultPath
+            if ($validation.WrapperExitCode -eq 0) {
+                return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null }
+            }
+            $failureMessage = "ccodex: job $JobId done but result.md is missing or empty (codex_exit_code=$recordedCodexExitCode)`n  job dir: $jobDir`n  result:  $resultPath"
+            return [pscustomobject]@{ WrapperExitCode = 11; Stdout = $null; Message = $failureMessage }
+        }
+
+        if ($statusText -eq 'failed') {
+            $codexExitText = if ($statusObj -and $null -ne $statusObj.codex_exit_code) { $statusObj.codex_exit_code } else { 'null' }
+            $recordedWrapperExitCode = if ($statusObj) { $statusObj.wrapper_exit_code } else { $null }
+            $wrapperExitText = if ($null -eq $recordedWrapperExitCode) { 'null' } else { $recordedWrapperExitCode }
+            $exitCodeToReturn = if ($recordedWrapperExitCode -in @(10, 11, 12)) { $recordedWrapperExitCode } else { 10 }
+            $failureMessage = "ccodex: job $JobId failed codex_exit_code=$codexExitText wrapper_exit_code=$wrapperExitText`n  job dir: $jobDir`n  result:  $resultPath"
+            return [pscustomobject]@{ WrapperExitCode = $exitCodeToReturn; Stdout = $null; Message = $failureMessage }
+        }
+
+        if ($deadline -and (Get-Date) -ge $deadline) {
+            $line = "$JobId $statusText"
+            if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
+            $message = "$line`nccodex: wait timed out after ${WaitTimeoutSec}s; re-run ``ccodex wait $JobId`` to keep waiting."
+            return [pscustomobject]@{ WrapperExitCode = 20; Stdout = $null; Message = $message }
+        }
+
+        Start-Sleep -Milliseconds $PollIntervalMs
+    }
+}
+
 function Get-CcodexArgValue {
     # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
     # hyphens that PowerShell's native named-parameter binder cannot match against a
@@ -451,8 +513,30 @@ try {
             }
             $exitCode = $statusResult.WrapperExitCode
         }
+        'wait' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status` use). --wait-timeout-sec/--state-root are flags.
+            $waitJobId = $PositionalTask
+            $waitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $waitTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--wait-timeout-sec'
+            if (-not $waitJobId) {
+                Write-Host "ccodex: wait requires a job id."
+                $exitCode = 2
+                break
+            }
+            $waitParams = @{ JobId = $waitJobId }
+            if ($waitStateRoot) { $waitParams['StateRoot'] = $waitStateRoot }
+            if ($waitTimeoutSecText) { $waitParams['WaitTimeoutSec'] = [int]$waitTimeoutSecText }
+            $waitResult = Invoke-CcodexWaitCommand @waitParams
+            if ($waitResult.WrapperExitCode -eq 0) {
+                Write-Output $waitResult.Stdout
+            } else {
+                Write-Host $waitResult.Message
+            }
+            $exitCode = $waitResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, worker."
+            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, submit, status, wait, worker."
             $exitCode = 2
         }
     }

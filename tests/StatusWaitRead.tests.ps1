@@ -18,11 +18,15 @@
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ccodexPs = Join-Path $repoRoot 'ccodex.ps1'
+$fixtureCmd = Join-Path $PSScriptRoot 'fixtures\fake-codex.cmd'
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-statuswaitread-test-$([Guid]::NewGuid().ToString('N'))"
 $localAppData = Join-Path $tempRoot 'Local'
+$appData = Join-Path $tempRoot 'Roaming'
 $targetRepo = Join-Path $tempRoot 'repo'
-New-Item -ItemType Directory -Path $localAppData, $targetRepo -Force | Out-Null
+New-Item -ItemType Directory -Path $localAppData, $appData, $targetRepo -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $appData 'ccodex\templates') -Force | Out-Null
+Copy-Item -Path (Join-Path $repoRoot 'templates\worker-prompt.md') -Destination (Join-Path $appData 'ccodex\templates\worker-prompt.md')
 
 $fabricatedDeadBackendId = '999999;2020-01-01T00:00:00.0000000Z'
 $currentProc = Get-Process -Id $PID
@@ -140,6 +144,95 @@ Assert-Equal $shellExit 0 'shell-level status invocation exits 0'
 $shellOutLines = @($shellOut | Where-Object { $_ -ne $null -and $_ -ne '' })
 Assert-Equal $shellOutLines.Count 1 'shell-level status prints exactly one line'
 Assert-Equal $shellOutLines[0] "$($jobShell.JobId) done codex_exit_code=0 wrapper_exit_code=0" 'shell-level status line matches the terminal format'
+
+function Wait-CcodexTestTerminalStatus {
+    param([Parameter(Mandatory)][string]$JobDir, [int]$TimeoutSec = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($true) {
+        $status = Read-CcodexStatusFile -JobDir $JobDir
+        if ($status -and $status.status -in @('done', 'failed')) { return $status }
+        if ((Get-Date) -ge $deadline) { return $status }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+# ============================================================
+# Invoke-CcodexWaitCommand
+# ============================================================
+
+# --- (a) already-done job -> result on stdout, exit 0 ---
+
+Write-Host "Invoke-CcodexWaitCommand: already-done job -> result.md content on stdout, exit 0"
+$jobWaitDone = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -WithResultFile
+$resultWaitDone = Invoke-CcodexWaitCommand -JobId $jobWaitDone.JobId -StateRoot $localAppData
+Assert-Equal $resultWaitDone.WrapperExitCode 0 'already-done job -> exit 0'
+Assert-Equal $resultWaitDone.Stdout 'the result' 'already-done job -> stdout carries result.md content'
+
+# --- (b) failed job (wrapper 10 recorded) -> exit 10 ---
+
+Write-Host "Invoke-CcodexWaitCommand: failed job with recorded wrapper_exit_code=10 -> exit 10"
+$jobWaitFailed = New-CcodexTestJobWithStatus -Status 'failed' -CodexExitCode 1 -WrapperExitCode 10
+$resultWaitFailed = Invoke-CcodexWaitCommand -JobId $jobWaitFailed.JobId -StateRoot $localAppData
+Assert-Equal $resultWaitFailed.WrapperExitCode 10 'failed job with recorded wrapper_exit_code=10 -> exit 10'
+Assert-True (-not [string]::IsNullOrEmpty($resultWaitFailed.Message)) 'failed job returns a diagnostic message'
+Assert-True ($resultWaitFailed.Message -like "*$($jobWaitFailed.JobId)*") 'failed job message includes the job id'
+
+# --- (c) done but empty result -> exit 11 ---
+
+Write-Host "Invoke-CcodexWaitCommand: done status but empty/missing result.md -> exit 11"
+$jobWaitEmpty = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0
+$resultWaitEmpty = Invoke-CcodexWaitCommand -JobId $jobWaitEmpty.JobId -StateRoot $localAppData
+Assert-Equal $resultWaitEmpty.WrapperExitCode 11 'done job with missing result.md -> exit 11'
+Assert-True (-not [string]::IsNullOrEmpty($resultWaitEmpty.Message)) 'empty-result job returns a diagnostic message'
+
+# --- (d) slow job: submit via startprocess against a delayed fake-codex, timeout then completion ---
+
+Write-Host "Invoke-CcodexWaitCommand: slow job -> --wait-timeout-sec 1 times out with 20 while sleeping, lifecycle unchanged"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SLOW WAIT RESULT'
+$env:CCODEX_FAKE_DELAY_MS = '4000'
+$submitSlow = Invoke-CcodexSubmit -Mode 'review' -Access $null -RepoOverride $targetRepo -PromptFile $null `
+    -PositionalTask 'slow task' -PipelineExpected $false -PipelineObjects $null -DetachMechanism 'startprocess' `
+    -CodexPath $fixtureCmd -LocalAppDataRoot $localAppData -AppDataRoot $appData
+Assert-Equal $submitSlow.WrapperExitCode 0 'slow job submits successfully'
+try {
+    $beforeTimeoutStatus = Read-CcodexStatusFile -JobDir $submitSlow.JobDir
+    $resultTimeout = Invoke-CcodexWaitCommand -JobId $submitSlow.JobId -WaitTimeoutSec 1 -PollIntervalMs 200 -StateRoot $localAppData
+    Assert-Equal $resultTimeout.WrapperExitCode 20 'wait on a still-sleeping job times out with exit 20'
+    Assert-True (-not [string]::IsNullOrEmpty($resultTimeout.Message)) 'timeout returns a diagnostic message'
+    Assert-True ($resultTimeout.Message -like "*re-run*wait $($submitSlow.JobId)*") 'timeout message hints at re-running ccodex wait <id>'
+    $afterTimeoutStatus = Read-CcodexStatusFile -JobDir $submitSlow.JobDir
+    Assert-Equal $afterTimeoutStatus.status $beforeTimeoutStatus.status 'timeout does not change the job status'
+    Assert-True ($afterTimeoutStatus.status -notin @('done', 'failed')) 'timed-out job is still non-terminal'
+
+    $terminalSlow = Wait-CcodexTestTerminalStatus -JobDir $submitSlow.JobDir -TimeoutSec 20
+    Assert-True ($terminalSlow -ne $null) 'slow job eventually reaches a terminal status object'
+    Assert-Equal $terminalSlow.status 'done' 'slow job completes to done after the fixture delay elapses'
+
+    $resultAfterDelay = Invoke-CcodexWaitCommand -JobId $submitSlow.JobId -StateRoot $localAppData
+    Assert-Equal $resultAfterDelay.WrapperExitCode 0 'a second wait with no timeout returns 0 once the job is done'
+    Assert-True ($resultAfterDelay.Stdout -like '*SLOW WAIT RESULT*') 'second wait returns the fixture result content'
+} finally {
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
+}
+
+# --- (e) unknown job id -> exit 3 ---
+
+Write-Host "Invoke-CcodexWaitCommand: unknown job id -> exit 3"
+$resultWaitUnknown = Invoke-CcodexWaitCommand -JobId 'does-not-exist-99999' -StateRoot $localAppData
+Assert-Equal $resultWaitUnknown.WrapperExitCode 3 'unknown job id -> exit 3'
+Assert-True (-not [string]::IsNullOrEmpty($resultWaitUnknown.Message)) 'unknown job id returns a diagnostic message'
+
+# --- shell-level: pwsh -File ccodex.ps1 wait <id> --state-root ... (already-done job) ---
+
+Write-Host "shell-level: ccodex.ps1 wait <id> --state-root <root> prints result.md content, exit 0"
+$jobWaitShell = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -WithResultFile
+$shellWaitOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitShell.JobId --state-root $localAppData
+$shellWaitExit = $LASTEXITCODE
+Assert-Equal $shellWaitExit 0 'shell-level wait invocation exits 0'
+$shellWaitOutLines = @($shellWaitOut | Where-Object { $_ -ne $null -and $_ -ne '' })
+Assert-Equal $shellWaitOutLines.Count 1 'shell-level wait prints exactly one line'
+Assert-Equal $shellWaitOutLines[0] 'the result' 'shell-level wait prints the result.md content'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
