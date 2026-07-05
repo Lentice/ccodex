@@ -14,26 +14,33 @@ treat it like any other command it shells out to.
 
 ## Status
 
-**Phase 1 (synchronous CLI) and Phase 2a (async result channel) are done**, along with the
-Phase 3 `/ccodex` Claude command. `ccodex run` is synchronous end-to-end; `ccodex submit` returns
-a job id immediately and hands the work to a detached background worker that survives the
-submitting process exiting, with `status`/`wait`/`read` to retrieve lifecycle and the final
-result from any directory. See
-[`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md) and
-[`docs/2026-07-04-ccodex-adapter-phase2a-plan.md`](docs/2026-07-04-ccodex-adapter-phase2a-plan.md)
+**Phase 1 (synchronous CLI), Phase 2a (async result channel), and Phase 2c (scoped review +
+delegation policy) are done**, along with the Phase 3 `/ccodex` Claude command. `ccodex run` is
+synchronous end-to-end; `ccodex submit` returns a job id immediately and hands the work to a
+detached background worker that survives the submitting process exiting, with `status`/`wait`/
+`read` to retrieve lifecycle and the final result from any directory. `ccodex review` adds a
+path-scoped code review over a git diff range, and `.ccodex/ccodex.json` plus the installed
+`~/.claude/rules/ccodex-delegation.md` rule let a project opt every Claude Code session into
+automatic review/second-opinion checkpoints. See
+[`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md),
+[`docs/2026-07-04-ccodex-adapter-phase2a-plan.md`](docs/2026-07-04-ccodex-adapter-phase2a-plan.md),
+and [`docs/2026-07-05-ccodex-delegation-plan.md`](docs/2026-07-05-ccodex-delegation-plan.md)
 for the task-by-task build logs and [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md)
 for the full design across all planned phases.
 
 Implemented so far:
 
-- `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, and the internal
-  `worker` subcommand; `run`/`submit` accept `--mode`, `--access`, `--repo`, `--prompt-file`, a
-  positional task argument, or a piped/redirected-stdin task
+- `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, `review`, and the
+  internal `worker` subcommand; `run`/`submit` accept `--mode`, `--access`, `--repo`,
+  `--prompt-file`, a positional task argument, or a piped/redirected-stdin task; `review` accepts
+  a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`, `--focus`,
+  `--embed-diff`, and `--repo`
 - `ccodex.cmd` — `PATH` shim that forwards to `pwsh -File ccodex.ps1`
 - `install.ps1` — copies `ccodex.ps1` + `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes the
   `ccodex.cmd` shim there, installs the default worker-prompt template to
-  `%APPDATA%\ccodex\templates\worker-prompt.md`, and installs the `/ccodex` Claude command to
-  `%USERPROFILE%\.claude\commands\ccodex.md`
+  `%APPDATA%\ccodex\templates\worker-prompt.md`, installs the `/ccodex` Claude command to
+  `%USERPROFILE%\.claude\commands\ccodex.md`, and installs the delegation policy rule to
+  `%USERPROFILE%\.claude\rules\ccodex-delegation.md`
 - `lib/Paths.ps1` — global state-root path helpers and `repo_key` hashing
 - `lib/Repo.ps1` — `--repo` override / `git rev-parse --show-toplevel` resolution
 - `lib/JobId.ps1` — job id generation and atomic job-directory reservation
@@ -54,14 +61,21 @@ Implemented so far:
 - `lib/Detach.ps1` — detached-process launch (CIM `Win32_Process.Create` in production,
   `Start-Process` for tests) plus a startup sentinel so `submit` can report exit `23` if the
   worker never starts
+- `lib/Config.ps1` — `.ccodex/ccodex.json` `delegation` section reader, with per-key defaults and
+  enum/type validation
+- `lib/ReviewPrompt.ps1` — composes the `ccodex review` task text (self-diff and `--embed-diff`
+  forms) from a diff selector, paths, intent, and focus
 - `templates/worker-prompt.md` — default worker-prompt contract template
-- `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template
+- `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template (includes `review`
+  guidance)
+- `templates/claude-rule-ccodex-delegation.md` — the always-on delegation policy rule, installed
+  to `~/.claude/rules/ccodex-delegation.md`
 - A full plain-PowerShell test suite under `tests/` (no Pester; see Testing below)
 
 Not yet implemented (Phase 2b+): `tail`, `debug`, `cancel`, `doctor`, per-job locks,
 heartbeat/health monitoring, tmux, and worktree-isolated `implement` mode / `--access worktree`
 (Phase 4). Running `ccodex` with any subcommand other than `run`, `submit`, `status`, `wait`,
-`read`, or `worker` exits 2 with a "not implemented" message. `--mode implement` and
+`read`, `review`, or `worker` exits 2 with a "not implemented" message. `--mode implement` and
 `--access worktree` are also rejected today — they will be enabled in Phase 4.
 
 ## Why
@@ -98,6 +112,89 @@ ccodex run --mode review --prompt-file .\review-task.md
 # Point at a repo other than the current directory's
 "Review this diff." | ccodex run --mode review --repo D:\Documents\GitHub\some-other-repo
 ```
+
+### Scoped code review (`ccodex review`)
+
+`ccodex review` is sugar over the `run` pipeline (always `--mode review`, `--access read-only`):
+it composes a review prompt from a diff selector and hands it to the same execution path as
+`run` — identical job artifacts, exit codes, and failure classification. It never reads piped
+stdin; the task text is the composed prompt, not caller-supplied text. By default it tells Codex
+to run `git diff` itself (inside its own read-only sandbox) and review the result, which keeps
+the prompt tiny and lets Codex open surrounding files for context.
+
+Pick exactly one range selector:
+
+```powershell
+# A commit range
+ccodex review --range abc123..HEAD --path lib/ --intent "Add retry logic to CodexInvoke"
+
+# The staged index
+ccodex review --staged --path lib/Config.ps1 --intent "New config reader"
+
+# The working tree (uncommitted, unstaged changes)
+ccodex review --working --path lib/ --intent "In-progress refactor"
+```
+
+Other flags:
+
+- `--path <p>` — repeatable; scopes the diff to one or more paths (directories or files) instead
+  of the whole repo. Omit it to review the full range.
+- `--intent "<text>"` — one-line description of what the change is trying to do; included in the
+  prompt to give Codex context.
+- `--focus "<text>"` — an additional angle to emphasize (e.g. "concurrency" or "error handling").
+- `--embed-diff` — instead of having Codex run `git diff` itself, the wrapper runs it up front
+  (from `--repo`'s root) and embeds the diff plus a `git diff --stat` summary directly in the
+  prompt, capped at 100 KB with a truncation note. Use this when Codex regenerating the diff
+  itself would be unreliable (unusual git states, detached worktrees, etc).
+- `--repo <path>` — as with `run`/`submit`, target a repository other than the current directory.
+
+Findings always come back severity-ordered (Critical, then Important, then Minor) with a
+file:line and a suggested fix per finding, plus a one-line verdict — success prints exactly that
+to stdout, and failures behave exactly like a failed `run` (same exit codes and
+`failure_reason` hints).
+
+**Submodule scoping:** when the change under review lives inside a git submodule, point `--repo`
+directly at the submodule instead of the superproject, so the diff and path scoping resolve
+against the submodule's own history:
+
+```powershell
+ccodex review --repo D:\Documents\GitHub\superproject\vendor\some-submodule `
+  --range abc123..HEAD --path src/ --intent "Bump dependency and adjust call sites"
+```
+
+### Delegation policy (`.ccodex/ccodex.json`)
+
+A project can opt into automatic delegation checkpoints — teaching a Claude Code session when to
+run a `ccodex review` on its own — by adding `<repo_root>/.ccodex/ccodex.json`:
+
+```json
+{
+  "delegation": {
+    "review_after_changes": "ask",
+    "review_min_changed_lines": 50,
+    "review_default_paths": [],
+    "plan_second_opinion": "ask",
+    "max_codex_calls_per_task": 2
+  }
+}
+```
+
+This file is configuration only — it is never touched by job execution and lives outside the
+job-state tree entirely. The file and the `delegation` section are both optional; a missing file,
+a missing section, or missing individual keys all fall back to the defaults shown above.
+Malformed JSON or an invalid enum value is a usage error (exit `2`) naming the file.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `review_after_changes` | `"auto"` \| `"ask"` \| `"off"` | `"ask"` | Post-change checkpoint: run a review automatically, ask the user first, or only review on explicit request. |
+| `review_min_changed_lines` | int | `50` | Below this changed-line count, skip the post-change review entirely (cost guard). |
+| `review_default_paths` | string[] | `[]` | Default `--path` set for the post-change review when the caller hasn't narrowed it further. |
+| `plan_second_opinion` | `"auto"` \| `"ask"` \| `"off"` | `"ask"` | Post-plan checkpoint: same auto/ask/off semantics, applied after writing or updating a plan/spec document. |
+| `max_codex_calls_per_task` | int | `2` | Cap on total `ccodex` calls (review or otherwise) per task; once reached, no further calls are made for the rest of the task. |
+
+Installing `ccodex` (see below) installs a Claude Code rule at
+`~/.claude/rules/ccodex-delegation.md` that teaches every session how to read this file and apply
+the checkpoints — the user never has to re-explain the policy per project or per session.
 
 Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 `worker-complete.json`, `codex-events.jsonl`, `stderr.log`, `exit_code.txt`, and (on success)
@@ -193,24 +290,28 @@ D:\Documents\GitHub\ccodex\install.ps1
 
 This copies `ccodex.ps1` and `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes a `ccodex.cmd`
 shim there, installs the default worker-prompt template to
-`%APPDATA%\ccodex\templates\worker-prompt.md`, and installs the `/ccodex` Claude command to
-`%USERPROFILE%\.claude\commands\ccodex.md` (overwriting any previous copy). Add
+`%APPDATA%\ccodex\templates\worker-prompt.md`, installs the `/ccodex` Claude command to
+`%USERPROFILE%\.claude\commands\ccodex.md`, and installs the delegation policy rule to
+`%USERPROFILE%\.claude\rules\ccodex-delegation.md` (overwriting any previous copy of each). Add
 `%USERPROFILE%\.local\bin` to your user `PATH` if it isn't already there (the script warns if it's
-missing) so `ccodex` is callable from any directory. Pass `-InstallDir`/`-TemplatesDir` to
-`install.ps1` to override the script/template locations (the Claude command destination is fixed
-at `%USERPROFILE%\.claude\commands\ccodex.md`).
+missing) so `ccodex` is callable from any directory. Pass `-InstallDir`/`-TemplatesDir`/`-ClaudeDir`
+to `install.ps1` to override the script/template/Claude-config locations (the Claude command and
+rule destinations are fixed at `<ClaudeDir>\commands\ccodex.md` and
+`<ClaudeDir>\rules\ccodex-delegation.md`, `<ClaudeDir>` defaulting to `%USERPROFILE%\.claude`).
 
 Once installed, `/ccodex` is available as a slash command in Claude Code: it summarizes the task,
-calls `ccodex run`/`submit`/`wait`/`read` as appropriate, and treats the wrapper's exit code as the
-source of truth for success/failure rather than parsing stderr prose.
+calls `ccodex run`/`submit`/`wait`/`read`/`review` as appropriate, and treats the wrapper's exit
+code as the source of truth for success/failure rather than parsing stderr prose. The installed
+rule at `~/.claude/rules/ccodex-delegation.md` is loaded automatically in every session (no slash
+command needed) and teaches the post-change/post-plan delegation checkpoints described above.
 
 ## Repository layout
 
 ```text
-ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/worker
+ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/review/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
-install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\ and ~\.claude\commands\ccodex.md
-templates/          # default worker-prompt contract + the /ccodex Claude command template
+install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md, and ~\.claude\rules\ccodex-delegation.md
+templates/          # worker-prompt contract, the /ccodex Claude command, and the delegation rule template
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
 docs/               # design spec and phase plans
@@ -236,6 +337,8 @@ pwsh -NoProfile -File tests/Paths.tests.ps1
 - **Phase 1 — Synchronous CLI:** `ccodex run`, prompt transport, job files, install script. *(done)*
 - **Phase 2a — Async result channel:** `submit`, `status`, `wait`, `read`, internal `worker`, native detached backend with a startup sentinel. *(done)*
 - **Phase 3 — Claude slash command:** `/ccodex` installed to `~\.claude\commands\ccodex.md`. *(done)*
+- **Phase 2c — Scoped review + delegation policy:** `ccodex review`, `.ccodex/ccodex.json`
+  delegation config, `~\.claude\rules\ccodex-delegation.md`. *(done)*
 - **Phase 2b — Job management:** `tail`, `debug`, `cancel`, `doctor`, retention.
 - **Phase 4 — Worktree isolation:** edit-capable workers in an isolated git worktree, with explicit `diff`/`apply`.
 
