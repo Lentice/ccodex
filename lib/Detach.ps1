@@ -29,6 +29,16 @@ function Start-CcodexDetachedWorker {
         [ValidateSet('cim', 'startprocess')][string]$Mechanism = 'cim'
     )
 
+    # Dogfood #4: a double-quote is illegal in a Windows path and would corrupt the
+    # hand-built CIM command line below (or, less catastrophically but still wrong, silently
+    # mis-tokenize a Start-Process argument). Fail loudly here rather than launching a
+    # broken/ambiguous worker process.
+    foreach ($pathArg in @($ScriptPath, $StateRoot, $CodexPath)) {
+        if ($pathArg -and $pathArg.Contains('"')) {
+            throw "ccodex: internal error: path argument contains an illegal double-quote character: $pathArg"
+        }
+    }
+
     if ($Mechanism -eq 'cim') {
         $commandLine = "pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" worker --job-id $JobId"
         if ($StateRoot) { $commandLine += " --state-root `"$StateRoot`"" }
@@ -48,6 +58,12 @@ function Start-CcodexDetachedWorker {
     if ($StateRoot) { $argumentList += @('--state-root', $StateRoot) }
     if ($CodexPath) { $argumentList += @('--codex-path', $CodexPath) }
 
+    # Dogfood #3 (triaged false positive): -WindowStyle Hidden allocates the child its own
+    # separate (hidden) console, rather than sharing the caller's console/stdout handles.
+    # The worker's own stdout/stderr therefore cannot interleave with the submitting
+    # process's stdout — Wait-CcodexWorkerLaunch/status polling, not shared streams, is how
+    # the caller observes worker progress. tests/AsyncE2E.tests.ps1 asserts submit's stdout
+    # is exactly the job-id/job-dir lines for this reason.
     $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argumentList -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
     return $proc.Id
 }

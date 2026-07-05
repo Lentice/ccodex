@@ -89,7 +89,16 @@ function Update-CcodexOrphanStatus {
         return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
     }
 
-    $codexExitCode = [int](Get-Content -LiteralPath $exitCodePath -Raw).Trim()
+    # Dogfood #2: exit_code.txt can be caught mid-write (empty/partial/corrupt) if the
+    # worker died at just the wrong instant. Treat anything that doesn't parse cleanly as
+    # a whole integer as no-usable-evidence rather than throwing — the job stays `running`
+    # with health=possibly-stale, to be reconciled on a later poll once the file settles.
+    $exitCodeRawContent = Get-Content -LiteralPath $exitCodePath -Raw
+    $exitCodeText = if ($null -ne $exitCodeRawContent) { $exitCodeRawContent.Trim() } else { '' }
+    $codexExitCode = 0
+    if (-not [int]::TryParse($exitCodeText, [ref]$codexExitCode)) {
+        return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
+    }
     $resultPath = Join-Path $JobDir 'result.md'
     $verdict = Test-CcodexResult -CodexExitCode $codexExitCode -ResultPath $resultPath
 

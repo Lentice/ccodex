@@ -138,6 +138,46 @@ Assert-Equal $resultDeadNoEvidence.PossiblyStale $true 'dead worker w/o evidence
 $afterDeadNoEvidence = (Get-Item (Join-Path $dirDeadNoEvidence 'status.json')).LastWriteTimeUtc
 Assert-Equal $afterDeadNoEvidence $beforeDeadNoEvidence 'dead worker w/o evidence status.json was not rewritten'
 
+Write-Host "Update-CcodexOrphanStatus: running + worker dead + empty exit_code.txt -> no write, possibly stale, no throw"
+$dirDeadEmptyEvidence = New-TestJobDir 'orphan-dead-empty-evidence'
+$deadEmptyEvidenceStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadEmptyEvidence 'status.json') -Object $deadEmptyEvidenceStatus
+Write-CcodexTextFile -Path (Join-Path $dirDeadEmptyEvidence 'exit_code.txt') -Content ''
+$beforeDeadEmptyEvidence = (Get-Item (Join-Path $dirDeadEmptyEvidence 'status.json')).LastWriteTimeUtc
+Start-Sleep -Milliseconds 50
+$resultDeadEmptyEvidence = $null
+try {
+    $resultDeadEmptyEvidence = Update-CcodexOrphanStatus -JobDir $dirDeadEmptyEvidence
+    Assert-True $true 'empty exit_code.txt does not throw'
+} catch {
+    Assert-True $false "empty exit_code.txt unexpectedly threw: $($_.Exception.Message)"
+}
+Assert-Equal $resultDeadEmptyEvidence.Status 'running' 'dead worker w/ empty exit_code.txt keeps running status'
+Assert-Equal $resultDeadEmptyEvidence.Reconciled $false 'dead worker w/ empty exit_code.txt is not reconciled'
+Assert-Equal $resultDeadEmptyEvidence.PossiblyStale $true 'dead worker w/ empty exit_code.txt is possibly stale'
+$afterDeadEmptyEvidence = (Get-Item (Join-Path $dirDeadEmptyEvidence 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterDeadEmptyEvidence $beforeDeadEmptyEvidence 'dead worker w/ empty exit_code.txt status.json was not rewritten'
+
+Write-Host "Update-CcodexOrphanStatus: running + worker dead + corrupt (non-numeric) exit_code.txt -> no write, possibly stale, no throw"
+$dirDeadCorruptEvidence = New-TestJobDir 'orphan-dead-corrupt-evidence'
+$deadCorruptEvidenceStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadCorruptEvidence 'status.json') -Object $deadCorruptEvidenceStatus
+Write-CcodexTextFile -Path (Join-Path $dirDeadCorruptEvidence 'exit_code.txt') -Content "0`0garbled"
+$beforeDeadCorruptEvidence = (Get-Item (Join-Path $dirDeadCorruptEvidence 'status.json')).LastWriteTimeUtc
+Start-Sleep -Milliseconds 50
+$resultDeadCorruptEvidence = $null
+try {
+    $resultDeadCorruptEvidence = Update-CcodexOrphanStatus -JobDir $dirDeadCorruptEvidence
+    Assert-True $true 'corrupt exit_code.txt does not throw'
+} catch {
+    Assert-True $false "corrupt exit_code.txt unexpectedly threw: $($_.Exception.Message)"
+}
+Assert-Equal $resultDeadCorruptEvidence.Status 'running' 'dead worker w/ corrupt exit_code.txt keeps running status'
+Assert-Equal $resultDeadCorruptEvidence.Reconciled $false 'dead worker w/ corrupt exit_code.txt is not reconciled'
+Assert-Equal $resultDeadCorruptEvidence.PossiblyStale $true 'dead worker w/ corrupt exit_code.txt is possibly stale'
+$afterDeadCorruptEvidence = (Get-Item (Join-Path $dirDeadCorruptEvidence 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterDeadCorruptEvidence $beforeDeadCorruptEvidence 'dead worker w/ corrupt exit_code.txt status.json was not rewritten'
+
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + exit_code.txt=0 + result.md -> reconcile to done"
 $dirDeadSuccess = New-TestJobDir 'orphan-dead-success'
 $deadSuccessStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId

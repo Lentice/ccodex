@@ -110,7 +110,12 @@ function Invoke-CcodexJobExecution {
         [string]$Backend = 'sync',
         [string]$BackendId = $null,
         [string]$StartedAt = $null,
-        [int]$HardTimeoutSec = 0
+        [int]$HardTimeoutSec = 0,
+        # 2a review minor: the native worker path already stamps its own `running`
+        # status.json (with its own backend_id/started_at) before calling into this core;
+        # without this switch the core's own running-write below duplicates that stamp with
+        # identical content. `run` never passes this switch, so its behavior is unchanged.
+        [switch]$SkipRunningWrite
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -135,7 +140,9 @@ function Invoke-CcodexJobExecution {
 
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+    if (-not $SkipRunningWrite) {
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+    }
 
     try {
         $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath -HardTimeoutMs ($HardTimeoutSec * 1000)
@@ -533,12 +540,15 @@ function Invoke-CcodexReadCommand {
         return [pscustomobject]@{ WrapperExitCode = 4; Stdout = $null; Message = $message }
     }
 
-    $resultExists = Test-Path -LiteralPath $resultPath -PathType Leaf
-    $resultContent = if ($resultExists) { Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 } else { '' }
-    $resultNonEmpty = $resultExists -and $resultContent.Trim().Length -gt 0
+    # 2a review minor: reuse Test-CcodexResult's exists/non-empty logic instead of
+    # duplicating it here. `read` doesn't care about codex_exit_code (a terminal `failed`
+    # job with a non-empty result.md still prints it, exit 0) so CodexExitCode is forced to
+    # 0 purely to select the "exists+non-empty -> ResultPresent" branch; only
+    # ResultPresent/ResultContent are used below, matching the prior duplicated logic exactly.
+    $validation = Test-CcodexResult -CodexExitCode 0 -ResultPath $resultPath
 
-    if ($resultNonEmpty) {
-        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $resultContent; Message = $null }
+    if ($validation.ResultPresent) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null }
     }
 
     $failureMessage = "ccodex: job $JobId $statusText but result.md is missing or empty`n  job dir: $jobDir`n  result:  $resultPath"

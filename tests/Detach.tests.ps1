@@ -55,6 +55,23 @@ function Wait-CcodexTestTerminalStatus {
     }
 }
 
+# --- (0) CIM quote guard: a double-quote in any path argument fails loudly ---
+
+Write-Host "Start-CcodexDetachedWorker: throws when ScriptPath contains a double-quote"
+Assert-Throws {
+    Start-CcodexDetachedWorker -ScriptPath 'C:\ccodex\bad"path.ps1' -JobId 'job-x' -WorkingDirectory $targetRepo -StateRoot $localAppData -CodexPath $fixtureCmd -Mechanism cim
+} "quote-bearing ScriptPath fails loudly instead of building a corrupt command line"
+
+Write-Host "Start-CcodexDetachedWorker: throws when StateRoot contains a double-quote"
+Assert-Throws {
+    Start-CcodexDetachedWorker -ScriptPath $ccodexPs -JobId 'job-x' -WorkingDirectory $targetRepo -StateRoot 'C:\bad"root' -CodexPath $fixtureCmd -Mechanism cim
+} "quote-bearing StateRoot fails loudly instead of building a corrupt command line"
+
+Write-Host "Start-CcodexDetachedWorker: throws when CodexPath contains a double-quote"
+Assert-Throws {
+    Start-CcodexDetachedWorker -ScriptPath $ccodexPs -JobId 'job-x' -WorkingDirectory $targetRepo -StateRoot $localAppData -CodexPath 'C:\bad"codex.cmd' -Mechanism cim
+} "quote-bearing CodexPath fails loudly instead of building a corrupt command line"
+
 # --- (a) survival through parent exit (startprocess mechanism) ---
 
 Write-Host "Start-CcodexDetachedWorker (startprocess): worker outlives the submitting process"

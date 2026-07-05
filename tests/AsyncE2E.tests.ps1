@@ -105,6 +105,12 @@ try {
     $submitResult = Invoke-CcodexShim -Arguments @('submit', '--mode', 'review', '--repo', $targetRepo, '--state-root', $localAppData, '--detach-mechanism', 'startprocess') -StdinText $multilineTask
     Assert-Equal $submitResult.ExitCode 0 'piped multiline submit exits 0'
     Assert-Equal $submitResult.Lines.Count 2 'submit stdout is exactly two lines'
+    # Dogfood #3 (triaged false positive): -WindowStyle Hidden isolates the detached
+    # worker's own stdout/stderr in a separate hidden console, so it can never interleave
+    # with submit's stdout. Assert the RAW stdout (not just the non-empty-filtered Lines)
+    # is exactly those two lines with nothing else mixed in.
+    $submitRawLines = $submitResult.Stdout -split "`n"
+    Assert-Equal $submitRawLines.Count 2 'submit raw stdout is exactly two lines, no interleaved worker output'
     Assert-True ($submitResult.Lines[0] -match '^\d{8}T\d{6}Z-[a-z0-9]{8}-review$') 'first line is a Phase-1-shaped job id'
     Assert-True (Test-Path -LiteralPath $submitResult.Lines[1] -PathType Container) 'second line is an existing job dir'
     Assert-True (-not ($submitResult.Stdout -like '*fake-codex ran*')) 'submit stdout never carries raw JSONL'

@@ -48,9 +48,12 @@ function Invoke-CcodexWorker {
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
         -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull)
 
+    # SkipRunningWrite: the worker already stamped its own `running` status.json (with the
+    # backend_id/started_at above) immediately before this call, so the execution core must
+    # not overwrite it with a redundant second `running` write of the same content.
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
-        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec
+        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

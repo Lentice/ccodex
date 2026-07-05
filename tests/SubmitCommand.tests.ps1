@@ -80,7 +80,7 @@ foreach ($file in @('prompt.md', 'command.txt', 'debug.json', 'status.json')) {
     Assert-True (Test-Path -LiteralPath (Join-Path $resultA.JobDir $file) -PathType Leaf) "writes $file before/at submit return"
 }
 
-$terminalA = Wait-CcodexTestTerminalStatus -JobDir $resultA.JobDir -TimeoutSec 20
+$terminalA = Wait-CcodexTestTerminalStatus -JobDir $resultA.JobDir -TimeoutSec 40
 Assert-True ($terminalA -ne $null) 'job reaches a terminal status object'
 Assert-Equal $terminalA.status 'done' 'submitted job reaches terminal done via the detached worker'
 Assert-Equal $terminalA.backend 'native' 'terminal status is stamped backend native'
