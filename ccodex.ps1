@@ -44,6 +44,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\CodexInvoke.ps1')
 . (Join-Path $PSScriptRoot 'lib\ResultValidation.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobIndex.ps1')
+. (Join-Path $PSScriptRoot 'lib\JobLock.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
@@ -91,6 +92,42 @@ function Complete-CcodexInternalFailure {
     $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
     return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $hintedMessage`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
+}
+
+function Write-CcodexStatusUnderLock {
+    # Serializes a single status.json write behind the per-job lock so a concurrent
+    # writer (cancel, cleanup, or read-side reconciliation) can never clobber it. The
+    # lock is held only for the duration of this one write and released immediately
+    # (try/finally), so it is free again while the long-running Codex process executes
+    # between the `running` and terminal writes. Returns $true when the write happened;
+    # $false when the lock could not be acquired even after a single retry, leaving the
+    # caller to decide how to force a terminal failure (it must not die silently).
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$StatusPath,
+        [Parameter(Mandatory)]$StatusObject,
+        [string]$CommandName = 'worker',
+        [int]$TimeoutSec = 10
+    )
+    $acquired = $false
+    try {
+        Lock-CcodexJob -JobDir $JobDir -TimeoutSec $TimeoutSec -CommandName $CommandName | Out-Null
+        $acquired = $true
+    } catch {
+        try {
+            Lock-CcodexJob -JobDir $JobDir -TimeoutSec $TimeoutSec -CommandName $CommandName | Out-Null
+            $acquired = $true
+        } catch {
+            $acquired = $false
+        }
+    }
+    if (-not $acquired) { return $false }
+    try {
+        Write-CcodexJsonFileAtomic -Path $StatusPath -Object $StatusObject
+    } finally {
+        Unlock-CcodexJob -JobDir $JobDir
+    }
+    return $true
 }
 
 function Invoke-CcodexJobExecution {
@@ -142,7 +179,12 @@ function Invoke-CcodexJobExecution {
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
     if (-not $SkipRunningWrite) {
-        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+        $wroteRunning = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
+            -StatusPath (Join-Path $JobDir 'status.json') `
+            -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+        if (-not $wroteRunning) {
+            return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the running status'
+        }
     }
 
     try {
@@ -165,7 +207,10 @@ function Invoke-CcodexJobExecution {
 
         $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
         $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt
-        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $timeoutStatusObj
+        $wroteTimeout = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj
+        if (-not $wroteTimeout) {
+            return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the timed_out status'
+        }
 
         $timeoutMessage = "ccodex: job $jobId timed_out ($timeoutReason)`n  job dir: $JobDir"
         return [pscustomobject]@{ WrapperExitCode = 24; Stdout = $null; Message = $timeoutMessage; CodexExitCode = $null; Status = 'timed_out' }
@@ -188,7 +233,10 @@ function Invoke-CcodexJobExecution {
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
     $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $finalStatusObj
+    $wroteFinal = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj
+    if (-not $wroteFinal) {
+        return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the terminal status'
+    }
 
     if ($validation.WrapperExitCode -eq 0) {
         return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null; CodexExitCode = $codexExitCode; Status = $validation.Status }

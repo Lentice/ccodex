@@ -69,7 +69,11 @@ function Test-CcodexWorkerAlive {
 }
 
 function Update-CcodexOrphanStatus {
-    param([Parameter(Mandatory)][string]$JobDir)
+    # $LockTimeoutSec bounds how long the (write-side) reconciliation will wait for the
+    # per-job lock before giving up. Reconciliation is triggered from read-only commands
+    # (status/wait/read), so a lock it cannot acquire must never block or throw: it skips
+    # the rewrite this pass and reports the job as possibly-stale instead.
+    param([Parameter(Mandatory)][string]$JobDir, [int]$LockTimeoutSec = 10)
 
     $status = Read-CcodexStatusFile -JobDir $JobDir
     if ($null -eq $status) {
@@ -130,7 +134,19 @@ function Update-CcodexOrphanStatus {
     $updated['failure_reason'] = $failureReason
     $updated['codex_thread_id'] = $codexThreadId
 
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $updated
+    # The reconciliation rewrite is a status.json WRITE, so it goes through the per-job
+    # lock like every other writer. Because the caller is a reader, a lock we cannot
+    # acquire must not block or bubble up: skip this pass and report possibly-stale.
+    try {
+        Lock-CcodexJob -JobDir $JobDir -TimeoutSec $LockTimeoutSec -CommandName 'reconcile' | Out-Null
+    } catch {
+        return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
+    }
+    try {
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $updated
+    } finally {
+        Unlock-CcodexJob -JobDir $JobDir
+    }
 
     return [pscustomobject]@{ Status = $verdict.Status; Reconciled = $true; PossiblyStale = $false }
 }

@@ -3,6 +3,7 @@
 . (Join-Path $PSScriptRoot '..\lib\JobStore.ps1')
 . (Join-Path $PSScriptRoot '..\lib\ResultValidation.ps1')
 . (Join-Path $PSScriptRoot '..\lib\FailureClassify.ps1')
+. (Join-Path $PSScriptRoot '..\lib\JobLock.ps1')
 . (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-jobstatus-test-$([Guid]::NewGuid().ToString('N'))"
@@ -238,6 +239,47 @@ $rewrittenEvidenceSignals = Get-Content -LiteralPath (Join-Path $dirDeadEvidence
 Assert-Equal $rewrittenEvidenceSignals.status 'failed' 'rewritten status.json status is failed (evidence + signatures)'
 Assert-Equal $rewrittenEvidenceSignals.failure_reason 'quota_or_rate_limit' 'rewritten status.json carries failure_reason derived from the stderr.log signature'
 Assert-Equal $rewrittenEvidenceSignals.codex_thread_id 'thread-evidence-999' 'rewritten status.json carries codex_thread_id derived from codex-events.jsonl'
+
+# --- Update-CcodexOrphanStatus: writer re-routing through the per-job lock ---
+
+Write-Host "Update-CcodexOrphanStatus: reconciliation still works under the lock and releases it afterward"
+$dirLockReconcile = New-TestJobDir 'orphan-lock-reconcile'
+$lockReconcileStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirLockReconcile 'status.json') -Object $lockReconcileStatus
+Write-CcodexTextFile -Path (Join-Path $dirLockReconcile 'exit_code.txt') -Content '0'
+Write-CcodexTextFile -Path (Join-Path $dirLockReconcile 'result.md') -Content 'the result'
+$resultLockReconcile = Update-CcodexOrphanStatus -JobDir $dirLockReconcile
+Assert-Equal $resultLockReconcile.Status 'done' 'reconciliation under the lock still reconciles to done'
+Assert-Equal $resultLockReconcile.Reconciled $true 'reconciliation under the lock is reconciled'
+Assert-Equal $resultLockReconcile.PossiblyStale $false 'reconciliation under the lock is not possibly stale'
+$rewrittenLockReconcile = Get-Content -LiteralPath (Join-Path $dirLockReconcile 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $rewrittenLockReconcile.status 'done' 'rewritten status.json status is done after locked reconcile'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $dirLockReconcile '.lock'))) 'the per-job lock is released after reconciliation'
+
+Write-Host "Update-CcodexOrphanStatus: a held lock makes reconciliation skip with PossiblyStale rather than throw"
+$dirLockHeld = New-TestJobDir 'orphan-lock-held'
+$lockHeldStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirLockHeld 'status.json') -Object $lockHeldStatus
+Write-CcodexTextFile -Path (Join-Path $dirLockHeld 'exit_code.txt') -Content '0'
+Write-CcodexTextFile -Path (Join-Path $dirLockHeld 'result.md') -Content 'the result'
+# Hold the lock (owned by this live process, so it is never treated as stale), then
+# reconcile with a short timeout: it must not block indefinitely, must not throw, and
+# must report the job as possibly-stale while leaving status.json untouched.
+Lock-CcodexJob -JobDir $dirLockHeld -CommandName 'test-holder' | Out-Null
+$beforeLockHeld = (Get-Item (Join-Path $dirLockHeld 'status.json')).LastWriteTimeUtc
+$resultLockHeld = $null
+try {
+    $resultLockHeld = Update-CcodexOrphanStatus -JobDir $dirLockHeld -LockTimeoutSec 1
+    Assert-True $true 'reconciliation with a held lock does not throw'
+} catch {
+    Assert-True $false "reconciliation with a held lock unexpectedly threw: $($_.Exception.Message)"
+}
+Assert-Equal $resultLockHeld.Status 'running' 'held-lock reconciliation reports the unchanged running status'
+Assert-Equal $resultLockHeld.Reconciled $false 'held-lock reconciliation does not reconcile'
+Assert-Equal $resultLockHeld.PossiblyStale $true 'held-lock reconciliation reports possibly-stale'
+$afterLockHeld = (Get-Item (Join-Path $dirLockHeld 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterLockHeld $beforeLockHeld 'held-lock reconciliation did not rewrite status.json'
+Unlock-CcodexJob -JobDir $dirLockHeld
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests
