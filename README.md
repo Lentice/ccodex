@@ -375,8 +375,15 @@ pwsh -NoProfile -File tests/Paths.tests.ps1
 - **Phase 3 — Claude slash command:** `/ccodex` installed to `~\.claude\commands\ccodex.md`. *(done)*
 - **Phase 2c — Scoped review + delegation policy:** `ccodex review`, `.ccodex/ccodex.json`
   delegation config, `~\.claude\rules\ccodex-delegation.md`. *(done)*
-- **Phase 2b — Job management:** `tail`, `debug`, `cancel`, `doctor`, retention.
-- **Phase 4 — Worktree isolation:** edit-capable workers in an isolated git worktree, with explicit `diff`/`apply`.
+- **Phase 2b — Job management:** retention config, per-job locks, `cleanup` (including
+  `--scrub-thread-ids` for stale session data), `cancel`, heartbeat/health, `tail`, `debug`,
+  `doctor`. *(planned — [`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md))*
+- **Phase 4 — Worktree isolation:** edit-capable workers in an isolated git worktree, with
+  explicit `diff`/`apply`. *(planned — [`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md))*
+- **Phase 5 — Multi-turn advisor:** `ccodex resume <job_id>` continues a finished job's Codex
+  session for follow-up discussion. *(planned — [`docs/2026-07-07-ccodex-phase5-plan.md`](docs/2026-07-07-ccodex-phase5-plan.md))*
 
 See [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md) for the
-full rationale, non-goals, and phase-by-phase verification criteria.
+full rationale, non-goals, and phase-by-phase verification criteria, and
+[`docs/2026-07-07-ccodex-handoff.md`](docs/2026-07-07-ccodex-handoff.md) for the current
+development handoff (state, remaining work, document index).

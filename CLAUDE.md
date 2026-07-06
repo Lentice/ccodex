@@ -9,10 +9,15 @@ inside, or is coupled to, any other project.
 
 ## Source of truth
 
-- `docs/2026-07-03-ccodex-adapter-design.md` — the full design spec across all phases.
-- `docs/2026-07-03-ccodex-adapter-phase1-plan.md` — the current phase's task-by-task implementation
-  plan (checkbox-tracked). Later phases get their own plan files under `docs/` following the same
-  `YYYY-MM-DD-<name>.md` naming.
+- `docs/2026-07-07-ccodex-handoff.md` — **start here**: current state, remaining work, and the
+  index of every other document.
+- `docs/2026-07-03-ccodex-adapter-design.md` — the full design spec across all phases; its dated
+  amendment sections are authoritative where they refine earlier text.
+- `docs/2026-07-07-ccodex-dev-notes.md` — conventions, regression-guarded pitfalls, and test
+  recipes; read before changing `ccodex.ps1` or `lib/`.
+- `docs/2026-07-07-ccodex-phase2b-plan.md` — the current (next unimplemented) phase's
+  task-by-task plan. Phases 4 and 5 have their own plan files under `docs/` following the same
+  `YYYY-MM-DD-<name>.md` naming; executed phase plans remain as historical record.
 
 ## README maintenance
 
