@@ -1108,9 +1108,11 @@ ccodex cleanup [--older-than <Nd|Nh>] [--repo <path>] [--dry-run] [--include-sta
   a terminal job is a no-op with a clear message (exit 0). A dead-but-`running` job is
   reconciled instead of killed.
 - **Heartbeat/health stays single-writer:** the worker stamps `last_heartbeat_at` (~every 30 s)
-  and `last_stdout_at`/`last_stderr_at` on its own status.json; `status`/`debug` only READ and
-  derive `health=ok|stale` (stale = no heartbeat for > idle threshold while `running`). No
-  monitor process writes lifecycle.
+  on its own status.json; `status`/`debug` only READ and derive `health=ok|stale` (stale = no
+  heartbeat for > idle threshold while `running`). Per-stream `last_stdout_at`/`last_stderr_at`
+  timestamps are deliberately NOT stored in 2b (streams are captured whole via async reads);
+  `debug` uses the event/stderr log files' mtimes as the output-activity proxy. No monitor
+  process writes lifecycle.
 - **`tail <job_id>`**: last N lines (default 40, `--lines <n>`) of `stderr.log` +
   `codex-events.jsonl`, read via tail-bytes (no full-file loads).
 - **`debug <job_id>`**: compact diagnosis — status, health, timestamps, backend liveness,
