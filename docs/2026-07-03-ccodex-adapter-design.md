@@ -1038,6 +1038,133 @@ checkpoints and stays the final judge; nothing generative is auto-delegated:
   Claude's context while Codex returns small findings; `auto` vs `ask` changes decision burden,
   not token cost. Bulk implementation delegation arrives with Phase 4 worktrees.
 
+### Retention, cleanup, and remaining-phase decisions (2026-07-07)
+
+These decisions govern the remaining phases (2b, 4, 5) so that any agent can implement them from
+the phase plans alone: `docs/2026-07-07-ccodex-phase2b-plan.md`,
+`docs/2026-07-07-ccodex-phase4-plan.md`, `docs/2026-07-07-ccodex-phase5-plan.md`. Recommended
+execution order: 2b → 4 → 5 (4 and 5 are independent of each other; both build on 2b's locks and
+cleanup).
+
+#### Retention and cleanup (user requirement)
+
+Job state accumulates forever today, and some recorded metadata goes stale — most notably
+`codex_thread_id`, which references a Codex-side session that Codex itself eventually prunes, and
+which should not be retried by Phase 5 `resume` once expired. Cleanup is a first-class command:
+
+```text
+ccodex cleanup [--older-than <Nd|Nh>] [--repo <path>] [--dry-run] [--include-stalled]
+               [--scrub-thread-ids] [--thread-ttl <Nd>]
+```
+
+- Deletes **terminal** jobs (`done`/`failed`/`timed_out`/`cancelled`) whose end timestamp
+  (`finished_at` → `terminated_at` → `cancelled_at` → fallback `created_at`) is older than
+  `--older-than`. Default threshold comes from user-level config (below); scope defaults to ALL
+  repo keys, narrowed by `--repo`.
+- Deletion order per job: index entry first, then the job directory — a crash mid-way leaves an
+  unindexed directory that the next sweep still finds (cleanup scans the `jobs/` tree, not the
+  index). Dangling index entries (directory already gone) are removed. Phase 4 worktrees belonging
+  to a deleted job are removed too (`git worktree remove --force` + `git -C <main_repo> worktree
+  prune`, best-effort).
+- **Never** deletes a non-terminal job, with one exception: `--include-stalled` first runs the
+  existing narrow orphan reconciliation; a job that reconciles to terminal is then eligible, and a
+  `running`-with-live-worker or possibly-stale job is always skipped and reported.
+- `--scrub-thread-ids`: for RETAINED terminal jobs older than `--thread-ttl`, atomically rewrite
+  `status.json` with `codex_thread_id = null` (append-only discipline preserved; all other fields
+  untouched). Scrubbing is what makes Phase 5 fail fast with a clear message instead of resuming a
+  dead Codex session. Runs under the per-job lock (it is a writer).
+- `--dry-run` prints what would be deleted/scrubbed (job id, status, age, size) and changes
+  nothing. Without `--dry-run`, cleanup is still non-interactive (no prompts) — it is a
+  maintenance command invoked deliberately.
+- Output: one summary line (jobs deleted, bytes reclaimed, dangling indexes removed, thread ids
+  scrubbed, jobs skipped+why). Exit `0` on full success, `2` on usage errors (bad duration
+  syntax), `12` if any individual deletion/rewrite failed (best-effort: keep going, report
+  failures, then exit 12).
+- User-level config `%APPDATA%\ccodex\config.json` (location reserved since Phase 1) gains its
+  first real schema — read with the same tolerant/validated pattern as the project config:
+
+```json
+{
+  "retention": {
+    "jobs_days": 14,
+    "thread_ttl_days": 30
+  }
+}
+```
+
+  `--older-than`/`--thread-ttl` override config; config overrides the built-in defaults (14d/30d).
+
+#### Phase 2b scope and ordering decisions
+
+- **Locks activate with the second writer.** Until `cancel` exists, the worker is the only
+  status writer post-launch. `cancel` (and cleanup's scrub) introduce concurrent writers, so the
+  per-job lock directory (`<job_dir>/.lock/` with `owner.json`, acquisition timeout 10 s → exit
+  `21`, stale-lock rules as specified below in "status") lands FIRST in 2b, and every status
+  writer (worker terminal write, orphan reconciliation, cancel, scrub) goes through it from then
+  on.
+- **`cancel <job_id>`** (exit code `22` semantics activate): under the lock, verify the recorded
+  worker identity (`backend_id` = pid + process start time) is alive; kill the whole tree
+  (`taskkill /PID <pid> /T /F`), mark `cancelled` + `cancelled_at`, preserve artifacts. Cancelling
+  a terminal job is a no-op with a clear message (exit 0). A dead-but-`running` job is
+  reconciled instead of killed.
+- **Heartbeat/health stays single-writer:** the worker stamps `last_heartbeat_at` (~every 30 s)
+  and `last_stdout_at`/`last_stderr_at` on its own status.json; `status`/`debug` only READ and
+  derive `health=ok|stale` (stale = no heartbeat for > idle threshold while `running`). No
+  monitor process writes lifecycle.
+- **`tail <job_id>`**: last N lines (default 40, `--lines <n>`) of `stderr.log` +
+  `codex-events.jsonl`, read via tail-bytes (no full-file loads).
+- **`debug <job_id>`**: compact diagnosis — status, health, timestamps, backend liveness,
+  failure_reason, thread id presence, result presence, log paths, and the recommended next
+  command. Read-only except the same narrow orphan reconciliation `status` already performs.
+- **`doctor`**: delegates environment diagnosis to the built-in `codex doctor`, then adds
+  wrapper-specific checks (state root writable, template present, `codex` resolvable to a
+  launchable `.cmd`/`.exe`, index/jobs tree consistency count) and finishes with one live smoke
+  (`codex exec` "reply OK" through the normal run pipeline) unless `--no-smoke`.
+- Exit codes `21` and `22` activate in 2b exactly as the contract table defines; no other codes.
+
+#### Phase 4 worktree refinements
+
+- Worktrees live under the global state root, never inside the repository:
+  `%LOCALAPPDATA%\ccodex\worktrees\<job_id>\`, created with
+  `git -C <main_repo> worktree add --detach <path> <base_commit>` where `base_commit` is the
+  repo's HEAD at job creation. `status.json`/`debug.json` record `main_repo`, `worktree_repo`,
+  and `base_commit`.
+- **Snapshot finalization:** after Codex exits, the worker runs `git add -A` +
+  `git commit -m "ccodex: worker output <job_id>"` inside the worktree (identity
+  `ccodex-worker <ccodex@local>` via `-c user.name/-c user.email`, `--no-verify` deliberately NOT
+  used; empty change set → no commit, recorded as `worktree_dirty=false`). This makes
+  `diff`/`apply` deterministic regardless of whether Codex committed anything itself.
+- **`diff <job_id>`**: prints `git -C <worktree> diff <base_commit>..HEAD` (stat header first).
+  Exit `3`/`4` as usual; `0` with empty output when the worker changed nothing.
+- **`apply <job_id>`**: explicit, never automatic. Preconditions: main repo working tree clean
+  (else exit `2` with message) and job terminal `done`. Mechanism: `git -C <main_repo> am
+  --3way` over `git -C <worktree> format-patch <base_commit>..HEAD --stdout`. On conflict: abort
+  the `am`, leave the main repo untouched, exit **`25`** (new code: "apply failed/conflict; job
+  artifacts and worktree preserved"). Success prints the applied commit range.
+- `--mode implement` and `--access worktree` unlock in Phase 4 (implement defaults to worktree
+  access; `review`/`brainstorm` stay read-only; `test --access worktree` becomes the recommended
+  replacement for `test --access workspace`).
+- Cleanup integration: `cleanup` removes worktrees with their jobs (above); `apply`/`diff` on a
+  cleaned-up job exit `3`.
+
+#### Phase 5 multi-turn advisor (`resume`)
+
+- `ccodex resume <job_id>` takes a follow-up prompt through the standard prompt sources (pipe /
+  `--prompt-file` / positional) and continues the PARENT job's Codex session via
+  `codex --ask-for-approval never exec resume <codex_thread_id> --sandbox <same-as-parent> ...`,
+  as a NEW job (fresh job id/dir/artifacts) recording `parent_job_id` and inheriting the parent's
+  mode/access/repo. The result channel is unchanged (`result.md` → stdout).
+- Preconditions: parent exists (else `3`), parent terminal (else `4`), parent has a non-null
+  `codex_thread_id` (else exit `2` with "thread id absent or scrubbed — start a fresh run").
+- If Codex rejects the session id (expired/pruned), classification gains
+  `failure_reason = "thread_expired"` (signature: session/thread not-found wording in
+  stderr/events) with the hint "session expired — start a fresh ccodex run"; wrapper exit stays
+  `10`.
+- `status` for a resumed job shows `parent=<job_id>`; the `/ccodex` command and delegation rule
+  gain the pattern "if Codex's answer is a clarifying question, answer it with `ccodex resume`".
+- Thread-ttl interplay: `cleanup --scrub-thread-ids` (2b) is what retires resume-ability;
+  `resume` never guesses (`--last` is deliberately NOT exposed — job-addressed sessions only).
+
 ### Phase 2: Background Jobs
 
 Implement:
