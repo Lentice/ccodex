@@ -49,6 +49,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
 . (Join-Path $PSScriptRoot 'lib\ReviewPrompt.ps1')
+. (Join-Path $PSScriptRoot 'lib\UserConfig.ps1')
+. (Join-Path $PSScriptRoot 'lib\Cleanup.ps1')
 
 function Complete-CcodexInternalFailure {
     # A wrapper-internal failure after the job dir is reserved (codex path
@@ -868,8 +870,50 @@ try {
             }
             $exitCode = $reviewResult.WrapperExitCode
         }
+        'cleanup' {
+            # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
+            # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
+            # --dry-run/--include-stalled/--scrub-thread-ids are presence flags; --state-root
+            # is a hidden test-support flag. Bad --older-than/--thread-ttl syntax is a usage
+            # error (exit 2). Otherwise the engine is best-effort: exit 0, or 12 if any
+            # individual delete/scrub failed.
+            $cleanupStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $cleanupOlderThan = Get-CcodexArgValue -ArgumentList $args -FlagName '--older-than'
+            $cleanupThreadTtl = Get-CcodexArgValue -ArgumentList $args -FlagName '--thread-ttl'
+
+            $cleanupParams = @{
+                RepoFilter     = $Repo
+                DryRun         = ($args -contains '--dry-run')
+                IncludeStalled = ($args -contains '--include-stalled')
+                ScrubThreadIds = ($args -contains '--scrub-thread-ids')
+            }
+            if ($cleanupStateRoot) { $cleanupParams['StateRoot'] = $cleanupStateRoot }
+
+            if ($cleanupOlderThan) {
+                if ($cleanupOlderThan -notmatch '^\d+[dh]$') {
+                    Write-Host "ccodex: --older-than must be <Nd|Nh> (e.g. 14d or 12h); got '$cleanupOlderThan'."
+                    $exitCode = 2
+                    break
+                }
+                $olderNum = [int]($cleanupOlderThan -replace '[dh]$', '')
+                # h -> fractional days; d -> whole days.
+                $cleanupParams['OlderThanDays'] = if ($cleanupOlderThan.EndsWith('h')) { $olderNum / 24.0 } else { $olderNum }
+            }
+            if ($cleanupThreadTtl) {
+                if ($cleanupThreadTtl -notmatch '^\d+d?$') {
+                    Write-Host "ccodex: --thread-ttl must be <Nd> (e.g. 30d); got '$cleanupThreadTtl'."
+                    $exitCode = 2
+                    break
+                }
+                $cleanupParams['ThreadTtlDays'] = [int]($cleanupThreadTtl -replace 'd$', '')
+            }
+
+            $cleanupResult = Invoke-CcodexCleanup @cleanupParams
+            Write-Output $cleanupResult.Stdout
+            $exitCode = $cleanupResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented in Phase 2a. Supported commands: run, review, submit, status, wait, read, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cleanup, worker."
             $exitCode = 2
         }
     }
