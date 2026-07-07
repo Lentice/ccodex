@@ -60,7 +60,12 @@ tests/ResumeE2E.tests.ps1
   status must be terminal (`done`/`failed`/`timed_out`/`cancelled` → else throw a distinct
   not-terminal message; callers map 4); `codex_thread_id` null/absent → throw
   `"ccodex: job '<id>' has no codex thread id (absent or scrubbed by cleanup) - start a fresh run."`
-  (callers map 2). Returns the parent's mode/access/repo verbatim from its status.json.
+  (callers map 2). Parents with `access = worktree` (Phase 4 jobs) are NOT resumable in this
+  phase → throw
+  `"ccodex: job '<id>' ran in worktree access mode - resume is not supported for worktree jobs; start a fresh run."`
+  (callers map 2; the parent worktree may already have been swept by cleanup, and resuming
+  against the main repo would violate worktree isolation). Returns the parent's
+  mode/access/repo verbatim from its status.json.
 - `Build-CcodexResumeArgs([Parameter(Mandatory)][string]$ThreadId, [Parameter(Mandatory)][string]$Access, [Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ResultPath) -> string[]`
   — exactly the Phase-1 argument shape with the resume subcommand spliced in:
   `--ask-for-approval never exec resume <ThreadId> --sandbox <map(Access)> --json --color never
@@ -73,7 +78,8 @@ tests/ResumeE2E.tests.ps1
 
 - [ ] Step 1: failing tests — context: terminal done parent with thread → full context; running
   parent → not-terminal throw; scrubbed thread (null) → distinct throw; unknown id → not-found
-  throw; failed parent WITH thread → allowed (answering a failure follow-up is legitimate).
+  throw; failed parent WITH thread → allowed (answering a failure follow-up is legitimate);
+  parent with `access = worktree` → the distinct not-supported throw.
   Args: exact array equality against the spliced shape for read-only and workspace access.
   Classification: each new signature → `thread_expired`; precedence over quota when both
   present; existing four classes' assertions unchanged.
@@ -168,6 +174,7 @@ availability-gated); re-run `install.ps1`.
 | Resume = new job with parent_job_id, inherited mode/access/repo | Task 2 |
 | `codex exec resume <thread>` argument splice, no forked flag mapping | Task 1 |
 | Preconditions → 3 / 4 / 2 exactly | Tasks 1–2 |
+| Worktree parents rejected (Phase 4 interplay) | Task 1 |
 | `thread_expired` classification + hint | Task 1 |
 | No worker-prompt re-prepend; prompt.md = follow-up only | Task 2 |
 | No `--last`; job-addressed sessions only | Tasks 1–2 (never built) |

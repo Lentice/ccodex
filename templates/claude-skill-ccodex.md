@@ -21,7 +21,10 @@ code. The large inputs (diffs, whole files) go to Codex — only the result ente
 
 Hard rules (follow these exactly):
 
-1. Never delegate generative work (writing code, plans, prose). Only review/opinion/analysis.
+1. Never delegate generative work (writing code, plans, prose) through the advisory modes. The
+   only sanctioned edit path is `run --mode implement` where `diff`/`apply` are supported (see
+   Worktree isolation) — use it only when the user or the delegation policy explicitly asks,
+   and always inspect `ccodex diff` before `ccodex apply`.
 2. Never adopt a Codex finding without first verifying it against the actual code. For each
    finding, either adopt it (and act on it) or reject it with a stated reason; report both lists.
 3. Codex review is additive — still run your own tests and do your own self-review.
@@ -34,9 +37,10 @@ Hard rules (follow these exactly):
    prints a line like `ccodex: command 'help' is not implemented. Supported commands: run,
    review, submit, ...`. That list is ground truth for what this installation can do — never
    call a command that is not in it.
-2. If `ccodex` is not on PATH: ask the user for the ccodex repo location (or to clone it), then
-   run `pwsh -File <repo>\install.ps1` and ensure `%USERPROFILE%\.local\bin` is on the user
-   PATH. The installer also installs this skill, the `/ccodex` command, and the delegation rule.
+2. If `ccodex` is not on PATH: ask the user for the ccodex repo location (or to clone it) and
+   for permission to install, then run `pwsh -File <repo>\install.ps1` and ensure
+   `%USERPROFILE%\.local\bin` is on the user PATH. The installer also installs this skill, the
+   `/ccodex` command, and the delegation rule. If the user declines, continue without ccodex.
 3. Codex CLI itself must be installed and authenticated. If a call fails with
    `failure_reason: auth`, tell the user to run `codex login`; do not retry.
 4. If `doctor` is in the supported list, `ccodex doctor` is the one-shot health check
@@ -54,7 +58,9 @@ Commands appear in the supported list as their phase is installed:
 ## Core usage
 
 Prompts are piped on stdin (preferred), or passed via `--prompt-file <path>` or as a positional
-argument. Default mode is read-only advisory.
+argument. `run` and `submit` REQUIRE `--mode` (`review`, `brainstorm`, or `test`; plus
+`implement` only where Phase 4 is installed) — omitting it exits 2. Access defaults to
+read-only; `--repo` defaults to the repo containing the current directory.
 
 ```powershell
 # Second opinion / brainstorm (synchronous; result on stdout)
@@ -71,22 +77,25 @@ ccodex review --working --path src --embed-diff
 ccodex review --repo <submodule-path> --range <base>..HEAD --path . --intent "..." --embed-diff
 
 # Long-running: fire, keep working, collect later
-"Audit error handling across src/" | ccodex submit --repo <repo>   # prints <job_id>
+"Audit error handling across src/" | ccodex submit --mode review --repo <repo>   # prints <job_id>
 ccodex wait <job_id> --wait-timeout-sec 600                        # blocks; exit 20 = still running
 ccodex read <job_id>                                               # print result again anytime
 ccodex status <job_id>                                             # one-line state
 
 # Runaway guard for any run/submit
-"..." | ccodex run --hard-timeout-sec 900 --repo <repo>
+"..." | ccodex run --mode review --hard-timeout-sec 900 --repo <repo>
 ```
 
 Notes:
-- Prefer `--embed-diff` for reviews: the wrapper runs `git diff` and embeds a size-capped diff in
-  the prompt. On some hosts Codex's sandbox cannot spawn processes (signature:
-  `CreateProcessWithLogonW failed: 1385`), so asking Codex to run git itself fails; embed-diff is
-  immune to that.
-- `--access workspace` grants write access inside the target repo (e.g. test runs that produce
-  artifacts); default is read-only. Review/brainstorm modes stay read-only.
+- ALWAYS pass `--embed-diff` on `review` unless you have verified this host's Codex sandbox can
+  spawn processes: the wrapper runs `git diff` itself and embeds a size-capped diff (on many
+  hosts Codex cannot run git; signature: `CreateProcessWithLogonW failed: 1385`). If the
+  embedded diff got truncated by the size cap, re-run with narrower `--path` scopes until it
+  fits, and report any part left unreviewed as residual risk.
+- `--access workspace` grants write access inside the target repo and is reserved for
+  `--mode test` tasks that produce artifacts. Never escalate a review/brainstorm to workspace
+  access: if a review fails with `failure_reason: permission_or_sandbox`, use `--embed-diff`
+  and/or a narrower scope, or report the review as skipped.
 - Job artifacts live under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`; `status.json` there
   is the durable source of truth (`failure_reason`, `codex_thread_id`, exit codes).
 
@@ -94,12 +103,16 @@ Notes:
 
 Follow these steps literally after finishing a feature or fix:
 
-1. Determine BASE = the commit your change started from (record `git rev-parse HEAD` before you
-   begin work, or use `git merge-base HEAD <original-branch>` afterwards).
-2. Run `git diff --stat BASE..HEAD` and pick 1–3 `--path` values (directories or files) that
-   cover everything you touched.
+1. Pick the diff selector that matches where your changes currently are:
+   - already committed → `--range BASE..HEAD` (BASE = the commit you started from: record
+     `git rev-parse HEAD` before working, or use `git merge-base HEAD <original-branch>`)
+   - staged but not committed → `--staged`
+   - unstaged in the working tree → `--working`
+2. Check the matching stat (`git diff --stat BASE..HEAD`, `git diff --stat --staged`, or
+   `git diff --stat`) and pick 1–3 `--path` values (directories or files) that cover everything
+   you touched.
 3. Run:
-   `ccodex review --repo <repo-or-submodule-root> --range BASE..HEAD --path <p1> [--path <p2>] --intent "<one line: what the change does>" --embed-diff`
+   `ccodex review --repo <repo-or-submodule-root> <selector-from-step-1> --path <p1> [--path <p2>] --intent "<one line: what the change does>" --embed-diff`
 4. If exit code is 0: stdout is the review. For every finding, open the cited code and check it
    yourself; adopt (and fix) or reject (with a reason). Summarize adopted vs rejected in your
    final report — never present Codex's raw output as your own conclusion.
@@ -109,17 +122,20 @@ Follow these steps literally after finishing a feature or fix:
 ## Job management (if `cleanup`/`cancel`/`tail`/`debug` are supported)
 
 ```powershell
-ccodex cancel <job_id>          # kill a running job's process tree; wait on it then exits 22
+ccodex cancel <job_id>          # stop a running job (cancel exits 0; later wait/read exits 22)
 ccodex tail <job_id> [--lines <n>]   # last log lines of a running/finished job
 ccodex debug <job_id>           # compact diagnostic bundle + suggested next command
 ccodex cleanup --dry-run        # preview retention sweep (default: terminal jobs older than 14d)
 ccodex cleanup                  # delete expired terminal jobs (never running/young ones)
-ccodex cleanup --scrub-thread-ids --thread-ttl 30d   # blank stale codex_thread_id values only
+ccodex cleanup --scrub-thread-ids --thread-ttl 30d   # ALSO blanks stale codex_thread_id on
+                                                     # retained jobs; the sweep still deletes
+                                                     # expired jobs - preview with --dry-run
 ccodex cleanup --older-than 7d --repo <repo>         # narrower sweep
 ```
 
-Use `debug` first when a job looks wrong; use `cleanup` periodically (or when the user asks to
-clear stale data). Scrubbed thread ids make old jobs non-resumable — that is the point.
+Use `debug` first when a job looks wrong. Run `cleanup --dry-run` and then `cleanup` when the
+user asks to clear stale data, or when you notice weeks-old finished jobs accumulating.
+Scrubbed thread ids make old jobs non-resumable — that is the point.
 
 ## Worktree isolation (if `diff`/`apply` are supported)
 
@@ -174,4 +190,7 @@ and continue.
 If the target repo has `.ccodex/ccodex.json` with a `delegation` section (and/or the installed
 rule `~/.claude/rules/ccodex-delegation.md` is active), follow it: it defines auto/ask/off
 checkpoints for post-change reviews and post-plan second opinions, a minimum changed-lines
-threshold, and a per-task call cap. Explicit user requests always win over policy.
+threshold, and a per-task call cap. Defaults when keys are missing: `review_after_changes: ask`,
+`plan_second_opinion: ask`, `review_min_changed_lines: 50`, `max_codex_calls_per_task: 2`. The
+installed rule file carries the full decision algorithm — read it if it exists. Explicit user
+requests always win over policy and never count against the cap.

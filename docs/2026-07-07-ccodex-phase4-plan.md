@@ -168,8 +168,10 @@ tests/ImplementE2E.tests.ps1
   Failure → `git -C <main_repo> am --abort` (best-effort), verify the main repo is back to its
   pre-apply HEAD and clean, exit **25** with a message naming the conflicting files (parsed from
   the am output) and pointing at `ccodex diff <job_id>`.
-- Applying the same job twice: second `am` of identical patches typically conflicts → exit 25
-  with its normal message; document (no special-case tracking in this phase).
+- Applying the same job twice: ANY nonzero `am` outcome (textual conflict, empty/already-applied
+  patch, or other failure) maps to exit 25 with the main repo restored to its pre-apply state;
+  test the already-applied case separately from the textual-conflict case (no special-case
+  tracking in this phase).
 
 - [ ] Step 1: failing tests — clean apply (main repo gains the snapshot commit content; author
   identity preserved from snapshot); dirty main repo → 2, repo untouched; conflict (pre-edit the
