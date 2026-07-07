@@ -783,6 +783,116 @@ function Invoke-CcodexTailCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
 }
 
+function Invoke-CcodexDebugCommand {
+    # Compact multi-line diagnosis of a single job (design: "debug <job_id>", Phase 2b
+    # Task 7). Performs the same narrow orphan reconciliation `status` does (via
+    # Update-CcodexOrphanStatus), then renders every diagnostic field the design calls
+    # for. Read-only beyond that one reconciliation write; unknown job id -> exit 3,
+    # otherwise always exit 0 (there is no "bad" debug output, only more/less detail).
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $jobDir = $record.JobDir
+    $resultPath = Join-Path $jobDir 'result.md'
+    $stderrPath = Join-Path $jobDir 'stderr.log'
+
+    Update-CcodexOrphanStatus -JobDir $jobDir | Out-Null
+    $status = Read-CcodexStatusFile -JobDir $jobDir
+
+    $statusText = if ($status) { $status.status } else { 'unknown' }
+    if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("job: $JobId")
+
+    $statusLine = "status: $statusText"
+    if ($statusText -eq 'running') {
+        $health = Get-CcodexJobHealth -Status $status
+        if ($health) { $statusLine += " health=$health" }
+    }
+    $lines.Add($statusLine)
+
+    $mode = if ($status) { $status.mode } else { 'unknown' }
+    $access = if ($status) { $status.access } else { 'unknown' }
+    $backend = if ($status) { $status.backend } else { 'unknown' }
+    $lines.Add("mode: $mode  access: $access  backend: $backend")
+    $lines.Add("repo: $(if ($status) { $status.repo } else { 'unknown' })")
+
+    foreach ($field in @(
+            @{ Key = 'created_at'; Label = 'created_at' },
+            @{ Key = 'started_at'; Label = 'started_at' },
+            @{ Key = 'finished_at'; Label = 'finished_at' },
+            @{ Key = 'terminated_at'; Label = 'terminated_at' },
+            @{ Key = 'cancelled_at'; Label = 'cancelled_at' }
+        )) {
+        $value = if ($status) { $status.($field.Key) } else { $null }
+        if (-not [string]::IsNullOrEmpty([string]$value)) {
+            $lines.Add("$($field.Label): $value")
+        }
+    }
+
+    $backendId = if ($status) { $status.backend_id } else { $null }
+    if ([string]::IsNullOrEmpty([string]$backendId)) {
+        $lines.Add('backend_id: (absent)')
+    } else {
+        $alive = Test-CcodexWorkerAlive -BackendId $backendId
+        $verdict = if ($alive) { 'alive' } else { 'dead' }
+        $lines.Add("backend_id: $backendId ($verdict)")
+    }
+
+    $codexExitText = if ($status -and $null -ne $status.codex_exit_code) { $status.codex_exit_code } else { 'null' }
+    $wrapperExitText = if ($status -and $null -ne $status.wrapper_exit_code) { $status.wrapper_exit_code } else { 'null' }
+    $lines.Add("codex_exit_code: $codexExitText  wrapper_exit_code: $wrapperExitText")
+
+    $failureReason = if ($status) { $status.failure_reason } else { $null }
+    if (-not [string]::IsNullOrEmpty([string]$failureReason)) {
+        $lines.Add("failure_reason: $failureReason")
+        $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
+        if ($hintLine) { $lines.Add("  $hintLine") }
+    }
+
+    $codexThreadId = if ($status) { $status.codex_thread_id } else { $null }
+    if ([string]::IsNullOrEmpty([string]$codexThreadId)) {
+        $lines.Add('codex_thread_id: absent/scrubbed')
+    } else {
+        $lines.Add("codex_thread_id: $codexThreadId")
+    }
+
+    if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        $resultSize = (Get-Item -LiteralPath $resultPath).Length
+        $lines.Add("result.md: present ($resultSize bytes)")
+    } else {
+        $lines.Add('result.md: absent')
+    }
+
+    $lines.Add('== stderr.log (last 5) ==')
+    $stderrTail = Get-CcodexTailLines -Path $stderrPath -Lines 5
+    if ($null -eq $stderrTail) { $lines.Add('(absent)') } else { $lines.AddRange([string[]]$stderrTail) }
+
+    $lines.Add("job dir: $jobDir")
+
+    # "next command" recommendation: only for the commands that exist today. A future
+    # Phase 5 `resume` pointer belongs here once that command lands.
+    $nextCommand = switch ($statusText) {
+        'running' { "next: ccodex wait $JobId" }
+        'done' { "next: ccodex read $JobId" }
+        'failed' { "next: ccodex tail $JobId" }
+        default { $null }
+    }
+    if ($nextCommand) { $lines.Add($nextCommand) }
+
+    $output = [string]::Join("`n", $lines)
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
+}
+
 function ConvertTo-CcodexTailLinesCount {
     # --lines must be a positive whole number of lines (0 or negative is a usage error,
     # not "use the default"); non-numeric text is likewise a usage error, mirroring
@@ -1110,6 +1220,27 @@ try {
             }
             $exitCode = $tailResult.WrapperExitCode
         }
+        'debug' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`tail` use). --state-root is a
+            # hidden test flag.
+            $debugJobId = $PositionalTask
+            $debugStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $debugJobId) {
+                Write-Host "ccodex: debug requires a job id."
+                $exitCode = 2
+                break
+            }
+            $debugParams = @{ JobId = $debugJobId }
+            if ($debugStateRoot) { $debugParams['StateRoot'] = $debugStateRoot }
+            $debugResult = Invoke-CcodexDebugCommand @debugParams
+            if ($debugResult.WrapperExitCode -eq 0) {
+                Write-Output $debugResult.Stdout
+            } else {
+                Write-Host $debugResult.Message
+            }
+            $exitCode = $debugResult.WrapperExitCode
+        }
         'cleanup' {
             # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
             # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
@@ -1153,7 +1284,7 @@ try {
             $exitCode = $cleanupResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, cleanup, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, debug, cleanup, worker."
             $exitCode = 2
         }
     }

@@ -175,5 +175,102 @@ $shellUnknownExit = $LASTEXITCODE
 Assert-Equal $shellUnknownExit 2 'an unknown command exits 2'
 Assert-True ((($shellUnknownOut -join "`n")) -like '*tail*') 'the supported-commands message now lists tail'
 
+
+# ============================================================
+# Invoke-CcodexDebugCommand (design: "debug <job_id>", Phase 2b Task 7)
+# ============================================================
+
+Write-Host "Invoke-CcodexDebugCommand: unknown job id -> exit 3"
+$debugUnknown = Invoke-CcodexDebugCommand -JobId 'does-not-exist-99999' -StateRoot $localAppData
+Assert-Equal $debugUnknown.WrapperExitCode 3 'unknown job id -> exit 3'
+Assert-True (-not [string]::IsNullOrEmpty($debugUnknown.Message)) 'unknown job id returns a diagnostic message'
+
+Write-Host "Invoke-CcodexDebugCommand: running-alive fixture shows health + wait recommendation"
+$jobRunning = New-CcodexTestJobDir
+New-CcodexLineFile -Path (Join-Path $jobRunning.JobDir 'stderr.log') -LineCount 10 -Prefix 'runerr'
+$runningStatus = Read-CcodexStatusFile -JobDir $jobRunning.JobDir
+$updatedRunning = [ordered]@{}
+foreach ($p in $runningStatus.PSObject.Properties) { $updatedRunning[$p.Name] = $p.Value }
+$updatedRunning['backend_id'] = "$PID;$((Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o'))"
+$updatedRunning['started_at'] = (Get-Date).ToString('o')
+Write-CcodexJsonFileAtomic -Path (Join-Path $jobRunning.JobDir 'status.json') -Object $updatedRunning
+$debugRunning = Invoke-CcodexDebugCommand -JobId $jobRunning.JobId -StateRoot $localAppData
+Assert-Equal $debugRunning.WrapperExitCode 0 'running fixture debug exits 0'
+Assert-True ($debugRunning.Stdout -like '*status: running health=ok*') 'running fixture shows status + health=ok'
+Assert-True ($debugRunning.Stdout -like "*job: $($jobRunning.JobId)*") 'running fixture shows the job id'
+Assert-True ($debugRunning.Stdout -like '*started_at:*') 'running fixture shows started_at'
+Assert-True ($debugRunning.Stdout -like '*backend_id:*(alive)*') 'running fixture shows a live backend_id verdict'
+Assert-True ($debugRunning.Stdout -like '*runerr 10*') 'running fixture shows the last stderr.log lines'
+Assert-True ($debugRunning.Stdout -like "*next: ccodex wait $($jobRunning.JobId)*") 'running fixture recommends wait'
+Assert-True ($debugRunning.Stdout -notlike '*next: ccodex read*') 'running fixture does not recommend read'
+
+Write-Host "Invoke-CcodexDebugCommand: failed-with-reason fixture shows failure_reason + hint + tail lines"
+$jobFailed = New-CcodexTestJobDir
+New-CcodexLineFile -Path (Join-Path $jobFailed.JobDir 'stderr.log') -LineCount 10 -Prefix 'failerr'
+$failedStatus = Read-CcodexStatusFile -JobDir $jobFailed.JobDir
+$updatedFailed = [ordered]@{}
+foreach ($p in $failedStatus.PSObject.Properties) { $updatedFailed[$p.Name] = $p.Value }
+$updatedFailed['status'] = 'failed'
+$updatedFailed['codex_exit_code'] = 1
+$updatedFailed['wrapper_exit_code'] = 10
+$updatedFailed['failure_reason'] = 'quota_or_rate_limit'
+$updatedFailed['finished_at'] = (Get-Date).ToString('o')
+Write-CcodexJsonFileAtomic -Path (Join-Path $jobFailed.JobDir 'status.json') -Object $updatedFailed
+$debugFailed = Invoke-CcodexDebugCommand -JobId $jobFailed.JobId -StateRoot $localAppData
+Assert-Equal $debugFailed.WrapperExitCode 0 'failed fixture debug exits 0'
+Assert-True ($debugFailed.Stdout -like '*status: failed*') 'failed fixture shows status failed'
+Assert-True ($debugFailed.Stdout -like '*codex_exit_code: 1  wrapper_exit_code: 10*') 'failed fixture shows both exit codes'
+Assert-True ($debugFailed.Stdout -like '*failure_reason: quota_or_rate_limit*') 'failed fixture shows failure_reason'
+Assert-True ($debugFailed.Stdout -like '*do not auto-retry*') 'failed fixture shows the matching hint line'
+Assert-True ($debugFailed.Stdout -like '*failerr 10*') 'failed fixture shows the last stderr.log lines'
+Assert-True ($debugFailed.Stdout -like "*next: ccodex tail $($jobFailed.JobId)*") 'failed fixture recommends tail'
+
+Write-Host "Invoke-CcodexDebugCommand: done fixture shows result.md present/size + read recommendation"
+$jobDone = New-CcodexTestJobDir
+Write-CcodexTextFile -Path (Join-Path $jobDone.JobDir 'result.md') -Content 'done result content'
+$doneStatus = Read-CcodexStatusFile -JobDir $jobDone.JobDir
+$updatedDone = [ordered]@{}
+foreach ($p in $doneStatus.PSObject.Properties) { $updatedDone[$p.Name] = $p.Value }
+$updatedDone['status'] = 'done'
+$updatedDone['codex_exit_code'] = 0
+$updatedDone['wrapper_exit_code'] = 0
+$updatedDone['finished_at'] = (Get-Date).ToString('o')
+$updatedDone['codex_thread_id'] = 'thread-abc-123'
+Write-CcodexJsonFileAtomic -Path (Join-Path $jobDone.JobDir 'status.json') -Object $updatedDone
+$debugDone = Invoke-CcodexDebugCommand -JobId $jobDone.JobId -StateRoot $localAppData
+Assert-Equal $debugDone.WrapperExitCode 0 'done fixture debug exits 0'
+Assert-True ($debugDone.Stdout -like '*status: done*') 'done fixture shows status done'
+Assert-True ($debugDone.Stdout -like '*result.md: present*bytes*') 'done fixture shows result.md present with a size'
+Assert-True ($debugDone.Stdout -like '*codex_thread_id: thread-abc-123*') 'done fixture shows the codex_thread_id when present'
+Assert-True ($debugDone.Stdout -like "*next: ccodex read $($jobDone.JobId)*") 'done fixture recommends read'
+Assert-True ($debugDone.Stdout -notlike '*failure_reason:*') 'done fixture shows no failure_reason'
+
+Write-Host "Invoke-CcodexDebugCommand: job with no codex_thread_id shows absent/scrubbed"
+Assert-True ($debugFailed.Stdout -like '*codex_thread_id: absent/scrubbed*') 'failed fixture (no thread id) shows absent/scrubbed'
+
+Write-Host "shell-level: ccodex.ps1 debug <id> --state-root <root> prints the diagnosis, exit 0"
+$shellDebugOut = & pwsh -NoLogo -NoProfile -File $ccodexPs debug $jobDone.JobId --state-root $localAppData
+$shellDebugExit = $LASTEXITCODE
+Assert-Equal $shellDebugExit 0 'shell-level debug invocation exits 0'
+$shellDebugText = ($shellDebugOut -join "`n")
+Assert-True ($shellDebugText -like "*job: $($jobDone.JobId)*") 'shell-level debug output includes the job id'
+Assert-True ($shellDebugText -like '*job dir:*') 'shell-level debug output includes the job dir path'
+
+Write-Host "shell-level: ccodex.ps1 debug with no job id -> exit 2"
+$shellDebugNoIdOut = & pwsh -NoLogo -NoProfile -File $ccodexPs debug --state-root $localAppData
+$shellDebugNoIdExit = $LASTEXITCODE
+Assert-Equal $shellDebugNoIdExit 2 'shell-level debug with no job id exits 2'
+
+Write-Host "shell-level: ccodex.ps1 debug <unknown-id> -> exit 3"
+$shellDebugUnknownOut = & pwsh -NoLogo -NoProfile -File $ccodexPs debug does-not-exist-77777 --state-root $localAppData
+$shellDebugUnknownExit = $LASTEXITCODE
+Assert-Equal $shellDebugUnknownExit 3 'shell-level debug with unknown job id exits 3'
+
+Write-Host "shell-level: unknown command message names debug among the supported commands"
+$shellUnknownOut2 = & pwsh -NoLogo -NoProfile -File $ccodexPs bogus-command
+$shellUnknownExit2 = $LASTEXITCODE
+Assert-Equal $shellUnknownExit2 2 'an unknown command exits 2'
+Assert-True ((($shellUnknownOut2 -join "`n")) -like '*debug*') 'the supported-commands message now lists debug'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
