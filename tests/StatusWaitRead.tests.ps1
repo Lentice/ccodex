@@ -47,7 +47,8 @@ function New-CcodexTestJobWithStatus {
         [int]$EvidenceExitCode = 0,
         [switch]$WithResultFile,
         [string]$LastHeartbeatAt = $null,
-        [string]$StartedAt = $null
+        [string]$StartedAt = $null,
+        [string]$ParentJobId = $null
     )
     $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
     $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
@@ -58,7 +59,7 @@ function New-CcodexTestJobWithStatus {
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content 'test worker prompt body'
-    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode -StartedAt $StartedAt -LastHeartbeatAt $LastHeartbeatAt
+    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode -StartedAt $StartedAt -LastHeartbeatAt $LastHeartbeatAt -ParentJobId $ParentJobId
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
     if ($WithExitCodeEvidence) {
         Write-CcodexTextFile -Path (Join-Path $jobDir 'exit_code.txt') -Content "$EvidenceExitCode"
@@ -151,6 +152,26 @@ Write-Host "Invoke-CcodexStatusCommand: unknown job id -> exit 3"
 $resultUnknown = Invoke-CcodexStatusCommand -JobId 'does-not-exist-99999' -StateRoot $localAppData
 Assert-Equal $resultUnknown.WrapperExitCode 3 'unknown job id -> exit 3'
 Assert-True (-not [string]::IsNullOrEmpty($resultUnknown.Message)) 'unknown job id returns a diagnostic message'
+
+# --- status: parent lineage surfacing ---
+
+Write-Host "Invoke-CcodexStatusCommand: resumed (child) job with parent_job_id -> status line appends parent=<id>"
+$jobParentless = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0
+$jobChild = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -ParentJobId $jobParentless.JobId
+$resultChild = Invoke-CcodexStatusCommand -JobId $jobChild.JobId -StateRoot $localAppData
+Assert-Equal $resultChild.WrapperExitCode 0 'resumed job status -> exit 0'
+Assert-Equal $resultChild.Stdout "$($jobChild.JobId) done codex_exit_code=0 wrapper_exit_code=0 parent=$($jobParentless.JobId)" 'resumed job status line appends parent=<parent_job_id>'
+
+Write-Host "Invoke-CcodexStatusCommand: parentless job status line is unchanged (no parent= suffix)"
+$resultParentless = Invoke-CcodexStatusCommand -JobId $jobParentless.JobId -StateRoot $localAppData
+Assert-Equal $resultParentless.WrapperExitCode 0 'parentless job status -> exit 0'
+Assert-Equal $resultParentless.Stdout "$($jobParentless.JobId) done codex_exit_code=0 wrapper_exit_code=0" 'parentless job status line has no parent= suffix'
+
+Write-Host "Invoke-CcodexStatusCommand: non-terminal resumed job also appends parent=<id>"
+$jobChildRunning = New-CcodexTestJobWithStatus -Status 'created' -ParentJobId $jobParentless.JobId
+$resultChildRunning = Invoke-CcodexStatusCommand -JobId $jobChildRunning.JobId -StateRoot $localAppData
+Assert-Equal $resultChildRunning.WrapperExitCode 0 'non-terminal resumed job status -> exit 0'
+Assert-Equal $resultChildRunning.Stdout "$($jobChildRunning.JobId) created parent=$($jobParentless.JobId)" 'non-terminal resumed job status line appends parent=<parent_job_id>'
 
 # --- shell-level: pwsh -File ccodex.ps1 status <id> --state-root ... ---
 

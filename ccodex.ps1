@@ -796,6 +796,11 @@ function Invoke-CcodexStatusCommand {
         }
     }
 
+    $parentJobId = if ($statusObj) { $statusObj.parent_job_id } else { $null }
+    if (-not [string]::IsNullOrEmpty([string]$parentJobId)) {
+        $line += " parent=$parentJobId"
+    }
+
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $line; Message = $null }
 }
 
@@ -1375,6 +1380,11 @@ function Invoke-CcodexDebugCommand {
     $backend = if ($status) { $status.backend } else { 'unknown' }
     $lines.Add("mode: $mode  access: $access  backend: $backend")
     $lines.Add("repo: $(if ($status) { $status.repo } else { 'unknown' })")
+
+    $parentJobId = if ($status) { $status.parent_job_id } else { $null }
+    if (-not [string]::IsNullOrEmpty([string]$parentJobId)) {
+        $lines.Add("parent: $parentJobId")
+    }
 
     foreach ($field in @(
             @{ Key = 'created_at'; Label = 'created_at' },

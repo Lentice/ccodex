@@ -248,6 +248,18 @@ Assert-True ($debugDone.Stdout -notlike '*failure_reason:*') 'done fixture shows
 Write-Host "Invoke-CcodexDebugCommand: job with no codex_thread_id shows absent/scrubbed"
 Assert-True ($debugFailed.Stdout -like '*codex_thread_id: absent/scrubbed*') 'failed fixture (no thread id) shows absent/scrubbed'
 
+Write-Host "Invoke-CcodexDebugCommand: resumed (child) job with parent_job_id shows a parent line"
+Assert-True ($debugDone.Stdout -notlike '*parent:*') 'parentless done fixture shows no parent line'
+$jobChild = New-CcodexTestJobDir
+$childStatus = Read-CcodexStatusFile -JobDir $jobChild.JobDir
+$updatedChild = [ordered]@{}
+foreach ($p in $childStatus.PSObject.Properties) { $updatedChild[$p.Name] = $p.Value }
+$updatedChild['parent_job_id'] = $jobDone.JobId
+Write-CcodexJsonFileAtomic -Path (Join-Path $jobChild.JobDir 'status.json') -Object $updatedChild
+$debugChild = Invoke-CcodexDebugCommand -JobId $jobChild.JobId -StateRoot $localAppData
+Assert-Equal $debugChild.WrapperExitCode 0 'resumed-child fixture debug exits 0'
+Assert-True ($debugChild.Stdout -like "*parent: $($jobDone.JobId)*") 'resumed-child fixture shows the parent job id line'
+
 Write-Host "shell-level: ccodex.ps1 debug <id> --state-root <root> prints the diagnosis, exit 0"
 $shellDebugOut = & pwsh -NoLogo -NoProfile -File $ccodexPs debug $jobDone.JobId --state-root $localAppData
 $shellDebugExit = $LASTEXITCODE
