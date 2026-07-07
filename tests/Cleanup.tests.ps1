@@ -266,6 +266,51 @@ $r12 = Invoke-CcodexCleanup -RepoFilter $filterRepo -OlderThanDays 14 -DryRun $f
 Assert-True (-not (Test-Path -LiteralPath $inScopeDir)) 'in-scope repo job deleted'
 Assert-True (Test-Path -LiteralPath $outScopeDir) 'out-of-scope repo job untouched'
 
+# --- (13) sub-day OlderThanDays is honored exactly, not rounded via [int] coercion ---
+
+Write-Host "Invoke-CcodexCleanup: sub-day OlderThanDays (e.g. 12h -> 0.5d) is honored exactly"
+$s13 = New-CleanupStateRoot
+$app13 = New-CleanupAppData
+$halfDayKeepDir = New-CleanupJob -StateRoot $s13 -RepoKey $repoKeyA -JobId 'halfday-keep' -Status 'done' -CreatedAt (Get-Ago (35 / 1440.0)) -FinishedAt (Get-Ago (30 / 1440.0)) -CodexExitCode 0 -WrapperExitCode 0
+$halfDayDeleteDir = New-CleanupJob -StateRoot $s13 -RepoKey $repoKeyA -JobId 'halfday-delete' -Status 'done' -CreatedAt (Get-Ago (13.1 / 24.0)) -FinishedAt (Get-Ago (13.0 / 24.0)) -CodexExitCode 0 -WrapperExitCode 0
+$r13 = Invoke-CcodexCleanup -OlderThanDays 0.5 -DryRun $false -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s13 -AppDataRoot $app13
+Assert-True (Test-Path -LiteralPath $halfDayKeepDir) 'a job finished 30 minutes ago is kept when OlderThanDays=0.5 (12h)'
+Assert-True (-not (Test-Path -LiteralPath $halfDayDeleteDir)) 'a job finished 13 hours ago is deleted when OlderThanDays=0.5 (12h)'
+
+# --- (14) dispatcher: --older-than 1h honors an exact one-hour threshold ---
+
+Write-Host "Dispatcher: --older-than 1h keeps a job finished 30 minutes ago but deletes one finished 2 hours ago"
+$s14 = New-CleanupStateRoot
+$app14 = New-CleanupAppData
+$job30m = New-CleanupJob -StateRoot $s14 -RepoKey $repoKeyA -JobId 'min30' -Status 'done' -CreatedAt (Get-Ago (35 / 1440.0)) -FinishedAt (Get-Ago (30 / 1440.0)) -CodexExitCode 0 -WrapperExitCode 0
+$job2h = New-CleanupJob -StateRoot $s14 -RepoKey $repoKeyA -JobId 'hour2' -Status 'done' -CreatedAt (Get-Ago (125 / 1440.0)) -FinishedAt (Get-Ago (120 / 1440.0)) -CodexExitCode 0 -WrapperExitCode 0
+& pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 1h --state-root $s14 | Out-Null
+Assert-Equal $LASTEXITCODE 0 'dispatcher --older-than 1h exits 0'
+Assert-True (Test-Path -LiteralPath $job30m) 'dispatcher --older-than 1h keeps a job finished 30 minutes ago'
+Assert-True (-not (Test-Path -LiteralPath $job2h)) 'dispatcher --older-than 1h deletes a job finished 2 hours ago'
+
+# --- (15) dispatcher: --older-than 23h boundary ---
+
+Write-Host "Dispatcher: --older-than 23h keeps a job finished ~22h50m ago but deletes one finished ~23h10m ago"
+$s15 = New-CleanupStateRoot
+$app15 = New-CleanupAppData
+$jobUnder23 = New-CleanupJob -StateRoot $s15 -RepoKey $repoKeyA -JobId 'under23' -Status 'done' -CreatedAt (Get-Ago ((22 * 60 + 55) / 1440.0)) -FinishedAt (Get-Ago ((22 * 60 + 50) / 1440.0)) -CodexExitCode 0 -WrapperExitCode 0
+$jobOver23 = New-CleanupJob -StateRoot $s15 -RepoKey $repoKeyA -JobId 'over23' -Status 'done' -CreatedAt (Get-Ago ((23 * 60 + 15) / 1440.0)) -FinishedAt (Get-Ago ((23 * 60 + 10) / 1440.0)) -CodexExitCode 0 -WrapperExitCode 0
+& pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 23h --state-root $s15 | Out-Null
+Assert-True (Test-Path -LiteralPath $jobUnder23) 'dispatcher --older-than 23h keeps a job finished ~22h50m ago'
+Assert-True (-not (Test-Path -LiteralPath $jobOver23)) 'dispatcher --older-than 23h deletes a job finished ~23h10m ago'
+
+# --- (16) dispatcher: whole-day --older-than Nd behavior is unchanged by the sub-day fix ---
+
+Write-Host "Dispatcher: --older-than 14d (whole days) still deletes old jobs and keeps young ones"
+$s16 = New-CleanupStateRoot
+$app16 = New-CleanupAppData
+$oldNd = New-CleanupJob -StateRoot $s16 -RepoKey $repoKeyA -JobId 'nd-old' -Status 'done' -CreatedAt (Get-Ago 41) -FinishedAt (Get-Ago 40) -CodexExitCode 0 -WrapperExitCode 0
+$youngNd = New-CleanupJob -StateRoot $s16 -RepoKey $repoKeyA -JobId 'nd-young' -Status 'done' -CreatedAt (Get-Ago 2) -FinishedAt (Get-Ago 1) -CodexExitCode 0 -WrapperExitCode 0
+& pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 14d --state-root $s16 | Out-Null
+Assert-True (-not (Test-Path -LiteralPath $oldNd)) 'dispatcher --older-than 14d deletes a 40-day-old job'
+Assert-True (Test-Path -LiteralPath $youngNd) 'dispatcher --older-than 14d keeps a 1-day-old job'
+
 # --- cleanup temp ---
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 

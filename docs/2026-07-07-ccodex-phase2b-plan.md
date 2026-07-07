@@ -146,6 +146,13 @@ rewrite branch); extend `tests/JobStatus.tests.ps1`.
 - [ ] Step 2: red. Step 3: implement. Step 4: green + FULL suite.
 - [ ] Step 5: commit — `feat: add ccodex cleanup with retention and thread-id scrubbing`
 
+**Post-review amendment (2026-07-07):** the `Invoke-CcodexCleanup` signature's
+`[int]$OlderThanDays` was amended to `[double]$OlderThanDays` to support sub-day precision, per
+codex review. The dispatcher's `Nh` conversion (`--older-than 12h` → `0.5` days) was being bound
+to an `[int]` parameter, so PowerShell coerced it (e.g. `0.5` → `0`), making the retention
+threshold effectively zero and every terminal job eligible for deletion. The `[double]` parameter
+now honors sub-day thresholds exactly.
+
 ---
 
 ### Task 4: `ccodex cancel`

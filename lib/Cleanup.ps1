@@ -60,7 +60,7 @@ function Get-CcodexJobEndUtc {
 
 function Invoke-CcodexCleanup {
     param(
-        [int]$OlderThanDays,
+        [double]$OlderThanDays,
         [Nullable[int]]$ThreadTtlDays,
         [string]$RepoFilter,
         [bool]$DryRun,
