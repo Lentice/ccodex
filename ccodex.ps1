@@ -712,6 +712,89 @@ function Invoke-CcodexCancelCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
 }
 
+function Get-CcodexTailLines {
+    # Reads at most the last 64 KB of $Path via a stream seek from the end (never the
+    # whole file), decodes it as UTF-8, and returns the last $Lines lines as a string
+    # array. Returns $null when $Path does not exist (the caller renders that as the
+    # `(absent)` placeholder) and an empty array (never $null) for an existing-but-empty
+    # file. When the seek lands mid-file, the first decoded line is a partial line
+    # (split across the seek boundary) and is dropped rather than shown truncated.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Lines
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+
+    $maxTailBytes = 64KB
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $length = $stream.Length
+        $seekLength = [Math]::Min($length, [long]$maxTailBytes)
+        $seekedMidFile = $seekLength -lt $length
+        if ($seekLength -gt 0) { $stream.Seek(-$seekLength, [System.IO.SeekOrigin]::End) | Out-Null }
+        $buffer = New-Object byte[] $seekLength
+        if ($seekLength -gt 0) { $stream.Read($buffer, 0, [int]$seekLength) | Out-Null }
+        $text = [System.Text.Encoding]::UTF8.GetString($buffer)
+    } finally {
+        $stream.Dispose()
+    }
+
+    $allLines = [System.Collections.Generic.List[string]]::new()
+    $allLines.AddRange([string[]]($text -split "`r?`n"))
+    if ($seekedMidFile -and $allLines.Count -gt 0) { $allLines.RemoveAt(0) }
+    if ($allLines.Count -gt 0 -and $allLines[$allLines.Count - 1] -eq '') { $allLines.RemoveAt($allLines.Count - 1) }
+
+    if ($allLines.Count -le $Lines) { return , $allLines.ToArray() }
+    return , $allLines.GetRange($allLines.Count - $Lines, $Lines).ToArray()
+}
+
+function Invoke-CcodexTailCommand {
+    # Diagnostic tail of a job's live/finished-process artifacts (design: "tail <job_id>",
+    # Phase 2b Task 6). Read-only, never reconciles or mutates status.json — unlike
+    # status/wait/read, this is pure log inspection. Prints stderr.log's tail block first,
+    # then codex-events.jsonl's; a missing file renders as a `(absent)` placeholder rather
+    # than failing the whole command.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [int]$Lines = 40,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $jobDir = $record.JobDir
+    $stderrPath = Join-Path $jobDir 'stderr.log'
+    $eventsPath = Join-Path $jobDir 'codex-events.jsonl'
+
+    $stderrLines = Get-CcodexTailLines -Path $stderrPath -Lines $Lines
+    $eventsLines = Get-CcodexTailLines -Path $eventsPath -Lines $Lines
+
+    $blocks = New-Object System.Collections.Generic.List[string]
+    $blocks.Add("== stderr.log (last $Lines) ==")
+    if ($null -eq $stderrLines) { $blocks.Add('(absent)') } else { $blocks.AddRange([string[]]$stderrLines) }
+    $blocks.Add("== codex-events.jsonl (last $Lines) ==")
+    if ($null -eq $eventsLines) { $blocks.Add('(absent)') } else { $blocks.AddRange([string[]]$eventsLines) }
+
+    $output = [string]::Join("`n", $blocks)
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
+}
+
+function ConvertTo-CcodexTailLinesCount {
+    # --lines must be a positive whole number of lines (0 or negative is a usage error,
+    # not "use the default"); non-numeric text is likewise a usage error, mirroring
+    # ConvertTo-CcodexHardTimeoutSec's shape for --hard-timeout-sec.
+    param([Parameter(Mandatory)][string]$FlagName, [Parameter(Mandatory)][string]$ValueText)
+    $parsed = 0
+    if (-not [int]::TryParse($ValueText, [ref]$parsed) -or $parsed -le 0) {
+        throw "ccodex: $FlagName must be a positive whole number of lines; got '$ValueText'."
+    }
+    return $parsed
+}
+
 function Get-CcodexArgValue {
     # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
     # hyphens that PowerShell's native named-parameter binder cannot match against a
@@ -996,6 +1079,37 @@ try {
             }
             $exitCode = $reviewResult.WrapperExitCode
         }
+        'tail' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --lines/--state-root are
+            # flags; a bad --lines is a usage error (exit 2), same shape as --hard-timeout-sec.
+            $tailJobId = $PositionalTask
+            $tailStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $tailLinesText = Get-CcodexArgValue -ArgumentList $args -FlagName '--lines'
+            if (-not $tailJobId) {
+                Write-Host "ccodex: tail requires a job id."
+                $exitCode = 2
+                break
+            }
+            $tailParams = @{ JobId = $tailJobId }
+            if ($tailStateRoot) { $tailParams['StateRoot'] = $tailStateRoot }
+            if ($tailLinesText) {
+                try {
+                    $tailParams['Lines'] = ConvertTo-CcodexTailLinesCount -FlagName '--lines' -ValueText $tailLinesText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
+            $tailResult = Invoke-CcodexTailCommand @tailParams
+            if ($tailResult.WrapperExitCode -eq 0) {
+                Write-Output $tailResult.Stdout
+            } else {
+                Write-Host $tailResult.Message
+            }
+            $exitCode = $tailResult.WrapperExitCode
+        }
         'cleanup' {
             # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
             # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
@@ -1039,7 +1153,7 @@ try {
             $exitCode = $cleanupResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, cleanup, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, cleanup, worker."
             $exitCode = 2
         }
     }
