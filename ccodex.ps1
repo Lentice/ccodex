@@ -474,7 +474,7 @@ function Invoke-CcodexStatusCommand {
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
 
-    if ($statusText -in @('done', 'failed')) {
+    if ($statusText -in @('done', 'failed', 'cancelled')) {
         $codexExitText = if ($null -eq $statusObj.codex_exit_code) { 'null' } else { $statusObj.codex_exit_code }
         $wrapperExitText = if ($null -eq $statusObj.wrapper_exit_code) { 'null' } else { $statusObj.wrapper_exit_code }
         $line = "$JobId $statusText codex_exit_code=$codexExitText wrapper_exit_code=$wrapperExitText"
@@ -545,6 +545,12 @@ function Invoke-CcodexWaitCommand {
             return [pscustomobject]@{ WrapperExitCode = $recordedWrapperExitCode; Stdout = $null; Message = $timeoutMessage }
         }
 
+        if ($statusText -eq 'cancelled') {
+            # Terminal cancellation (Task 4): concise status line, wrapper exit 22.
+            $cancelledMessage = "ccodex: job $JobId cancelled`n  job dir: $jobDir"
+            return [pscustomobject]@{ WrapperExitCode = 22; Stdout = $null; Message = $cancelledMessage }
+        }
+
         if ($deadline -and (Get-Date) -ge $deadline) {
             $line = "$JobId $statusText"
             if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
@@ -584,7 +590,7 @@ function Invoke-CcodexReadCommand {
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
 
-    if ($statusText -notin @('done', 'failed', 'timed_out')) {
+    if ($statusText -notin @('done', 'failed', 'timed_out', 'cancelled')) {
         $line = "$JobId $statusText"
         if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
         $message = "$line`nccodex: job $JobId is not finished yet; run ``ccodex wait $JobId`` to block until it completes."
@@ -604,6 +610,93 @@ function Invoke-CcodexReadCommand {
 
     $failureMessage = "ccodex: job $JobId $statusText but result.md is missing or empty`n  job dir: $jobDir`n  result:  $resultPath"
     return [pscustomobject]@{ WrapperExitCode = 11; Stdout = $null; Message = $failureMessage }
+}
+
+function Invoke-CcodexCancelCommand {
+    # Identity-checked process-tree termination (design: "cancel <job_id>", Phase 2b Task 4).
+    # Every branch that mutates status.json does so under the per-job lock (acquired once,
+    # up front); branches that only need to READ current state release the lock again
+    # before doing so, since Update-CcodexOrphanStatus (the dead-worker-with-evidence path)
+    # acquires its own lock internally and must never be called while this command still
+    # holds it (that would deadlock the lock's own retry loop against itself).
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $jobDir = $record.JobDir
+    $terminalStatuses = @('done', 'failed', 'timed_out', 'cancelled')
+
+    try {
+        Lock-CcodexJob -JobDir $jobDir -TimeoutSec 10 -CommandName 'cancel' | Out-Null
+    } catch {
+        $message = "ccodex: could not acquire the job lock to cancel job '$JobId' within 10s.`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 21; Stdout = $null; Message = $message }
+    }
+
+    $status = Read-CcodexStatusFile -JobDir $jobDir
+    if ($null -eq $status) {
+        Unlock-CcodexJob -JobDir $jobDir
+        $message = "ccodex: internal error: job '$JobId' has no readable status.json.`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+
+    $statusText = $status.status
+
+    if ($statusText -in $terminalStatuses) {
+        # No-op: already terminal (whichever terminal status). Nothing to mutate.
+        Unlock-CcodexJob -JobDir $jobDir
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId already $statusText"; Message = $null }
+    }
+
+    if ($statusText -eq 'running' -and -not (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
+        # The recorded worker identity is dead: this is not a live job to kill, it is an
+        # orphan. Release the lock and defer to the same evidence-based reconciliation
+        # `status`/`wait`/`read` already perform, rather than forcing `cancelled` over a
+        # job that actually completed (or failed) before the cancel request arrived.
+        Unlock-CcodexJob -JobDir $jobDir
+        $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+        $reconciledStatus = Read-CcodexStatusFile -JobDir $jobDir
+        $finalStatusText = if ($reconciledStatus) { $reconciledStatus.status } else { $reconciliation.Status }
+        if ([string]::IsNullOrEmpty($finalStatusText)) { $finalStatusText = 'unknown' }
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId $finalStatusText"; Message = $null }
+    }
+
+    if ($statusText -eq 'running') {
+        # Worker identity verified alive: force-kill the whole process tree (the worker
+        # process itself AND whatever codex child it spawned), then poll for actual death
+        # -- taskkill returns once the kill request is issued, not once the process tree
+        # has actually exited.
+        $backendParts = $status.backend_id.Split(';', 2)
+        $workerPid = [int]$backendParts[0]
+        Stop-CcodexProcessTree -ProcessId $workerPid
+        $killDeadline = (Get-Date).AddSeconds(10)
+        while ((Get-Date) -lt $killDeadline -and (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+
+    # Reached for `running` (worker just force-killed above) or `created` (never started):
+    # mark the job cancelled directly, preserving every existing field (append-only) and
+    # stamping cancelled_at. wrapper_exit_code is left exactly as it was (null for a job
+    # that never reached a terminal codex exit code).
+    $cancelledAt = (Get-Date).ToUniversalTime().ToString('o')
+    $updated = [ordered]@{}
+    foreach ($property in $status.PSObject.Properties) {
+        $updated[$property.Name] = $property.Value
+    }
+    $updated['status'] = 'cancelled'
+    $updated['cancelled_at'] = $cancelledAt
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $updated
+    Unlock-CcodexJob -JobDir $jobDir
+
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
 }
 
 function Get-CcodexArgValue {
@@ -813,6 +906,26 @@ try {
             }
             $exitCode = $readResult.WrapperExitCode
         }
+        'cancel' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait`/`read` use). --state-root is a hidden test flag.
+            $cancelJobId = $PositionalTask
+            $cancelStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $cancelJobId) {
+                Write-Host "ccodex: cancel requires a job id."
+                $exitCode = 2
+                break
+            }
+            $cancelParams = @{ JobId = $cancelJobId }
+            if ($cancelStateRoot) { $cancelParams['StateRoot'] = $cancelStateRoot }
+            $cancelResult = Invoke-CcodexCancelCommand @cancelParams
+            if ($cancelResult.WrapperExitCode -eq 0) {
+                Write-Output $cancelResult.Stdout
+            } else {
+                Write-Host $cancelResult.Message
+            }
+            $exitCode = $cancelResult.WrapperExitCode
+        }
         'review' {
             # Sugar over the `run` pipeline (mode review, access read-only): compose a
             # scoped-review prompt from the diff selector/paths, then hand the composed
@@ -913,7 +1026,7 @@ try {
             $exitCode = $cleanupResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cleanup, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, cleanup, worker."
             $exitCode = 2
         }
     }
