@@ -11,12 +11,17 @@ Assert-Throws { Resolve-CcodexAccess -Mode 'test' -Access $null } 'test mode has
 Assert-Throws { Resolve-CcodexAccess -Mode 'test' -Access 'read-only' } 'test mode rejects read-only access'
 Assert-Equal (Resolve-CcodexAccess -Mode 'test' -Access 'workspace') 'workspace' 'test mode accepts workspace access'
 
-Write-Host "implement mode is blocked in Phase 1"
-Assert-Throws { Resolve-CcodexAccess -Mode 'implement' -Access $null } 'implement mode is not available until Phase 4'
-Assert-Throws { Resolve-CcodexAccess -Mode 'implement' -Access 'worktree' } 'implement mode is blocked even with an explicit access'
+Write-Host "implement mode is unlocked with worktree access"
+Assert-Equal (Resolve-CcodexAccess -Mode 'implement' -Access $null) 'worktree' 'implement mode defaults to worktree access'
+Assert-Equal (Resolve-CcodexAccess -Mode 'implement' -Access 'worktree') 'worktree' 'implement mode accepts explicit worktree access'
+Assert-Throws { Resolve-CcodexAccess -Mode 'implement' -Access 'workspace' } 'implement mode rejects workspace access (worktree only)'
 
-Write-Host "worktree access is blocked in Phase 1"
-Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'worktree' } 'worktree access is not available until Phase 4'
+Write-Host "test mode accepts explicit worktree access"
+Assert-Equal (Resolve-CcodexAccess -Mode 'test' -Access 'worktree') 'worktree' 'test mode accepts worktree access'
+
+Write-Host "worktree access is still invalid for read-only modes"
+Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'worktree' } 'review mode rejects worktree access'
+Assert-Throws { Resolve-CcodexAccess -Mode 'brainstorm' -Access 'worktree' } 'brainstorm mode rejects worktree access'
 
 Write-Host "unknown mode/access"
 Assert-Throws { Resolve-CcodexAccess -Mode 'bogus' -Access $null } 'throws on an unknown mode'
@@ -25,6 +30,7 @@ Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'bogus' } 'throws on
 Write-Host "ConvertTo-CcodexSandboxFlag"
 Assert-Equal (ConvertTo-CcodexSandboxFlag -Access 'read-only') 'read-only' 'maps read-only straight through'
 Assert-Equal (ConvertTo-CcodexSandboxFlag -Access 'workspace') 'workspace-write' 'maps workspace to workspace-write'
+Assert-Equal (ConvertTo-CcodexSandboxFlag -Access 'worktree') 'workspace-write' 'maps worktree to workspace-write'
 
 Write-Host "Build-CcodexCodexArgs"
 $codexArgs = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md'

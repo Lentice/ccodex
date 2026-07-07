@@ -69,9 +69,15 @@ Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction Sil
 $result2 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'test'; Access = $null }
 Assert-Equal $result2.WrapperExitCode 2 'exit code 2 for test mode without --access workspace'
 
-Write-Host "mode 'implement' is rejected"
-$result3 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement' }
-Assert-Equal $result3.WrapperExitCode 2 'exit code 2 for implement mode'
+Write-Host "mode 'implement' is unlocked (defaults to worktree access; worktree wiring itself lands in a later task)"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$result3 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; PositionalTask = 'do the implement task' }
+Assert-Equal $result3.WrapperExitCode 0 'exit code 0 for implement mode with default (worktree) access'
+
+Write-Host "mode 'implement' rejects --access workspace (worktree only)"
+$result3b = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; Access = 'workspace' }
+Assert-Equal $result3b.WrapperExitCode 2 'exit code 2 for implement mode with --access workspace'
 
 Write-Host "mode 'test' with --access workspace creates an artifacts dir and injects it into the prompt"
 $env:CCODEX_FAKE_EXIT_CODE = '0'
