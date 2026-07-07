@@ -78,6 +78,17 @@ $statusWtKeys = [System.Collections.Generic.List[string]]::new()
 foreach ($key in $statusWt.Keys) { $statusWtKeys.Add($key) }
 Assert-Equal $statusWtKeys[$statusWtKeys.IndexOf('created_at') + 1] 'backend' 'backend key still immediately follows created_at after the worktree additions'
 
+Write-Host "New-CcodexStatusObject defaults parent_job_id to null (append-only lineage field)"
+Assert-True ([string]::IsNullOrEmpty($status.parent_job_id)) 'parent_job_id defaults to null when not specified'
+
+Write-Host "New-CcodexStatusObject round-trips parent_job_id and appends it after the worktree fields"
+$statusResume = New-CcodexStatusObject -JobId 'jobresume' -Status 'done' -Mode 'brainstorm' -Access 'read-only' -Repo 'D:\Repo' -CreatedAt '2026-07-07T00:00:00Z' -ParentJobId 'parent-abc-123'
+Assert-Equal $statusResume.parent_job_id 'parent-abc-123' 'parent_job_id round-trips'
+$statusResumeKeys = [System.Collections.Generic.List[string]]::new()
+foreach ($key in $statusResume.Keys) { $statusResumeKeys.Add($key) }
+Assert-Equal $statusResumeKeys[$statusResumeKeys.Count - 1] 'parent_job_id' 'parent_job_id is the last (appended) key'
+Assert-Equal $statusResumeKeys[$statusResumeKeys.IndexOf('created_at') + 1] 'backend' 'backend key still immediately follows created_at after the parent_job_id addition'
+
 Write-Host "New-CcodexDebugObject"
 $debugObj = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'review' -Access 'read-only' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec')
 Assert-Equal $debugObj.backend 'sync' 'debug object records sync backend'

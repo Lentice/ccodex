@@ -58,6 +58,12 @@ if ($env:CCODEX_FAKE_WRITE_FILE -and $workDir) {
     }
     [System.IO.File]::WriteAllText($writeTarget, $writeText, (New-Object System.Text.UTF8Encoding($false)))
 }
+# Phase 5 (resume): optionally emit a thread.started event so the wrapper can capture a
+# codex_thread_id for the job (Get-CcodexCodexThreadId reads the first thread.started line).
+# Opt-in via CCODEX_FAKE_THREAD_ID; additive — absent env var = no thread event emitted.
+if ($env:CCODEX_FAKE_THREAD_ID) {
+    Write-Output "{`"type`":`"thread.started`",`"thread_id`":`"$($env:CCODEX_FAKE_THREAD_ID)`"}"
+}
 Write-Output '{"type":"event","msg":"fake-codex ran"}'
 if ($env:CCODEX_FAKE_STDERR) {
     [Console]::Error.WriteLine($env:CCODEX_FAKE_STDERR)

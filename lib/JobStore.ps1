@@ -51,7 +51,10 @@ function New-CcodexStatusObject {
         [string]$MainRepo = $null,
         [string]$WorktreeRepo = $null,
         [string]$BaseCommit = $null,
-        [Nullable[bool]]$WorktreeCommitted = $null
+        [Nullable[bool]]$WorktreeCommitted = $null,
+        # Phase 5 resume lineage (append-only addition; null for non-resume jobs). A resumed
+        # job records the id of the parent whose Codex thread it continued.
+        [string]$ParentJobId = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -79,6 +82,7 @@ function New-CcodexStatusObject {
         worktree_repo     = $WorktreeRepo
         base_commit       = $BaseCommit
         worktree_committed = $WorktreeCommitted
+        parent_job_id     = $ParentJobId
     }
 }
 

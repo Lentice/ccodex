@@ -17,17 +17,18 @@ function New-CcodexTestParentJob {
         [string]$Mode = 'review',
         [string]$Access = 'read-only',
         [string]$Repo = 'D:\Repo',
-        [string]$CodexThreadId = $null
+        [string]$CodexThreadId = $null,
+        [string]$Root = $tempRoot
     )
     $repoKey = 'deadbeefcafe'
-    $jobDir = Join-Path (Get-CcodexJobsDir -RepoKey $repoKey -Root $tempRoot) $JobId
+    $jobDir = Join-Path (Get-CcodexJobsDir -RepoKey $repoKey -Root $Root) $JobId
     New-Item -ItemType Directory -Path $jobDir -Force | Out-Null
 
     $statusObject = New-CcodexStatusObject -JobId $JobId -Status $Status -Mode $Mode -Access $Access -Repo $Repo `
         -CreatedAt (Get-Date).ToUniversalTime().ToString('o') -CodexThreadId $CodexThreadId
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObject
 
-    $indexPath = Get-CcodexIndexPath -JobId $JobId -Root $tempRoot
+    $indexPath = Get-CcodexIndexPath -JobId $JobId -Root $Root
     New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $JobId; repo_key = $repoKey; job_dir = $jobDir })
 
@@ -82,5 +83,92 @@ $argsWorkspace = Build-CcodexResumeArgs -ThreadId 'thread-xyz' -Access 'workspac
 $expectedWorkspace = @('--ask-for-approval', 'never', 'exec', 'resume', 'thread-xyz', '--sandbox', 'workspace-write', '--json', '--color', 'never', '-C', 'D:\OtherRepo', '--output-last-message', 'D:\Job2\result.md', '-')
 Assert-Equal ($argsWorkspace -join '|') ($expectedWorkspace -join '|') 'workspace access produces the exact spliced resume argument shape (sandbox mapped via ConvertTo-CcodexSandboxFlag)'
 
+# --- Invoke-CcodexResume (command level) ---
+
+# Bring in the full wrapper (dot-sources every lib and defines Invoke-CcodexResume /
+# Invoke-CcodexJobExecution) plus the remaining libs the command path needs.
+. (Join-Path $PSScriptRoot '..\lib\CodexInvoke.ps1')
+. (Join-Path $PSScriptRoot '..\lib\ResultValidation.ps1')
+. (Join-Path $PSScriptRoot '..\lib\FailureClassify.ps1')
+. (Join-Path $PSScriptRoot '..\ccodex.ps1' -Resolve) -ImportOnly
+
+$cmdRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-resume-cmd-test-$([Guid]::NewGuid().ToString('N'))"
+$cmdStateRoot = Join-Path $cmdRoot 'Local'
+$cmdAppData = Join-Path $cmdRoot 'Roaming'
+$realRepo = Join-Path $cmdRoot 'repo'
+New-Item -ItemType Directory -Path $cmdStateRoot, $cmdAppData, $realRepo -Force | Out-Null
+
+$fixtureCmd = Join-Path $PSScriptRoot 'fixtures\fake-codex.cmd'
+$ccodexScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\ccodex.ps1')).Path
+
+Write-Host "Invoke-CcodexResume: happy path resumes a done parent, exits 0, prints only the result"
+New-CcodexTestParentJob -JobId 'cmd-parent-done' -Status 'done' -Mode 'brainstorm' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-parent' -Root $cmdStateRoot | Out-Null
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'resumed answer text'
+$env:CCODEX_FAKE_THREAD_ID = 'child-thread-999'
+$resumeResult = Invoke-CcodexResume -ParentJobId 'cmd-parent-done' -PositionalTask 'follow up question' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $resumeResult.WrapperExitCode 0 'resume of a done parent exits 0'
+Assert-True ($resumeResult.Stdout -like '*resumed answer text*') 'stdout carries the resumed result content'
+Assert-True (-not ($resumeResult.Stdout -like '*fake-codex ran*')) 'raw JSONL events never reach stdout on resume'
+Assert-True ($resumeResult.JobId -ne 'cmd-parent-done') 'resume creates a NEW job id (never the parent id)'
+
+$childDir = $resumeResult.JobDir
+$childStatus = Get-Content -LiteralPath (Join-Path $childDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $childStatus.status 'done' 'child terminal status is done'
+Assert-Equal $childStatus.parent_job_id 'cmd-parent-done' 'child status carries parent_job_id'
+Assert-Equal $childStatus.mode 'brainstorm' 'child inherits the parent mode'
+Assert-Equal $childStatus.access 'read-only' 'child inherits the parent access'
+Assert-Equal $childStatus.repo $realRepo 'child inherits the parent repo'
+Assert-Equal $childStatus.codex_thread_id 'child-thread-999' 'child captures its OWN new thread id from events'
+
+$childPrompt = [System.IO.File]::ReadAllText((Join-Path $childDir 'prompt.md'))
+Assert-Equal $childPrompt 'follow up question' 'prompt.md is exactly the follow-up text (no worker-prompt template)'
+
+$childCommand = Get-Content -LiteralPath (Join-Path $childDir 'command.txt') -Raw
+Assert-True ($childCommand -like '*exec resume thread-parent*') 'command.txt invokes exec resume against the parent thread id'
+
+# Parent job dir is strictly read-only to resume: its status.json is unchanged.
+$parentStatusAfter = Get-Content -LiteralPath (Join-Path (Get-CcodexJobRecord -JobId 'cmd-parent-done' -Root $cmdStateRoot).JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $parentStatusAfter.status 'done' 'parent status is untouched by resume'
+Assert-True ([string]::IsNullOrEmpty($parentStatusAfter.parent_job_id)) 'parent never gains a parent_job_id from being resumed'
+
+Write-Host "Invoke-CcodexResume: still-running parent -> exit 4 (not-terminal precondition)"
+New-CcodexTestParentJob -JobId 'cmd-parent-running' -Status 'running' -Repo $realRepo -CodexThreadId 'thread-run' -Root $cmdStateRoot | Out-Null
+$runningResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-running' -PositionalTask 'q' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $runningResume.WrapperExitCode 4 'resume of a running parent exits 4'
+
+Write-Host "Invoke-CcodexResume: scrubbed (null) thread id -> exit 2 with the scrub message"
+New-CcodexTestParentJob -JobId 'cmd-parent-scrubbed' -Status 'done' -Repo $realRepo -CodexThreadId $null -Root $cmdStateRoot | Out-Null
+$scrubbedResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-scrubbed' -PositionalTask 'q' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $scrubbedResume.WrapperExitCode 2 'resume of a scrubbed parent exits 2'
+Assert-True ($scrubbedResume.Message -like '*no codex thread id (absent or scrubbed by cleanup)*') 'scrub message surfaces to the caller'
+
+Write-Host "Invoke-CcodexResume: unknown parent id -> exit 3 (not found)"
+$unknownResume = Invoke-CcodexResume -ParentJobId 'cmd-no-such-parent' -PositionalTask 'q' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $unknownResume.WrapperExitCode 3 'resume of an unknown parent exits 3'
+Assert-True ($unknownResume.Message -like '*not found (no index entry)*') 'not-found message surfaces to the caller'
+
+Write-Host "Invoke-CcodexResume: multiple prompt sources -> exit 2 (usage error, same message as run)"
+$multiPromptFile = Join-Path $cmdRoot 'followup.txt'
+[System.IO.File]::WriteAllText($multiPromptFile, 'from file', (New-Object System.Text.UTF8Encoding($false)))
+$multiResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-done' -PositionalTask 'from positional' -PromptFile $multiPromptFile `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $multiResume.WrapperExitCode 2 'multiple prompt sources on resume exits 2'
+Assert-True ($multiResume.Message -like '*multiple prompt sources*') 'usage error names the multiple-prompt-source conflict'
+
+Write-Host "shell-level: piped follow-up through the dispatcher resumes a done parent -> exit 0"
+New-CcodexTestParentJob -JobId 'cmd-parent-shell' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-shell' -Root $cmdStateRoot | Out-Null
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'shell resumed answer'
+$shellOut = 'piped follow up text' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-shell --state-root $cmdStateRoot --codex-path $fixtureCmd
+Assert-Equal $LASTEXITCODE 0 'shell-level resume exits 0'
+Assert-True ((($shellOut -join "`n")) -like '*shell resumed answer*') 'shell-level resume prints the resumed result'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $cmdRoot -Recurse -Force
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests
