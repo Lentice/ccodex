@@ -114,5 +114,71 @@ $statusD = Get-Content -LiteralPath (Join-Path $jobD.JobDir 'status.json') -Raw 
 Assert-Equal $statusD.status 'done' 'shell-level worker reaches terminal done status'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# --- (e) Start-CcodexWorkerRunning: a job cancelled before the worker starts is not resurrected ---
+
+Write-Host "Invoke-CcodexWorker: a job cancelled before the worker starts is NOT resurrected to running"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SHOULD NOT RUN'
+$jobCancelledFirst = New-CcodexTestJob
+# Simulate a cancel that marked this never-started ('created') job 'cancelled' just before
+# the worker got going: overwrite status.json to cancelled (preserving the other fields).
+$preCancel = Read-CcodexStatusFile -JobDir $jobCancelledFirst.JobDir
+$cancelledStatus = [ordered]@{}
+foreach ($p in $preCancel.PSObject.Properties) { $cancelledStatus[$p.Name] = $p.Value }
+$cancelledStatus['status'] = 'cancelled'
+$cancelledStatus['cancelled_at'] = (Get-Date).ToUniversalTime().ToString('o')
+Write-CcodexJsonFileAtomic -Path (Join-Path $jobCancelledFirst.JobDir 'status.json') -Object $cancelledStatus
+$resultCancelledFirst = Invoke-CcodexWorker -JobId $jobCancelledFirst.JobId -StateRoot $localAppData -CodexPath $fixtureCmd
+Assert-Equal $resultCancelledFirst.WrapperExitCode 0 'worker exits 0 (cleanly) when the job was already cancelled'
+$statusCancelledFirst = Read-CcodexStatusFile -JobDir $jobCancelledFirst.JobDir
+Assert-Equal $statusCancelledFirst.status 'cancelled' 'worker leaves the cancelled status intact (no resurrection to running)'
+Assert-True ([string]::IsNullOrEmpty($statusCancelledFirst.backend_id)) 'worker did not stamp its own backend_id over the cancelled job'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobCancelledFirst.JobDir 'result.md'))) 'worker did not run codex (no result.md produced)'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobCancelledFirst.JobDir '.lock'))) 'worker releases the lock after skipping a cancelled job'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# --- (f) Update-CcodexHeartbeat: never resurrects a status a concurrent writer changed ---
+
+$hbBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+
+Write-Host "Update-CcodexHeartbeat: stamps last_heartbeat_at on a still-running job under the same backend"
+$jobHbOk = New-CcodexTestJob
+$hbOkStatusPath = Join-Path $jobHbOk.JobDir 'status.json'
+$hbOkRunning = New-CcodexStatusObject -JobId $jobHbOk.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $hbBackendId -StartedAt ((Get-Date).ToString('o'))
+Write-CcodexJsonFileAtomic -Path $hbOkStatusPath -Object $hbOkRunning
+Update-CcodexHeartbeat -JobDir $jobHbOk.JobDir -StatusPath $hbOkStatusPath -BackendId $hbBackendId
+$afterHbOk = Read-CcodexStatusFile -JobDir $jobHbOk.JobDir
+Assert-Equal $afterHbOk.status 'running' 'heartbeat keeps a running job running'
+Assert-True (-not [string]::IsNullOrEmpty($afterHbOk.last_heartbeat_at)) 'heartbeat stamps last_heartbeat_at on a running job under the same backend'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobHbOk.JobDir '.lock'))) 'heartbeat releases the lock afterward'
+
+Write-Host "Update-CcodexHeartbeat: does NOT resurrect a job a concurrent cancel moved to cancelled"
+$jobHbCancelled = New-CcodexTestJob
+$hbCancelledStatusPath = Join-Path $jobHbCancelled.JobDir 'status.json'
+$hbCancelledRunning = New-CcodexStatusObject -JobId $jobHbCancelled.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $hbBackendId -StartedAt ((Get-Date).ToString('o'))
+Write-CcodexJsonFileAtomic -Path $hbCancelledStatusPath -Object $hbCancelledRunning
+# A concurrent cancel writes 'cancelled' between the worker's snapshot and its heartbeat.
+$hbCancelObj = [ordered]@{}
+foreach ($p in (Read-CcodexStatusFile -JobDir $jobHbCancelled.JobDir).PSObject.Properties) { $hbCancelObj[$p.Name] = $p.Value }
+$hbCancelObj['status'] = 'cancelled'
+$hbCancelObj['cancelled_at'] = (Get-Date).ToUniversalTime().ToString('o')
+Write-CcodexJsonFileAtomic -Path $hbCancelledStatusPath -Object $hbCancelObj
+Update-CcodexHeartbeat -JobDir $jobHbCancelled.JobDir -StatusPath $hbCancelledStatusPath -BackendId $hbBackendId
+$afterHbCancelled = Read-CcodexStatusFile -JobDir $jobHbCancelled.JobDir
+Assert-Equal $afterHbCancelled.status 'cancelled' 'heartbeat does not resurrect a cancelled job back to running'
+Assert-True ([string]::IsNullOrEmpty($afterHbCancelled.last_heartbeat_at)) 'heartbeat skips the write entirely on a non-running (cancelled) job (no last_heartbeat_at stamped)'
+
+Write-Host "Update-CcodexHeartbeat: does NOT stamp when backend_id no longer matches (a new backend took over)"
+$jobHbMismatch = New-CcodexTestJob
+$hbMismatchStatusPath = Join-Path $jobHbMismatch.JobDir 'status.json'
+$otherBackendId = '424242;2020-01-01T00:00:00.0000000Z'
+$hbMismatchRunning = New-CcodexStatusObject -JobId $jobHbMismatch.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $otherBackendId -StartedAt ((Get-Date).ToString('o'))
+Write-CcodexJsonFileAtomic -Path $hbMismatchStatusPath -Object $hbMismatchRunning
+Update-CcodexHeartbeat -JobDir $jobHbMismatch.JobDir -StatusPath $hbMismatchStatusPath -BackendId $hbBackendId
+$afterHbMismatch = Read-CcodexStatusFile -JobDir $jobHbMismatch.JobDir
+Assert-True ([string]::IsNullOrEmpty($afterHbMismatch.last_heartbeat_at)) 'heartbeat does not stamp a job whose backend_id no longer matches'
+Assert-Equal $afterHbMismatch.backend_id $otherBackendId 'heartbeat leaves the other backend_id untouched'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

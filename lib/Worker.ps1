@@ -45,23 +45,44 @@ function Invoke-CcodexWorker {
     $hardTimeoutSecOrNull = if ($hardTimeoutSec -gt 0) { $hardTimeoutSec } else { $null }
 
     $statusPath = Join-Path $jobDir 'status.json'
-    Write-CcodexJsonFileAtomic -Path $statusPath -Object (New-CcodexStatusObject `
+    $runningStatusObject = New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
-        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull
+
+    # The created->running transition is a status.json WRITE, so it goes through the
+    # per-job lock like every other writer AND re-reads status under the lock before
+    # writing: a cancel that raced in first (marking this never-started job `cancelled`)
+    # must not be resurrected to `running`. Outcomes:
+    #   Proceed=$true            -> job was still `created`; running written; run codex.
+    #   Proceed=$false, code 0   -> job already moved off `created` (e.g. cancelled);
+    #                               leave that status intact and exit without running codex.
+    #   Proceed=$false, code 12  -> could not acquire the lock; fail terminally with
+    #                               evidence rather than dying silently (Complete-Ccodex-
+    #                               InternalFailure, mirroring Invoke-CcodexJobExecution).
+    $startResult = Start-CcodexWorkerRunning -JobDir $jobDir -StatusPath $statusPath -JobId $JobId -RunningStatusObject $runningStatusObject
+    if (-not $startResult.Proceed) {
+        if ($startResult.WrapperExitCode -eq 12) {
+            $failResult = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $JobId -Mode $status.mode `
+                -Access $status.access -RepoRoot $status.repo -CreatedAt $status.created_at -Backend 'native' `
+                -BackendId $backendId -StartedAt $startedAt -ResultPath (Join-Path $jobDir 'result.md') `
+                -EventsPath (Join-Path $jobDir 'codex-events.jsonl') -StderrPath (Join-Path $jobDir 'stderr.log') `
+                -Message $startResult.Message
+            return [pscustomobject]@{ WrapperExitCode = $failResult.WrapperExitCode; Message = $failResult.Message }
+        }
+        return [pscustomobject]@{ WrapperExitCode = $startResult.WrapperExitCode; Message = $startResult.Message }
+    }
 
     # Liveness heartbeat: while Codex runs (which can be many minutes), periodically
     # re-stamp status.json's last_heartbeat_at under the per-job lock, preserving every
     # other field. Readers derive health=ok|stale from this (Get-CcodexJobHealth). It is
     # best-effort — Invoke-CcodexCodexProcess swallows any exception — and a lock it cannot
     # acquire is skipped rather than blocking the run. GetNewClosure captures $jobDir/
-    # $statusPath so the block works when invoked from inside the codex-process wait loop.
+    # $statusPath/$backendId so the block works when invoked from inside the codex-process
+    # wait loop. Update-CcodexHeartbeat re-reads status INSIDE the lock and only bumps a
+    # job still `running` under this backend, so it can never resurrect a status a
+    # concurrent cancel/terminal/reconcile writer already changed.
     $onHeartbeat = {
-        $current = Read-CcodexStatusFile -JobDir $jobDir
-        if ($null -eq $current) { return }
-        $updated = [ordered]@{}
-        foreach ($property in $current.PSObject.Properties) { $updated[$property.Name] = $property.Value }
-        $updated['last_heartbeat_at'] = (Get-Date).ToUniversalTime().ToString('o')
-        Write-CcodexStatusUnderLock -JobDir $jobDir -CommandName 'heartbeat' -StatusPath $statusPath -StatusObject $updated | Out-Null
+        Update-CcodexHeartbeat -JobDir $jobDir -StatusPath $statusPath -BackendId $backendId
     }.GetNewClosure()
 
     # SkipRunningWrite: the worker already stamped its own `running` status.json (with the
@@ -73,4 +94,83 @@ function Invoke-CcodexWorker {
         -OnHeartbeat $onHeartbeat
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
+}
+
+function Start-CcodexWorkerRunning {
+    # Performs the worker's created->running status transition under the per-job lock,
+    # re-reading status INSIDE the lock so a cancel that already moved the job off
+    # `created` is never resurrected to `running`. Returns a result with:
+    #   { Proceed = $true }                                 -> caller runs codex
+    #   { Proceed = $false; WrapperExitCode = 0;  Message } -> job already terminal; exit clean
+    #   { Proceed = $false; WrapperExitCode = 12; Message } -> lock could not be acquired
+    # Mirrors Write-CcodexStatusUnderLock's "one retry then give up" contract for the lock,
+    # and releases the lock before returning in every case (codex then runs lock-free; the
+    # heartbeat re-acquires the lock per beat).
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$StatusPath,
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)]$RunningStatusObject,
+        [int]$LockTimeoutSec = 10
+    )
+    $acquired = $false
+    try {
+        Lock-CcodexJob -JobDir $JobDir -TimeoutSec $LockTimeoutSec -CommandName 'native' | Out-Null
+        $acquired = $true
+    } catch {
+        try {
+            Lock-CcodexJob -JobDir $JobDir -TimeoutSec $LockTimeoutSec -CommandName 'native' | Out-Null
+            $acquired = $true
+        } catch {
+            $acquired = $false
+        }
+    }
+    if (-not $acquired) {
+        return [pscustomobject]@{ Proceed = $false; WrapperExitCode = 12; Message = 'could not acquire the job lock to record the running status' }
+    }
+    try {
+        $current = Read-CcodexStatusFile -JobDir $JobDir
+        if ($null -ne $current -and $current.status -ne 'created') {
+            return [pscustomobject]@{ Proceed = $false; WrapperExitCode = 0; Message = "ccodex: job $JobId is '$($current.status)'; worker exiting without running codex.`n  job dir: $JobDir" }
+        }
+        Write-CcodexJsonFileAtomic -Path $StatusPath -Object $RunningStatusObject
+    } finally {
+        Unlock-CcodexJob -JobDir $JobDir
+    }
+    return [pscustomobject]@{ Proceed = $true; WrapperExitCode = 0; Message = $null }
+}
+
+function Update-CcodexHeartbeat {
+    # Best-effort liveness heartbeat. Acquires the per-job lock, RE-READS status.json
+    # INSIDE the lock, and stamps last_heartbeat_at ONLY when the job is still `running`
+    # under THIS worker's backend_id. Reading inside the lock (never from a snapshot taken
+    # before it) is what prevents resurrecting a job a concurrent cancel/terminal/reconcile
+    # writer just moved off `running`: a stale pre-lock snapshot would otherwise clobber
+    # e.g. `cancelled` back to `running`. Never throws — a lock it cannot acquire, or any
+    # read/write error, is swallowed so a missed beat can never derail the codex wait loop.
+    param(
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$StatusPath,
+        [Parameter(Mandatory)][string]$BackendId,
+        [int]$LockTimeoutSec = 10
+    )
+    try {
+        Lock-CcodexJob -JobDir $JobDir -TimeoutSec $LockTimeoutSec -CommandName 'heartbeat' | Out-Null
+    } catch {
+        return
+    }
+    try {
+        $current = Read-CcodexStatusFile -JobDir $JobDir
+        if ($null -eq $current) { return }
+        if ($current.status -ne 'running') { return }
+        if ([string]$current.backend_id -ne [string]$BackendId) { return }
+        $updated = [ordered]@{}
+        foreach ($property in $current.PSObject.Properties) { $updated[$property.Name] = $property.Value }
+        $updated['last_heartbeat_at'] = (Get-Date).ToUniversalTime().ToString('o')
+        Write-CcodexJsonFileAtomic -Path $StatusPath -Object $updated
+    } catch {
+        # best-effort: swallow read/write errors so a missed beat never derails the run
+    } finally {
+        Unlock-CcodexJob -JobDir $JobDir
+    }
 }

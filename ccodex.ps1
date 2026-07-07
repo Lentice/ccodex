@@ -653,27 +653,71 @@ function Invoke-CcodexCancelCommand {
         return [pscustomobject]@{ WrapperExitCode = 21; Stdout = $null; Message = $message }
     }
 
-    $status = Read-CcodexStatusFile -JobDir $jobDir
-    if ($null -eq $status) {
+    # Everything after the lock is acquired runs inside try/finally so the lock is ALWAYS
+    # released — an unexpected throw (write failure, taskkill launch failure, a malformed
+    # backend_id, etc.) must never leak `.lock\` and wedge the job. Branches decide via
+    # result variables instead of early `return`s that would skip the finally: $result
+    # holds the outcome to return directly, and $needsReconcile defers the dead-worker
+    # orphan path until AFTER the lock is released (Update-CcodexOrphanStatus takes its own
+    # lock, so calling it while still holding this one would deadlock the retry loop).
+    $result = $null
+    $needsReconcile = $false
+    try {
+        $status = Read-CcodexStatusFile -JobDir $jobDir
+        if ($null -eq $status) {
+            $message = "ccodex: internal error: job '$JobId' has no readable status.json.`n  job dir: $jobDir"
+            $result = [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        elseif ($status.status -in $terminalStatuses) {
+            # No-op: already terminal (whichever terminal status). Nothing to mutate.
+            $result = [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId already $($status.status)"; Message = $null }
+        }
+        elseif ($status.status -eq 'running' -and -not (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
+            # The recorded worker identity is dead: this is not a live job to kill, it is
+            # an orphan. Defer to the same evidence-based reconciliation `status`/`wait`/
+            # `read` perform, rather than forcing `cancelled` over a job that actually
+            # completed (or failed) before the cancel request arrived. Run it after the
+            # finally releases the lock (see $needsReconcile note above).
+            $needsReconcile = $true
+        }
+        else {
+            # Reached for `running` with a live worker, or `created` (never started).
+            if ($status.status -eq 'running') {
+                # Worker identity verified alive: force-kill the whole process tree (the
+                # worker process itself AND whatever codex child it spawned), then poll for
+                # actual death -- taskkill returns once the kill request is issued, not once
+                # the process tree has actually exited. Parse the pid defensively so a
+                # malformed backend_id cannot throw out of the lock (Test-CcodexWorkerAlive
+                # already validated it above, but the lock release must not depend on that).
+                $backendParts = $status.backend_id.Split(';', 2)
+                $workerPid = 0
+                if ([int]::TryParse($backendParts[0], [ref]$workerPid)) {
+                    Stop-CcodexProcessTree -ProcessId $workerPid
+                    $killDeadline = (Get-Date).AddSeconds(10)
+                    while ((Get-Date) -lt $killDeadline -and (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
+                        Start-Sleep -Milliseconds 200
+                    }
+                }
+            }
+
+            # Mark the job cancelled directly, preserving every existing field (append-only)
+            # and stamping cancelled_at. wrapper_exit_code is left exactly as it was (null
+            # for a job that never reached a terminal codex exit code).
+            $cancelledAt = (Get-Date).ToUniversalTime().ToString('o')
+            $updated = [ordered]@{}
+            foreach ($property in $status.PSObject.Properties) {
+                $updated[$property.Name] = $property.Value
+            }
+            $updated['status'] = 'cancelled'
+            $updated['cancelled_at'] = $cancelledAt
+            Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $updated
+            $result = [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
+        }
+    } finally {
         Unlock-CcodexJob -JobDir $jobDir
-        $message = "ccodex: internal error: job '$JobId' has no readable status.json.`n  job dir: $jobDir"
-        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
     }
 
-    $statusText = $status.status
-
-    if ($statusText -in $terminalStatuses) {
-        # No-op: already terminal (whichever terminal status). Nothing to mutate.
-        Unlock-CcodexJob -JobDir $jobDir
-        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId already $statusText"; Message = $null }
-    }
-
-    if ($statusText -eq 'running' -and -not (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
-        # The recorded worker identity is dead: this is not a live job to kill, it is an
-        # orphan. Release the lock and defer to the same evidence-based reconciliation
-        # `status`/`wait`/`read` already perform, rather than forcing `cancelled` over a
-        # job that actually completed (or failed) before the cancel request arrived.
-        Unlock-CcodexJob -JobDir $jobDir
+    if ($needsReconcile) {
         $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
         $reconciledStatus = Read-CcodexStatusFile -JobDir $jobDir
         $finalStatusText = if ($reconciledStatus) { $reconciledStatus.status } else { $reconciliation.Status }
@@ -681,35 +725,7 @@ function Invoke-CcodexCancelCommand {
         return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId $finalStatusText"; Message = $null }
     }
 
-    if ($statusText -eq 'running') {
-        # Worker identity verified alive: force-kill the whole process tree (the worker
-        # process itself AND whatever codex child it spawned), then poll for actual death
-        # -- taskkill returns once the kill request is issued, not once the process tree
-        # has actually exited.
-        $backendParts = $status.backend_id.Split(';', 2)
-        $workerPid = [int]$backendParts[0]
-        Stop-CcodexProcessTree -ProcessId $workerPid
-        $killDeadline = (Get-Date).AddSeconds(10)
-        while ((Get-Date) -lt $killDeadline -and (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
-            Start-Sleep -Milliseconds 200
-        }
-    }
-
-    # Reached for `running` (worker just force-killed above) or `created` (never started):
-    # mark the job cancelled directly, preserving every existing field (append-only) and
-    # stamping cancelled_at. wrapper_exit_code is left exactly as it was (null for a job
-    # that never reached a terminal codex exit code).
-    $cancelledAt = (Get-Date).ToUniversalTime().ToString('o')
-    $updated = [ordered]@{}
-    foreach ($property in $status.PSObject.Properties) {
-        $updated[$property.Name] = $property.Value
-    }
-    $updated['status'] = 'cancelled'
-    $updated['cancelled_at'] = $cancelledAt
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $updated
-    Unlock-CcodexJob -JobDir $jobDir
-
-    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
+    return $result
 }
 
 function Get-CcodexTailLines {
@@ -904,7 +920,10 @@ function Invoke-CcodexDoctorProbe {
     # the fake-codex fixture drains stdin unconditionally regardless.
     param(
         [Parameter(Mandatory)][string]$CodexPath,
-        [Parameter(Mandatory)][string[]]$Arguments
+        [Parameter(Mandatory)][string[]]$Arguments,
+        # Per-probe wall-clock bound. A hung codex must not hang `doctor` forever. 0 or
+        # negative means wait indefinitely (not used by the doctor callers).
+        [int]$TimeoutSec = 30
     )
     $plan = Get-CcodexProcessLaunchPlan -CodexPath $CodexPath -Arguments $Arguments
 
@@ -930,11 +949,31 @@ function Invoke-CcodexDoctorProbe {
     $process.StandardInput.Close()
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    # Bounded wait: WaitForExit(ms) returns $false on timeout. On timeout, kill the whole
+    # tree (Stop-CcodexProcessTree — the same kill-tree primitive Invoke-CcodexCodexProcess
+    # uses on a hard timeout), reap it, drain any partial output, and report TimedOut so the
+    # caller renders the probe as an environment FAIL instead of blocking indefinitely.
+    $timeoutMs = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { [int]::MaxValue }
+    if (-not $process.WaitForExit($timeoutMs)) {
+        Stop-CcodexProcessTree -ProcessId $process.Id
+        try { $process.WaitForExit() } catch { }
+        $partialStdout = ''
+        $partialStderr = ''
+        try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
+        try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+        try { $process.StandardOutput.Close() } catch { }
+        try { $process.StandardError.Close() } catch { }
+        return [pscustomobject]@{ ExitCode = $null; Stdout = $partialStdout; Stderr = $partialStderr; TimedOut = $true }
+    }
+
+    # Parameterless WaitForExit after a bounded one that returned true guarantees the async
+    # readers have fully flushed before we read.
     $process.WaitForExit()
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
 
-    return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr; TimedOut = $false }
 }
 
 function Invoke-CcodexDoctorCommand {
@@ -951,7 +990,11 @@ function Invoke-CcodexDoctorCommand {
         [string]$CodexPath,
         [string]$StateRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
-        [string]$RepoOverride
+        [string]$RepoOverride,
+        # Per-probe wall-clock bound for the `codex --version` / `codex doctor` probes so a
+        # hung codex cannot hang `doctor`. Overridable for tests (which drive the fixture's
+        # probe-delay knobs against a short bound).
+        [int]$ProbeTimeoutSec = 30
     )
 
     try {
@@ -975,8 +1018,11 @@ function Invoke-CcodexDoctorCommand {
 
     if ($resolvedCodexPath) {
         try {
-            $versionProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('--version')
-            if ($versionProbe.ExitCode -eq 0) {
+            $versionProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('--version') -TimeoutSec $ProbeTimeoutSec
+            if ($versionProbe.TimedOut) {
+                $envFailed = $true
+                $lines.Add("FAIL codex resolvable: 'codex --version' timed out after ${ProbeTimeoutSec}s")
+            } elseif ($versionProbe.ExitCode -eq 0) {
                 $versionLine = ($versionProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -First 1)
                 $lines.Add("ok codex resolvable: $resolvedCodexPath (version: $versionLine)")
             } else {
@@ -992,10 +1038,13 @@ function Invoke-CcodexDoctorCommand {
     # --- Check 2: built-in delegation to `codex doctor` -------------------------------
     if ($resolvedCodexPath) {
         try {
-            $doctorProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('doctor')
+            $doctorProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('doctor') -TimeoutSec $ProbeTimeoutSec
             $doctorOutputLines = @($doctorProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' })
             $doctorLastLine = if ($doctorOutputLines.Count -gt 0) { $doctorOutputLines[$doctorOutputLines.Count - 1] } else { '(no output)' }
-            if ($doctorProbe.ExitCode -eq 0) {
+            if ($doctorProbe.TimedOut) {
+                $envFailed = $true
+                $lines.Add("FAIL codex doctor: timed out after ${ProbeTimeoutSec}s")
+            } elseif ($doctorProbe.ExitCode -eq 0) {
                 $lines.Add("ok codex doctor: $doctorLastLine")
             } else {
                 $envFailed = $true

@@ -195,6 +195,19 @@ function Update-CcodexOrphanStatus {
         return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
     }
     try {
+        # Re-read UNDER the lock and abort unless the job is still the exact `running`
+        # snapshot we computed the terminal verdict from. Between the pre-lock read above
+        # and acquiring the lock, a concurrent cancel, a worker's own terminal write, or
+        # another reconcile pass may have moved this job to a terminal status (or a new
+        # backend). Writing our stale verdict now would clobber that newer state, so we
+        # abandon the rewrite instead and report whatever is on disk.
+        $recheck = Read-CcodexStatusFile -JobDir $JobDir
+        if ($null -eq $recheck) {
+            return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
+        }
+        if ($recheck.status -ne 'running' -or [string]$recheck.backend_id -ne [string]$status.backend_id) {
+            return [pscustomobject]@{ Status = $recheck.status; Reconciled = $false; PossiblyStale = $false }
+        }
         Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $updated
     } finally {
         Unlock-CcodexJob -JobDir $JobDir

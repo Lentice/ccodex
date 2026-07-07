@@ -107,5 +107,47 @@ try {
     Assert-True $false "Unlock with no lock threw: $($_.Exception.Message)"
 }
 
+# --- ownerless lock: stale only once older than the window (crash between mkdir and owner.json) ---
+
+Write-Host "Test-CcodexLockStale: an ownerless lock older than the stale window is stale"
+$dirOwnerless = New-TestJobDir 'ownerless-stale'
+$ownerlessLockPath = Join-Path $dirOwnerless '.lock'
+New-Item -ItemType Directory -Path $ownerlessLockPath -Force | Out-Null
+# No owner.json (simulates a crash / failed owner write between mkdir and stamp).
+(Get-Item -LiteralPath $ownerlessLockPath).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddMinutes(-11)
+Assert-True (Test-CcodexLockStale -LockPath $ownerlessLockPath) 'an ownerless lock older than 10 min is stale (breakable)'
+
+Write-Host "Test-CcodexLockStale: a fresh ownerless lock is NOT stale (mid-creation window protected)"
+$dirOwnerlessFresh = New-TestJobDir 'ownerless-fresh'
+$ownerlessFreshLockPath = Join-Path $dirOwnerlessFresh '.lock'
+New-Item -ItemType Directory -Path $ownerlessFreshLockPath -Force | Out-Null
+Assert-True (-not (Test-CcodexLockStale -LockPath $ownerlessFreshLockPath)) 'a fresh ownerless lock (being created this instant) is not stale'
+
+Write-Host "Lock-CcodexJob breaks an ownerless stale lock and re-acquires it"
+$lockOwnerless = Lock-CcodexJob -JobDir $dirOwnerless -TimeoutSec 2 -CommandName 'breaker-ownerless'
+Assert-True ($null -ne $lockOwnerless) 'ownerless stale lock was broken and re-acquired'
+Assert-True (Test-Path -LiteralPath (Join-Path $ownerlessLockPath 'owner.json') -PathType Leaf) 'the re-acquired lock now carries an owner.json'
+$ownerOwnerless = Get-Content -LiteralPath (Join-Path $ownerlessLockPath 'owner.json') -Raw | ConvertFrom-Json
+Assert-Equal $ownerOwnerless.command 'breaker-ownerless' 'the re-acquired ownerless lock is owned by this process'
+Unlock-CcodexJob -JobDir $dirOwnerless
+
+Write-Host "Lock-CcodexJob does NOT break a fresh ownerless lock (acquire times out)"
+Assert-Throws { Lock-CcodexJob -JobDir $dirOwnerlessFresh -TimeoutSec 1 } 'a fresh ownerless lock is not broken and acquire times out'
+
+# --- owner.json write failure removes the just-created lock dir before rethrowing ---
+# NOTE: this shadows Write-CcodexJsonFile, so it MUST be the last Lock-CcodexJob test.
+
+Write-Host "Lock-CcodexJob removes the just-created lock dir when stamping owner.json fails"
+$dirWriteFail = New-TestJobDir 'owner-write-fail'
+function Write-CcodexJsonFile { param($Path, $Object) throw 'simulated owner.json write failure' }
+$threwWriteFail = $false
+try {
+    Lock-CcodexJob -JobDir $dirWriteFail -TimeoutSec 1 -CommandName 'writer' | Out-Null
+} catch {
+    $threwWriteFail = $true
+}
+Assert-True $threwWriteFail 'Lock-CcodexJob rethrows when owner.json cannot be written'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $dirWriteFail '.lock'))) 'the ownerless lock dir is removed after an owner.json write failure (not left un-breakable)'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

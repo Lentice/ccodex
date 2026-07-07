@@ -9,6 +9,8 @@ $argsList = $args
 # any other argv (e.g. the existing `--ask-for-approval never exec ...` shape)
 # falls through unchanged to the exec-mode behavior beneath.
 if ($argsList.Count -ge 1 -and $argsList[0] -eq '--version') {
+    # Optional hang for doctor probe-timeout tests (additive; no-op when unset).
+    if ($env:CCODEX_FAKE_VERSION_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CCODEX_FAKE_VERSION_DELAY_MS) }
     $versionText = if ($env:CCODEX_FAKE_VERSION) { $env:CCODEX_FAKE_VERSION } else { 'codex-cli 0.0.0-fake' }
     Write-Output $versionText
     $exitCode = 0
@@ -17,6 +19,8 @@ if ($argsList.Count -ge 1 -and $argsList[0] -eq '--version') {
 }
 
 if ($argsList.Count -ge 1 -and $argsList[0] -eq 'doctor') {
+    # Optional hang for doctor probe-timeout tests (additive; no-op when unset).
+    if ($env:CCODEX_FAKE_DOCTOR_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CCODEX_FAKE_DOCTOR_DELAY_MS) }
     $doctorText = if ($env:CCODEX_FAKE_DOCTOR_OUTPUT) { $env:CCODEX_FAKE_DOCTOR_OUTPUT } else { "codex doctor: all checks passed" }
     Write-Output $doctorText
     $exitCode = 0

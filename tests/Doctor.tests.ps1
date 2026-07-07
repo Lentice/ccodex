@@ -43,6 +43,8 @@ $savedDoctorExit = $env:CCODEX_FAKE_DOCTOR_EXIT
 $savedDoctorOutput = $env:CCODEX_FAKE_DOCTOR_OUTPUT
 $savedExit = $env:CCODEX_FAKE_EXIT_CODE
 $savedResult = $env:CCODEX_FAKE_RESULT
+$savedVersionDelay = $env:CCODEX_FAKE_VERSION_DELAY_MS
+$savedDoctorDelay = $env:CCODEX_FAKE_DOCTOR_DELAY_MS
 
 function Reset-CcodexDoctorFakeEnv {
     # All-green defaults for the fake-codex fixture across --version/doctor/exec argv.
@@ -50,6 +52,8 @@ function Reset-CcodexDoctorFakeEnv {
     Remove-Item Env:\CCODEX_FAKE_VERSION -ErrorAction SilentlyContinue
     Remove-Item Env:\CCODEX_FAKE_DOCTOR_EXIT -ErrorAction SilentlyContinue
     Remove-Item Env:\CCODEX_FAKE_DOCTOR_OUTPUT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CCODEX_FAKE_VERSION_DELAY_MS -ErrorAction SilentlyContinue
+    Remove-Item Env:\CCODEX_FAKE_DOCTOR_DELAY_MS -ErrorAction SilentlyContinue
     $env:CCODEX_FAKE_EXIT_CODE = '0'
     $env:CCODEX_FAKE_RESULT = 'OK'
 }
@@ -144,6 +148,29 @@ try {
     Assert-True ($resultBadRepo.Message -like '*--repo*') 'the usage error names --repo'
 
     # ============================================================
+    # (h) a hung 'codex --version' probe is bounded by ProbeTimeoutSec -> FAIL + exit 12
+    # ============================================================
+    Reset-CcodexDoctorFakeEnv
+    Write-Host "Invoke-CcodexDoctorCommand: a hung 'codex --version' probe times out -> FAIL line + exit 12"
+    $env:CCODEX_FAKE_VERSION_DELAY_MS = '10000'
+    $resultVersionHang = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo -ProbeTimeoutSec 1
+    Assert-Equal $resultVersionHang.WrapperExitCode 12 'a hung --version probe (bounded by ProbeTimeoutSec) exits 12 rather than hanging'
+    Assert-True ($resultVersionHang.Message -like "*FAIL codex resolvable: 'codex --version' timed out after 1s*") 'the hung --version probe reports a timeout FAIL line'
+    Remove-Item Env:\CCODEX_FAKE_VERSION_DELAY_MS -ErrorAction SilentlyContinue
+
+    # ============================================================
+    # (i) a hung 'codex doctor' probe is bounded by ProbeTimeoutSec -> FAIL + exit 12
+    # ============================================================
+    Reset-CcodexDoctorFakeEnv
+    Write-Host "Invoke-CcodexDoctorCommand: a hung 'codex doctor' probe times out -> FAIL line + exit 12"
+    $env:CCODEX_FAKE_DOCTOR_DELAY_MS = '10000'
+    $resultDoctorHang = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo -ProbeTimeoutSec 1
+    Assert-Equal $resultDoctorHang.WrapperExitCode 12 'a hung doctor probe (bounded by ProbeTimeoutSec) exits 12 rather than hanging'
+    Assert-True ($resultDoctorHang.Message -like '*FAIL codex doctor: timed out after 1s*') 'the hung doctor probe reports a timeout FAIL line'
+    Assert-True ($resultDoctorHang.Message -like '*ok codex resolvable:*') 'the fast --version probe still reported ok alongside the doctor timeout'
+    Remove-Item Env:\CCODEX_FAKE_DOCTOR_DELAY_MS -ErrorAction SilentlyContinue
+
+    # ============================================================
     # shell-level: `ccodex.ps1 doctor` dispatcher wiring
     # ============================================================
     Reset-CcodexDoctorFakeEnv
@@ -173,6 +200,8 @@ try {
     $env:CCODEX_FAKE_DOCTOR_OUTPUT = $savedDoctorOutput
     $env:CCODEX_FAKE_EXIT_CODE = $savedExit
     $env:CCODEX_FAKE_RESULT = $savedResult
+    $env:CCODEX_FAKE_VERSION_DELAY_MS = $savedVersionDelay
+    $env:CCODEX_FAKE_DOCTOR_DELAY_MS = $savedDoctorDelay
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -222,6 +222,26 @@ try {
 }
 
 # ============================================================
+# (f) leaked-lock regression: an exception in the post-lock body still releases the lock
+# ============================================================
+
+Write-Host "Invoke-CcodexCancelCommand: an exception after acquiring the lock still releases it (try/finally)"
+$jobLeak = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+# Force the kill branch to throw AFTER the lock is acquired. Shadowing Stop-CcodexProcessTree
+# exercises the failure path without actually killing this test process. This shadow persists
+# for the rest of the runspace, so it is the LAST in-process cancel test; the wait/read/status
+# tests below never call cancel, and the shell-level tests run in separate processes.
+function Stop-CcodexProcessTree { param([int]$ProcessId) throw 'simulated taskkill launch failure' }
+$leakThrew = $false
+try {
+    Invoke-CcodexCancelCommand -JobId $jobLeak.JobId -StateRoot $localAppData | Out-Null
+} catch {
+    $leakThrew = $true
+}
+Assert-True $leakThrew 'the simulated post-lock failure propagates out of cancel'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobLeak.JobDir '.lock'))) 'the per-job lock is released even when the post-lock body throws (no leaked .lock)'
+
+# ============================================================
 # `wait` on a terminal cancelled job -> exit 22
 # ============================================================
 

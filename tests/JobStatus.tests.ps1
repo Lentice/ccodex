@@ -281,6 +281,36 @@ $afterLockHeld = (Get-Item (Join-Path $dirLockHeld 'status.json')).LastWriteTime
 Assert-Equal $afterLockHeld $beforeLockHeld 'held-lock reconciliation did not rewrite status.json'
 Unlock-CcodexJob -JobDir $dirLockHeld
 
+Write-Host "Update-CcodexOrphanStatus: aborts the rewrite when status changes under the lock (re-read guard)"
+$dirReReadGuard = New-TestJobDir 'orphan-reread-guard'
+$reReadStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirReReadGuard 'status.json') -Object $reReadStatus
+Write-CcodexTextFile -Path (Join-Path $dirReReadGuard 'exit_code.txt') -Content '0'
+Write-CcodexTextFile -Path (Join-Path $dirReReadGuard 'result.md') -Content 'the result'
+# Simulate a concurrent writer (cancel/terminal/reconcile) moving the job to `cancelled`
+# in the window between reconcile's pre-lock read and its post-lock re-read: shadow
+# Read-CcodexStatusFile so the 1st call (pre-lock) still reports the running snapshot the
+# verdict was computed from, while the 2nd call (the re-read under the lock) reports the
+# newer cancelled status. The guard must then abort the rewrite rather than clobber it.
+$script:reReadCallCount = 0
+$script:reReadOriginalJson = Get-Content -LiteralPath (Join-Path $dirReReadGuard 'status.json') -Raw
+function Read-CcodexStatusFile {
+    param([Parameter(Mandatory)][string]$JobDir)
+    $script:reReadCallCount++
+    $obj = $script:reReadOriginalJson | ConvertFrom-Json
+    if ($script:reReadCallCount -ge 2) { $obj.status = 'cancelled' }
+    return $obj
+}
+$resultReReadGuard = Update-CcodexOrphanStatus -JobDir $dirReReadGuard
+Assert-Equal $resultReReadGuard.Reconciled $false 're-read guard aborts the reconcile when status changed under the lock'
+Assert-Equal $resultReReadGuard.Status 'cancelled' 're-read guard reports the newer on-disk status, not the stale done verdict'
+Assert-Equal $resultReReadGuard.PossiblyStale $false 're-read guard abort is not possibly-stale (a definite terminal state won)'
+$diskAfterReRead = Get-Content -LiteralPath (Join-Path $dirReReadGuard 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $diskAfterReRead.status 'running' 'aborted reconcile left status.json unwritten (never clobbered to done)'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $dirReReadGuard '.lock'))) 'the re-read-guard abort still releases the lock'
+# Restore the real Read-CcodexStatusFile for any later tests in this file.
+. (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
+
 # --- Get-CcodexJobHealth ---
 
 Write-Host "Get-CcodexJobHealth: running + fresh heartbeat -> ok"

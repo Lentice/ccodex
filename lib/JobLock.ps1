@@ -63,12 +63,24 @@ function Test-CcodexLockStale {
     #   2. the lock is older than the stale window (10 min).
     # Age is the time since the MORE RECENT of owner.json's acquired_at and the lock
     # directory's last-write time, so a freshly-taken lock is never broken even if its
-    # owner already looks dead. An unreadable/absent owner.json is treated as "held"
-    # (not stale) so a lock being written this instant is not stolen mid-creation.
+    # owner already looks dead.
+    #
+    # An absent owner.json is normally a lock being written this instant (mkdir won,
+    # owner.json not yet stamped) and must NOT be stolen — but a crash between the mkdir
+    # and the owner.json write (or a failed owner.json write) would otherwise leave an
+    # ownerless lock that is un-breakable forever. So an ownerless lock is treated as
+    # "held" only while it is fresh; once its directory is older than the stale window it
+    # is breakable, using the directory timestamp as the sole age signal.
     param([Parameter(Mandatory)][string]$LockPath)
 
+    $nowUtc = (Get-Date).ToUniversalTime()
+
     $ownerPath = Join-Path $LockPath 'owner.json'
-    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) { return $false }
+    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) {
+        $dirTimeUtc = [DateTime]::MinValue
+        try { $dirTimeUtc = (Get-Item -LiteralPath $LockPath -Force).LastWriteTimeUtc } catch { return $false }
+        return ($dirTimeUtc -lt $nowUtc.AddMinutes(-$script:CcodexLockStaleAfterMinutes))
+    }
 
     $owner = $null
     try {
@@ -81,8 +93,6 @@ function Test-CcodexLockStale {
     if (Test-CcodexLockOwnerAlive -OwnerPidText $owner.pid -StartTimeValue $owner.process_start_time) {
         return $false
     }
-
-    $nowUtc = (Get-Date).ToUniversalTime()
 
     $acquiredAtUtc = ConvertTo-CcodexLockUtcDateTime -Value $owner.acquired_at
 
@@ -130,7 +140,16 @@ function Lock-CcodexJob {
                 hostname           = [System.Environment]::MachineName
                 acquired_at        = (Get-Date).ToUniversalTime().ToString('o')
             }
-            Write-CcodexJsonFile -Path $ownerPath -Object $owner
+            try {
+                Write-CcodexJsonFile -Path $ownerPath -Object $owner
+            } catch {
+                # We won the mkdir but could not stamp ownership. Leaving the directory
+                # behind would be an ownerless lock that only Test-CcodexLockStale's age
+                # fallback can reclaim (after the stale window). Best-effort remove it now
+                # so a caller can re-create it cleanly, then rethrow the original error.
+                try { Remove-Item -LiteralPath $lockPath -Recurse -Force -ErrorAction Stop } catch { }
+                throw
+            }
             return [pscustomobject]@{ LockPath = $lockPath }
         }
 
