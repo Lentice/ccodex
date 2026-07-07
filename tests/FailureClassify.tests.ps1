@@ -75,6 +75,20 @@ foreach ($signal in @('network unreachable', 'connection reset', 'dns lookup fai
     Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $p -EventsPath $null) 'network' "network signature '$signal' classifies as network"
 }
 
+Write-Host "Get-CcodexFailureReason: thread_expired signature classes"
+foreach ($signal in @('session not found', 'thread not found', 'no session', 'conversation not found')) {
+    $p = New-TestFile "stderr-threadexp-$([Guid]::NewGuid().ToString('N')).log" $signal
+    Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $p -EventsPath $null) 'thread_expired' "thread_expired signature '$signal' classifies as thread_expired"
+}
+
+Write-Host "Get-CcodexFailureReason: thread_expired signature is case-insensitive"
+$stderrThreadExpUpper = New-TestFile 'stderr-threadexp-upper.log' 'SESSION NOT FOUND'
+Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrThreadExpUpper -EventsPath $null) 'thread_expired' 'thread_expired matching is case-insensitive'
+
+Write-Host "Get-CcodexFailureReason: precedence - thread_expired beats quota when both present"
+$stderrThreadExpAndQuota = New-TestFile 'stderr-threadexp-and-quota.log' 'rate limit exceeded; also session not found'
+Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrThreadExpAndQuota -EventsPath $null) 'thread_expired' 'thread_expired takes precedence over quota'
+
 Write-Host "Get-CcodexFailureReason: case-insensitive matching"
 $stderrUpper = New-TestFile 'stderr-upper.log' 'RATE LIMIT EXCEEDED'
 Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrUpper -EventsPath $null) 'quota_or_rate_limit' 'matching is case-insensitive'
@@ -106,6 +120,11 @@ Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrTailOn
 
 $stderrTailMatch = New-TestFile 'stderr-tail-match.log' ($padding + "rate limit exceeded")
 Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrTailMatch -EventsPath $null) 'quota_or_rate_limit' 'a signature within the last 8KB is matched'
+
+# --- Get-CcodexFailureHintLine ---
+
+Write-Host "Get-CcodexFailureHintLine: thread_expired hint"
+Assert-Equal (Get-CcodexFailureHintLine -FailureReason 'thread_expired') 'Codex session expired or was pruned - start a fresh ccodex run.' 'thread_expired hint line is exact'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

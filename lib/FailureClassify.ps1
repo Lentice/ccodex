@@ -37,7 +37,7 @@ function Get-CcodexFailureReason {
     # event lines that literally contain "error" (case-insensitive). $null
     # whenever $CodexExitCode is 0 (never classify a successful run) or when
     # neither source carries a recognized signal. Precedence when multiple
-    # signature classes are present: quota > auth > permission > network.
+    # signature classes are present: thread_expired > quota > auth > permission > network.
     param(
         [Nullable[int]]$CodexExitCode,
         [string]$StderrPath,
@@ -77,6 +77,7 @@ function Get-CcodexFailureReason {
 
     if ([string]::IsNullOrEmpty($signalText)) { return $null }
 
+    if ($signalText -match '(?i)session not found|thread not found|no session|conversation not found') { return 'thread_expired' }
     if ($signalText -match '(?i)usage limit|rate limit|quota|429') { return 'quota_or_rate_limit' }
     if ($signalText -match '(?i)login|auth|401|unauthorized|credential') { return 'auth' }
     if ($signalText -match '(?i)sandbox|denied|approval|permission') { return 'permission_or_sandbox' }
@@ -90,6 +91,7 @@ function Get-CcodexFailureHintLine {
     # absent/unrecognized reason (no hint line is added).
     param([string]$FailureReason)
     switch ($FailureReason) {
+        'thread_expired' { return 'Codex session expired or was pruned - start a fresh ccodex run.' }
         'quota_or_rate_limit' { return 'Codex usage/rate limit reached - report to the user; do not auto-retry.' }
         'auth' { return 'Codex auth problem - run: codex login' }
         'permission_or_sandbox' { return 'Sandbox/permission denial - consider --access workspace or narrow the task.' }
