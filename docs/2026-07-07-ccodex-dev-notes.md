@@ -132,3 +132,8 @@ worse:
 - `lib/StdinTimeout.ps1` abandons its `ReadAsync` task on timeout (harmless; process exits).
 - A missing worker-prompt template exits `12` before any `status.json` exists (no job dir yet to
   write into).
+- Completion-evidence files (`worker-complete.json`, `exit_code.txt`, `result.md`) are not
+  backend-scoped: on the (currently unreachable) foreign-backend-takeover path the terminal
+  status write is guarded, but evidence files are not. Deferred from the 2026-07-07 codex final
+  gate with rationale: no code path launches a second worker for one job id today (`resume`
+  creates a new job dir). Revisit if Phase 4/5 ever share job directories between workers.
