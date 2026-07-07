@@ -45,7 +45,9 @@ function New-CcodexTestJobWithStatus {
         [Nullable[int]]$WrapperExitCode = $null,
         [switch]$WithExitCodeEvidence,
         [int]$EvidenceExitCode = 0,
-        [switch]$WithResultFile
+        [switch]$WithResultFile,
+        [string]$LastHeartbeatAt = $null,
+        [string]$StartedAt = $null
     )
     $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
     $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
@@ -56,7 +58,7 @@ function New-CcodexTestJobWithStatus {
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content 'test worker prompt body'
-    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode
+    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode -StartedAt $StartedAt -LastHeartbeatAt $LastHeartbeatAt
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
     if ($WithExitCodeEvidence) {
         Write-CcodexTextFile -Path (Join-Path $jobDir 'exit_code.txt') -Content "$EvidenceExitCode"
@@ -77,13 +79,21 @@ Assert-Equal $resultCreated.Stdout "$($jobCreated.JobId) created" 'created job s
 
 # --- status: running + worker alive (non-terminal) ---
 
-Write-Host "Invoke-CcodexStatusCommand: running + worker alive -> plain running line"
-$jobAlive = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+Write-Host "Invoke-CcodexStatusCommand: running + worker alive + fresh heartbeat -> health=ok"
+$freshHeartbeat = (Get-Date).ToUniversalTime().ToString('o')
+$jobAlive = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId -LastHeartbeatAt $freshHeartbeat
 $resultAlive = Invoke-CcodexStatusCommand -JobId $jobAlive.JobId -StateRoot $localAppData
 Assert-Equal $resultAlive.WrapperExitCode 0 'running+alive job -> exit 0'
-Assert-Equal $resultAlive.Stdout "$($jobAlive.JobId) running" 'running+alive status line has no health flag'
+Assert-Equal $resultAlive.Stdout "$($jobAlive.JobId) running health=ok" 'running+alive+fresh-heartbeat status line shows health=ok'
 $statusAliveAfter = Get-Content -LiteralPath (Join-Path $jobAlive.JobDir 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $statusAliveAfter.status 'running' 'running+alive status.json unchanged'
+
+Write-Host "Invoke-CcodexStatusCommand: running + worker alive + stale heartbeat -> health=stale"
+$oldHeartbeat = (Get-Date).ToUniversalTime().AddSeconds(-600).ToString('o')
+$jobStaleHb = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId -LastHeartbeatAt $oldHeartbeat
+$resultStaleHb = Invoke-CcodexStatusCommand -JobId $jobStaleHb.JobId -StateRoot $localAppData
+Assert-Equal $resultStaleHb.WrapperExitCode 0 'running+alive+stale-heartbeat job -> exit 0'
+Assert-Equal $resultStaleHb.Stdout "$($jobStaleHb.JobId) running health=stale" 'running+alive+old-heartbeat status line shows health=stale'
 
 # --- status: running + worker dead + exit_code.txt evidence -> reconciled terminal line, file rewritten ---
 

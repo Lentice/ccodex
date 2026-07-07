@@ -45,7 +45,8 @@ function New-CcodexStatusObject {
         [string]$CodexThreadId = $null,
         [Nullable[int]]$HardTimeoutSec = $null,
         [string]$TimeoutReason = $null,
-        [string]$TerminatedAt = $null
+        [string]$TerminatedAt = $null,
+        [string]$LastHeartbeatAt = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -68,6 +69,7 @@ function New-CcodexStatusObject {
         hard_timeout_sec  = $HardTimeoutSec
         timeout_reason    = $TimeoutReason
         terminated_at     = $TerminatedAt
+        last_heartbeat_at = $LastHeartbeatAt
     }
 }
 

@@ -113,7 +113,14 @@ function Invoke-CcodexCodexProcess {
         [Parameter(Mandatory)][string]$EventsLogPath,
         [Parameter(Mandatory)][string]$StderrLogPath,
         [Parameter(Mandatory)][string]$ExitCodeFilePath,
-        [int]$HardTimeoutMs = 0
+        [int]$HardTimeoutMs = 0,
+        # Best-effort periodic callback (the native worker uses it to refresh
+        # last_heartbeat_at in status.json). Invoked from the wait loop every
+        # $HeartbeatEveryPasses ~1s passes; exceptions are swallowed so a failing
+        # heartbeat can never derail the run. $null (the default, used by `run`)
+        # disables it entirely.
+        [scriptblock]$OnHeartbeat = $null,
+        [int]$HeartbeatEveryPasses = 30
     )
     $plan = Get-CcodexProcessLaunchPlan -CodexPath $CodexPath -Arguments $Arguments
 
@@ -149,8 +156,22 @@ function Invoke-CcodexCodexProcess {
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
 
-    if ($HardTimeoutMs -gt 0) {
-        if (-not $process.WaitForExit($HardTimeoutMs)) {
+    # Single 1s-granularity poll loop that carries BOTH responsibilities:
+    #   * the job-level hard timeout ($HardTimeoutMs): once the deadline passes and
+    #     Codex still has not exited, kill the tree and return the $null sentinel
+    #     (behavior-identical to the previous single WaitForExit($HardTimeoutMs)).
+    #   * the periodic worker heartbeat: every $HeartbeatEveryPasses passes, invoke
+    #     $OnHeartbeat best-effort (swallow any exception).
+    # WaitForExit(1000) blocks up to a second, so the loop wakes ~once per second
+    # regardless of whether a heartbeat or timeout is configured.
+    $hardDeadline = if ($HardTimeoutMs -gt 0) { [DateTime]::UtcNow.AddMilliseconds($HardTimeoutMs) } else { $null }
+    $passCount = 0
+    while (-not $process.WaitForExit(1000)) {
+        $passCount++
+        if ($null -ne $OnHeartbeat -and $HeartbeatEveryPasses -gt 0 -and ($passCount % $HeartbeatEveryPasses) -eq 0) {
+            try { & $OnHeartbeat } catch { }
+        }
+        if ($null -ne $hardDeadline -and [DateTime]::UtcNow -ge $hardDeadline) {
             # Budget exceeded and Codex has not exited: kill the whole tree, then
             # wait (parameterless) for the killed process object to reap so the
             # async stdout/stderr readers can drain the now-closed pipes. Each

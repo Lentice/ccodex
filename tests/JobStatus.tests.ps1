@@ -281,5 +281,42 @@ $afterLockHeld = (Get-Item (Join-Path $dirLockHeld 'status.json')).LastWriteTime
 Assert-Equal $afterLockHeld $beforeLockHeld 'held-lock reconciliation did not rewrite status.json'
 Unlock-CcodexJob -JobDir $dirLockHeld
 
+# --- Get-CcodexJobHealth ---
+
+Write-Host "Get-CcodexJobHealth: running + fresh heartbeat -> ok"
+$freshHb = (Get-Date).ToUniversalTime().ToString('o')
+$healthFresh = Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $freshHb; started_at = $freshHb })
+Assert-Equal $healthFresh 'ok' 'running job with a fresh heartbeat is ok'
+
+Write-Host "Get-CcodexJobHealth: running + old heartbeat -> stale"
+$oldHb = (Get-Date).ToUniversalTime().AddSeconds(-600).ToString('o')
+$healthOld = Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $oldHb; started_at = $oldHb })
+Assert-Equal $healthOld 'stale' 'running job with an old heartbeat is stale'
+
+Write-Host "Get-CcodexJobHealth: running + no heartbeat, fresh started_at -> ok (started_at fallback)"
+$freshStart = (Get-Date).ToUniversalTime().ToString('o')
+$healthFallbackFresh = Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $null; started_at = $freshStart })
+Assert-Equal $healthFallbackFresh 'ok' 'running job with no heartbeat but a fresh started_at falls back to ok'
+
+Write-Host "Get-CcodexJobHealth: running + no heartbeat, old started_at -> stale"
+$oldStart = (Get-Date).ToUniversalTime().AddSeconds(-600).ToString('o')
+$healthFallbackOld = Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $null; started_at = $oldStart })
+Assert-Equal $healthFallbackOld 'stale' 'running job with no heartbeat and an old started_at is stale'
+
+Write-Host "Get-CcodexJobHealth: running + no timestamps at all -> stale"
+$healthNoTs = Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $null; started_at = $null })
+Assert-Equal $healthNoTs 'stale' 'running job with no timestamps at all is stale'
+
+Write-Host "Get-CcodexJobHealth: non-running statuses and null -> null"
+Assert-Equal (Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'done'; last_heartbeat_at = $freshHb })) $null 'done job has null health regardless of heartbeat'
+Assert-Equal (Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'created' })) $null 'created job has null health'
+Assert-Equal (Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'timed_out'; last_heartbeat_at = $freshHb })) $null 'timed_out job has null health'
+Assert-Equal (Get-CcodexJobHealth -Status $null) $null 'null status object has null health'
+
+Write-Host "Get-CcodexJobHealth: honors a custom StaleAfterSec threshold"
+$hb45 = (Get-Date).ToUniversalTime().AddSeconds(-45).ToString('o')
+Assert-Equal (Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $hb45 }) -StaleAfterSec 30) 'stale' '45s-old heartbeat is stale under a 30s threshold'
+Assert-Equal (Get-CcodexJobHealth -Status ([pscustomobject]@{ status = 'running'; last_heartbeat_at = $hb45 })) 'ok' '45s-old heartbeat is ok under the 90s default threshold'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

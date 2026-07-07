@@ -44,16 +44,33 @@ function Invoke-CcodexWorker {
     $hardTimeoutSec = if ($status.hard_timeout_sec) { [int]$status.hard_timeout_sec } else { 0 }
     $hardTimeoutSecOrNull = if ($hardTimeoutSec -gt 0) { $hardTimeoutSec } else { $null }
 
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject `
+    $statusPath = Join-Path $jobDir 'status.json'
+    Write-CcodexJsonFileAtomic -Path $statusPath -Object (New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
         -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+
+    # Liveness heartbeat: while Codex runs (which can be many minutes), periodically
+    # re-stamp status.json's last_heartbeat_at under the per-job lock, preserving every
+    # other field. Readers derive health=ok|stale from this (Get-CcodexJobHealth). It is
+    # best-effort — Invoke-CcodexCodexProcess swallows any exception — and a lock it cannot
+    # acquire is skipped rather than blocking the run. GetNewClosure captures $jobDir/
+    # $statusPath so the block works when invoked from inside the codex-process wait loop.
+    $onHeartbeat = {
+        $current = Read-CcodexStatusFile -JobDir $jobDir
+        if ($null -eq $current) { return }
+        $updated = [ordered]@{}
+        foreach ($property in $current.PSObject.Properties) { $updated[$property.Name] = $property.Value }
+        $updated['last_heartbeat_at'] = (Get-Date).ToUniversalTime().ToString('o')
+        Write-CcodexStatusUnderLock -JobDir $jobDir -CommandName 'heartbeat' -StatusPath $statusPath -StatusObject $updated | Out-Null
+    }.GetNewClosure()
 
     # SkipRunningWrite: the worker already stamped its own `running` status.json (with the
     # backend_id/started_at above) immediately before this call, so the execution core must
     # not overwrite it with a redundant second `running` write of the same content.
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
-        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite
+        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
+        -OnHeartbeat $onHeartbeat
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

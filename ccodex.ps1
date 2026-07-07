@@ -155,7 +155,11 @@ function Invoke-CcodexJobExecution {
         # status.json (with its own backend_id/started_at) before calling into this core;
         # without this switch the core's own running-write below duplicates that stamp with
         # identical content. `run` never passes this switch, so its behavior is unchanged.
-        [switch]$SkipRunningWrite
+        [switch]$SkipRunningWrite,
+        # Best-effort heartbeat callback forwarded to Invoke-CcodexCodexProcess. The native
+        # worker supplies one (it refreshes last_heartbeat_at in status.json); `run` (sync)
+        # passes none, so the caller — which is actively watching — keeps its old behavior.
+        [scriptblock]$OnHeartbeat = $null
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -190,7 +194,7 @@ function Invoke-CcodexJobExecution {
     }
 
     try {
-        $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath -HardTimeoutMs ($HardTimeoutSec * 1000)
+        $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath -HardTimeoutMs ($HardTimeoutSec * 1000) -OnHeartbeat $OnHeartbeat
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
@@ -480,7 +484,16 @@ function Invoke-CcodexStatusCommand {
         $line = "$JobId $statusText codex_exit_code=$codexExitText wrapper_exit_code=$wrapperExitText"
     } else {
         $line = "$JobId $statusText"
-        if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
+        if ($reconciliation.PossiblyStale) {
+            # Reconciliation verdict (dead worker, no completion evidence yet) keeps its
+            # own wording; it takes precedence over the heartbeat-derived signal.
+            $line += ' health=possibly-stale'
+        } else {
+            # Heartbeat-derived health for a live running job: ok|stale (null for
+            # non-running statuses like created/timed_out, which append nothing).
+            $health = Get-CcodexJobHealth -Status $statusObj
+            if ($health) { $line += " health=$health" }
+        }
     }
 
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $line; Message = $null }

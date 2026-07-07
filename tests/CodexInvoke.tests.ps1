@@ -101,5 +101,44 @@ Assert-True (-not $toAlive) 'the fake-codex process tree was terminated by the h
 
 Remove-Item Env:\CCODEX_FAKE_PIDFILE, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $timeoutRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host "Invoke-CcodexCodexProcess invokes the heartbeat scriptblock periodically during a long run"
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+$env:CCODEX_FAKE_DELAY_MS = '3000'
+$hbRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-codexinvoke-heartbeat-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $hbRoot -Force | Out-Null
+$hbEvents = Join-Path $hbRoot 'codex-events.jsonl'
+$hbStderr = Join-Path $hbRoot 'stderr.log'
+$hbExit = Join-Path $hbRoot 'exit_code.txt'
+$hbResult = Join-Path $hbRoot 'result.md'
+# A closure-captured counter object survives regardless of which session state the
+# scriptblock is invoked from inside Invoke-CcodexCodexProcess.
+$hbCounter = [pscustomobject]@{ Count = 0 }
+$hbBlock = { $hbCounter.Count++ }.GetNewClosure()
+# HeartbeatEveryPasses=1 fires the block on every ~1s poll pass; a ~3s fake run yields
+# at least two full passes (t=1s, t=2s) before the process exits.
+$hbExitCode = Invoke-CcodexCodexProcess -CodexPath $pwshPath -Arguments @('-NoProfile', '-File', $fixturePs1, '--output-last-message', $hbResult) -PromptContent 'hb prompt' -EventsLogPath $hbEvents -StderrLogPath $hbStderr -ExitCodeFilePath $hbExit -OnHeartbeat $hbBlock -HeartbeatEveryPasses 1
+Assert-Equal $hbExitCode 0 'heartbeat run returns the fake exit code'
+Assert-True ($hbCounter.Count -ge 2) "heartbeat scriptblock invoked at least twice during the run (was $($hbCounter.Count))"
+Remove-Item Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $hbRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host "Invoke-CcodexCodexProcess with a heartbeat that throws is best-effort (does not fail the run)"
+$env:CCODEX_FAKE_DELAY_MS = '2500'
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'hb throw ok'
+$hbThrowRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-codexinvoke-hbthrow-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $hbThrowRoot -Force | Out-Null
+$hbtEvents = Join-Path $hbThrowRoot 'codex-events.jsonl'
+$hbtStderr = Join-Path $hbThrowRoot 'stderr.log'
+$hbtExit = Join-Path $hbThrowRoot 'exit_code.txt'
+$hbtResult = Join-Path $hbThrowRoot 'result.md'
+$hbtBlock = { throw 'boom from heartbeat' }
+$hbtExitCode = Invoke-CcodexCodexProcess -CodexPath $pwshPath -Arguments @('-NoProfile', '-File', $fixturePs1, '--output-last-message', $hbtResult) -PromptContent 'hbt prompt' -EventsLogPath $hbtEvents -StderrLogPath $hbtStderr -ExitCodeFilePath $hbtExit -OnHeartbeat $hbtBlock -HeartbeatEveryPasses 1
+Assert-Equal $hbtExitCode 0 'a throwing heartbeat is swallowed; the run still returns the real exit code'
+Assert-Equal (Get-Content -LiteralPath $hbtResult -Raw) 'hb throw ok' 'the run completed normally despite the throwing heartbeat'
+Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $hbThrowRoot -Recurse -Force -ErrorAction SilentlyContinue
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

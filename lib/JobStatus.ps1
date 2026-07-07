@@ -20,6 +20,58 @@ function Read-CcodexStatusFile {
     return $null
 }
 
+function ConvertTo-CcodexHealthUtcDateTime {
+    # ConvertFrom-Json auto-deserializes ISO-8601 timestamp strings into [DateTime]
+    # objects, so status.json's last_heartbeat_at/started_at can come back as either a
+    # [DateTime] or a plain [string]. A naive [string] cast of a DateTime re-renders it
+    # in the current culture WITHOUT its zone, so a re-parse would silently shift it by
+    # the local offset. Return a correct UTC [DateTime] from either shape, or $null when
+    # neither parses (mirrors JobLock's ConvertTo-CcodexLockUtcDateTime, kept local so
+    # JobStatus stays independently dot-sourceable).
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime() }
+    $parsed = [DateTime]::MinValue
+    if ([DateTime]::TryParse(
+            [string]$Value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$parsed)) {
+        return $parsed.ToUniversalTime()
+    }
+    return $null
+}
+
+function Get-CcodexJobHealth {
+    # Derives a coarse, heartbeat-based health signal for a job from its status object.
+    # Returns $null for any non-running job (health is only meaningful while running).
+    # For a running job it returns 'ok' when the last worker heartbeat is within
+    # $StaleAfterSec, else 'stale'. When no heartbeat has been written yet it falls back
+    # to started_at; when neither timestamp is present/parseable the job is 'stale'.
+    # This is distinct from reconciliation's 'possibly-stale' verdict (a dead worker with
+    # no completion evidence yet) — callers keep that wording for the PossiblyStale case.
+    param(
+        [pscustomobject]$Status,
+        [int]$StaleAfterSec = 90
+    )
+    if ($null -eq $Status) { return $null }
+    if ($Status.status -ne 'running') { return $null }
+
+    $timestampValue = $Status.last_heartbeat_at
+    if ([string]::IsNullOrEmpty([string]$timestampValue)) {
+        # No heartbeat written yet: fall back to when the worker started running.
+        $timestampValue = $Status.started_at
+    }
+    if ([string]::IsNullOrEmpty([string]$timestampValue)) { return 'stale' }
+
+    $timestampUtc = ConvertTo-CcodexHealthUtcDateTime -Value $timestampValue
+    if ($null -eq $timestampUtc) { return 'stale' }
+
+    $ageSec = ((Get-Date).ToUniversalTime() - $timestampUtc).TotalSeconds
+    if ($ageSec -gt $StaleAfterSec) { return 'stale' }
+    return 'ok'
+}
+
 function ConvertTo-CcodexBackendId {
     param(
         [Parameter(Mandatory)][int]$ProcessId,
