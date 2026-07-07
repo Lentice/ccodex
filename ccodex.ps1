@@ -198,7 +198,15 @@ function New-CcodexPreservedStatusResult {
         [Parameter(Mandatory)]$PreservedStatus
     )
     $statusText = $PreservedStatus.status
-    $recordedWrapperExitCode = if ($null -ne $PreservedStatus.wrapper_exit_code) { [int]$PreservedStatus.wrapper_exit_code } else { $null }
+    # Defensive parse: a preserved status.json may carry a malformed wrapper_exit_code
+    # (corrupt/hand-edited file); an unparsable value falls back per status below.
+    $recordedWrapperExitCode = $null
+    if ($null -ne $PreservedStatus.wrapper_exit_code) {
+        $parsedRecordedCode = 0
+        if ([int]::TryParse([string]$PreservedStatus.wrapper_exit_code, [ref]$parsedRecordedCode)) {
+            $recordedWrapperExitCode = $parsedRecordedCode
+        }
+    }
     $wrapperExitCode = switch ($statusText) {
         'cancelled' { 22 }
         'done' { 0 }

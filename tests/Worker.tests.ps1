@@ -247,6 +247,24 @@ Assert-Equal $statusForeignBackend.backend_id $foreignTestOwnBackendId "status.j
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobForeignBackend.JobDir '.lock'))) 'the per-job lock is released after the foreign-status path'
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
+Write-Host "Invoke-CcodexJobExecution: preserved terminal status with a MALFORMED wrapper_exit_code -> per-status fallback (failed -> 10), no throw"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SHOULD NOT BE REPORTED AS SUCCESS'
+$jobMalformedCode = New-CcodexTestJob
+$malformedTestBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+function Read-CcodexStatusFile {
+    param([Parameter(Mandatory)][string]$JobDir)
+    return [pscustomobject]@{ status = 'failed'; backend_id = $malformedTestBackendId; wrapper_exit_code = 'not-a-number' }
+}
+$malformedCodeResult = Invoke-CcodexJobExecution -JobDir $jobMalformedCode.JobDir -RepoRoot $targetRepo -Mode 'review' -Access 'read-only' `
+    -WorkerPrompt 'test worker prompt body' -CodexPath $fixtureCmd -CreatedAt ((Get-Date).ToString('o')) `
+    -Backend 'native' -BackendId $malformedTestBackendId -StartedAt ((Get-Date).ToString('o'))
+. (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
+Assert-Equal $malformedCodeResult.WrapperExitCode 10 'a preserved failed status with a malformed wrapper_exit_code falls back to 10 instead of throwing'
+Assert-Equal $malformedCodeResult.Status 'failed' 'the preserved result reports the terminal failed status'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobMalformedCode.JobDir '.lock'))) 'the per-job lock is released after the malformed-code preserved path'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 # --- (f) Update-CcodexHeartbeat: never resurrects a status a concurrent writer changed ---
 
 $hbBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
