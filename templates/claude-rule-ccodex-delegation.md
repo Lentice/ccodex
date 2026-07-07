@@ -107,6 +107,7 @@ README's failure-class table:
 | exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |
 | exit `22` | The job was cancelled (`ccodex cancel`); treat it as intentionally stopped, not a failure. |
 | exit `24` | The job hit its timeout; note it and continue — don't just retry unchanged. |
+| exit `25` | `ccodex apply` conflicted or failed; the main repo was left untouched — review `ccodex diff <job_id>`, resolve by hand, report to the user; never retry `apply` unchanged. |
 | exit `2`/`3`/`12`/`23` | Wrapper/usage/internal error; note it and continue without the review. |
 
 In every failure case, the task itself is not blocked — a skipped or failed review is recorded as
@@ -117,6 +118,25 @@ task-specific — `auth`, `quota_or_rate_limit`, `permission_or_sandbox`, or the
 `CreateProcessWithLogonW failed: 1385` signature — run `ccodex doctor` before retrying or trying a
 workaround. It isolates whether Codex itself, the wrapper, or the state root is the actual
 problem, so you react to the real cause instead of guessing.
+
+## Delegated implementation: review the diff before applying
+
+If a checkpoint or an explicit user request delegates an actual code edit (not just a review) to
+Codex, use `ccodex run --mode implement` (or `submit --mode implement`) — it executes inside an
+isolated, detached git worktree under the state root, so the working tree you're already in is
+never touched by the job itself. Then, always in this order:
+
+```powershell
+ccodex diff <job_id>     # review every change yourself — treat it like a PR you're about to merge
+ccodex apply <job_id>    # only once you've reviewed it and decided to land it
+```
+
+**Never auto-apply.** `apply` is the one command in this policy that must never be run
+automatically at a checkpoint or unattended — always inspect `ccodex diff <job_id>` first and make
+an explicit adopt/reject decision, exactly as with a review finding. `apply` requires a clean main
+repo working tree and only accepts a `done` job; on conflict it exits `25` and leaves the main
+repo untouched — report the conflict and let the user decide how to resolve it rather than
+retrying blindly.
 
 ## Job lifecycle hygiene
 

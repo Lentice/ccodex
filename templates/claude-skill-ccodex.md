@@ -59,8 +59,10 @@ Commands appear in the supported list as their phase is installed:
 
 Prompts are piped on stdin (preferred), or passed via `--prompt-file <path>` or as a positional
 argument. `run` and `submit` REQUIRE `--mode` (`review`, `brainstorm`, or `test`; plus
-`implement` only where Phase 4 is installed) — omitting it exits 2. Access defaults to
-read-only; `--repo` defaults to the repo containing the current directory.
+`implement` only where Phase 4 is installed) — omitting it exits 2. `--access` defaults per mode:
+`read-only` for `review`/`brainstorm`, `worktree` for `implement` (where Phase 4 is installed),
+and no default for `test` (`--access workspace` or `--access worktree` must be given explicitly —
+`--access read-only` is rejected). `--repo` defaults to the repo containing the current directory.
 
 ```powershell
 # Second opinion / brainstorm (synchronous; result on stdout)

@@ -15,29 +15,35 @@ treat it like any other command it shells out to.
 ## Status
 
 **Phase 1 (synchronous CLI), Phase 2a (async result channel), Phase 2c (scoped review +
-delegation policy), and Phase 2b (job management: locks, retention/cleanup, cancel, heartbeat/
-health, tail, debug, doctor) are done**, along with the Phase 3 `/ccodex` Claude command.
+delegation policy), Phase 2b (job management: locks, retention/cleanup, cancel, heartbeat/
+health, tail, debug, doctor), and Phase 4 (worktree-isolated `implement` mode with `diff`/`apply`)
+are done**, along with the Phase 3 `/ccodex` Claude command.
 `ccodex run` is synchronous end-to-end; `ccodex submit` returns a job id immediately and hands the
 work to a detached background worker that survives the submitting process exiting, with
 `status`/`wait`/`read` to retrieve lifecycle and the final result from any directory. `ccodex
 review` adds a path-scoped code review over a git diff range; `cancel`/`cleanup`/`tail`/`debug`/
-`doctor` round out job lifecycle management and environment diagnosis; and `.ccodex/ccodex.json`
-plus the installed `~/.claude/rules/ccodex-delegation.md` rule let a project opt every Claude Code
-session into automatic review/second-opinion checkpoints. See
+`doctor` round out job lifecycle management and environment diagnosis; `--mode implement` (default
+`--access worktree`) runs an edit-capable worker inside an isolated git worktree under the state
+root — never the caller's own working tree — and `ccodex diff`/`ccodex apply` let the caller
+inspect and explicitly land the worker's snapshot commit onto the main repo; and
+`.ccodex/ccodex.json` plus the installed `~/.claude/rules/ccodex-delegation.md` rule let a project
+opt every Claude Code session into automatic review/second-opinion checkpoints. See
 [`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md),
 [`docs/2026-07-04-ccodex-adapter-phase2a-plan.md`](docs/2026-07-04-ccodex-adapter-phase2a-plan.md),
-[`docs/2026-07-05-ccodex-delegation-plan.md`](docs/2026-07-05-ccodex-delegation-plan.md), and
-[`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md)
+[`docs/2026-07-05-ccodex-delegation-plan.md`](docs/2026-07-05-ccodex-delegation-plan.md),
+[`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md), and
+[`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md)
 for the task-by-task build logs and [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md)
 for the full design across all planned phases.
 
 Implemented so far:
 
 - `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, `review`, `cancel`,
-  `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker` subcommand; `run`/`submit`
-  accept `--mode`, `--access`, `--repo`, `--prompt-file`, a positional task argument, or a
-  piped/redirected-stdin task; `review` accepts a diff selector (`--range`/`--staged`/
-  `--working`), `--path`, `--intent`, `--focus`, `--embed-diff`, and `--repo`; `cancel`/`tail`/
+  `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker` subcommand;
+  `run`/`submit` accept `--mode` (including `implement`), `--access` (including `worktree`),
+  `--repo`, `--prompt-file`, a positional task argument, or a piped/redirected-stdin task;
+  `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
+  `--focus`, `--embed-diff`, and `--repo`; `diff`/`apply` take a worktree job id; `cancel`/`tail`/
   `debug` take a job id (`tail` also accepts `--lines`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
   accepts `--no-smoke` and `--repo`
@@ -77,25 +83,32 @@ Implemented so far:
   10-minute owner-dead window; lock acquisition failure surfaces as wrapper exit `21`
 - `lib/Cleanup.ps1` — the `ccodex cleanup` retention-sweep engine: deletes aged terminal jobs
   (index entry first, then the job directory), removes dangling index entries, optionally
-  reconciles and sweeps stalled jobs (`--include-stalled`), and scrubs `codex_thread_id` on
-  retained-but-expired jobs (`--scrub-thread-ids`) under the per-job lock
+  reconciles and sweeps stalled jobs (`--include-stalled`), scrubs `codex_thread_id` on
+  retained-but-expired jobs (`--scrub-thread-ids`) under the per-job lock, and (Phase 4) removes a
+  deleted job's worktree via `lib/Worktree.ps1` and sweeps any dangling worktree directory whose
+  job dir is already gone
 - `lib/ReviewPrompt.ps1` — composes the `ccodex review` task text (self-diff and `--embed-diff`
   forms) from a diff selector, paths, intent, and focus
+- `lib/Worktree.ps1` — the `--access worktree` lifecycle: `New-CcodexJobWorktree` creates a
+  detached git worktree at the main repo's current HEAD under
+  `%LOCALAPPDATA%\ccodex\worktrees\<job_id>\`; `Complete-CcodexJobWorktree` stages and commits
+  whatever the worker left behind (as `ccodex-worker <ccodex@local>`) into one deterministic
+  snapshot commit after the process exits; `Remove-CcodexJobWorktree` tears the worktree down
+  (best-effort when the main repo itself is already gone)
 - `templates/worker-prompt.md` — default worker-prompt contract template
-- `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template (includes `review`
-  and job-management guidance)
+- `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template (includes `review`,
+  job-management, and delegated-implementation `implement` → `diff` → `apply` guidance)
 - `templates/claude-rule-ccodex-delegation.md` — the always-on delegation policy rule, installed
-  to `~/.claude/rules/ccodex-delegation.md`
+  to `~/.claude/rules/ccodex-delegation.md` (includes the never-auto-apply `implement`/`diff`/
+  `apply` guidance)
 - `templates/claude-skill-ccodex.md` — the `ccodex` Claude Code agent skill, installed to
   `~/.claude/skills/ccodex/SKILL.md`, teaching any session how and when to use every phase's
   commands (discovered at runtime via `ccodex help`'s exit-2 command list)
 - A full plain-PowerShell test suite under `tests/` (no Pester; see Testing below)
 
-Not yet implemented: tmux, and worktree-isolated `implement` mode / `--access worktree` /
-`diff`/`apply` (Phase 4), and `resume` (Phase 5). Running `ccodex` with any subcommand other than
-`run`, `submit`, `status`, `wait`, `read`, `review`, `cancel`, `tail`, `debug`, `cleanup`,
-`doctor`, or `worker` exits 2 with a "not implemented" message. `--mode implement` and
-`--access worktree` are also rejected today — they will be enabled in Phase 4.
+Not yet implemented: tmux and `resume` (Phase 5). Running `ccodex` with any subcommand other than
+`run`, `submit`, `status`, `wait`, `read`, `review`, `cancel`, `diff`, `apply`, `tail`, `debug`,
+`cleanup`, `doctor`, or `worker` exits 2 with a "not implemented" message.
 
 ## Quick reference
 
@@ -108,6 +121,8 @@ One line per goal — full details in [Usage](#usage) below.
 | Review exactly the changes just made | `ccodex review --range <base>..HEAD --path lib/ --intent "<what changed>" --embed-diff` |
 | Review uncommitted work | `ccodex review --working --path <p> --intent "<what changed>" --embed-diff` |
 | Review inside a submodule | `ccodex review --repo <submodule-path> --range <base>..HEAD --embed-diff` |
+| Delegate an implementation | `"<task>" \| ccodex run --mode implement` (edits happen in an isolated worktree, never your working tree) |
+| Inspect/apply a worker's changes | `ccodex diff <job_id>` then, once reviewed, `ccodex apply <job_id>` |
 | Long / parallel background job | `"<task>" \| ccodex submit --mode test --access workspace` then `ccodex wait <job_id>` |
 | Check on a background job | `ccodex status <job_id>` (non-blocking) / `ccodex read <job_id>` (result if finished) |
 | Bound a possibly-hanging job | add `--hard-timeout-sec <n>` to `run`/`submit` (kills the tree, exit `24`) |
@@ -128,6 +143,10 @@ Picking the right verb:
   `CreateProcessWithLogonW failed: 1385`), always pass `--embed-diff` — it is the form verified
   live on this machine; the default self-diff form is lighter where the sandbox allows process
   execution.
+- **`run --mode implement`** — you want Codex to actually make an edit rather than advise on one;
+  it runs inside an isolated git worktree under the state root, so your own working tree is never
+  touched by the job itself. Inspect with `ccodex diff <job_id>` and land the change explicitly
+  with `ccodex apply <job_id>` — never auto-apply; review the diff first.
 - **`cancel`** — a submitted job needs to be stopped (wrong task, taking too long, no longer
   needed) rather than waited out.
 - **`cleanup`** — periodic hygiene: run it (ideally with `--dry-run` first) to reclaim disk from
@@ -139,7 +158,8 @@ Picking the right verb:
 
 Exit codes at a glance: `0` ok · `2` usage · `3` unknown job · `4` not finished yet (`read`) ·
 `10` codex failed · `11` empty result · `12` internal · `20` wait timeout · `21` job lock timeout
-· `22` job cancelled · `23` worker never started · `24` hard-timeout kill. On failure,
+· `22` job cancelled · `23` worker never started · `24` hard-timeout kill · `25` `apply` conflict/
+failure (main repo left untouched). On failure,
 `status.json.failure_reason` hints the reaction: `quota_or_rate_limit` → report it, don't retry ·
 `auth` → run `codex login` · `permission_or_sandbox` → consider `--access workspace` or narrow the
 task · `network` → one retry is safe. When the reason itself is unclear, run `ccodex doctor` (or
@@ -231,6 +251,70 @@ ccodex review --repo D:\Documents\GitHub\superproject\vendor\some-submodule `
   --range abc123..HEAD --path src/ --intent "Bump dependency and adjust call sites"
 ```
 
+### Worktree-isolated implementation (`--mode implement`, `ccodex diff`, `ccodex apply`)
+
+Mode/access matrix:
+
+| Mode | Valid `--access` | Default when `--access` is omitted |
+| --- | --- | --- |
+| `review` | `read-only` only | `read-only` |
+| `brainstorm` | `read-only` only | `read-only` |
+| `test` | `workspace` or `worktree` | none — `--access` must be given explicitly (`read-only` is rejected) |
+| `implement` | `worktree` only | `worktree` |
+
+`--mode implement` runs an edit-capable Codex worker inside an isolated, detached git worktree
+under the state root (`%LOCALAPPDATA%\ccodex\worktrees\<job_id>\`) — never inside the caller's own
+working tree, and the main repo is never mutated by the run itself:
+
+```powershell
+"Add input validation to the signup form." | ccodex run --mode implement --repo D:\some\repo
+# -> blocks until Codex finishes, then prints its final message (same as any other `run`)
+
+# Or run it in the background like any other job:
+"Add input validation to the signup form." | ccodex submit --mode implement --repo D:\some\repo
+ccodex wait <job_id>
+```
+
+When the process exits (success, failure, or a hard-timeout kill), the wrapper stages and commits
+whatever the worker left behind into one deterministic snapshot commit (author
+`ccodex-worker <ccodex@local>`, message `ccodex: worker output <job_id>`) on top of the worktree's
+base commit — a no-op worker leaves the worktree at its base commit instead (`status.json`'s
+`worktree_committed` is `false`). `status.json`/`debug.json` additionally record `main_repo`,
+`worktree_repo`, and `base_commit` for a worktree job (`null` for non-worktree jobs).
+
+**`ccodex diff <job_id>`** — read-only inspection of a worktree job's changes; prints
+`git diff --stat <base_commit>..HEAD` followed by the full `git diff <base_commit>..HEAD` from the
+job's worktree. An empty change set prints an informational "no changes to diff" line instead
+(still exit `0`). Exit `3` for an unknown job id or a worktree already removed by `cleanup`
+("worktree removed; artifacts remain at `<job_dir>`"); exit `4` if the job hasn't finished yet;
+exit `2` if the job wasn't run with `--access worktree` in the first place.
+
+```powershell
+ccodex diff <job_id>
+```
+
+**`ccodex apply <job_id>`** — explicitly lands a **done** worktree job's snapshot commit onto the
+main repo: `git format-patch <base_commit>..HEAD --stdout` from the worktree, piped to
+`git am --3way` in the main repo. Requires the main repo's working tree to be clean first (exit
+`2`, naming the dirty files, otherwise); only `done` jobs may be applied (`failed`/`timed_out`/
+`cancelled` → exit `2`); an empty change set is a no-op (exit `0`, main repo untouched). On
+success it prints the applied commit range and exits `0`. **Any** non-success outcome — a textual
+conflict, or a patch `git am` accepts as a no-op without advancing `HEAD` (e.g. already applied) —
+runs `git am --abort` and force-restores the main repo to its pre-apply `HEAD`, then exits **`25`**
+naming the conflicting files and pointing at `ccodex diff <job_id>`. The main repo is never left
+mutated except by a genuinely successful apply.
+
+```powershell
+ccodex diff <job_id>    # ALWAYS review before applying — never auto-apply
+ccodex apply <job_id>
+# -> ccodex: applied job <job_id> to <main_repo>
+#      range: <base_commit>..<new_head>
+```
+
+`ccodex cleanup` removes a deleted job's worktree directory (via the recorded `main_repo`) before
+removing its job dir, and separately sweeps any dangling worktree directory whose job dir is
+already gone — see "Job management" below.
+
 ### Delegation policy (`.ccodex/ccodex.json`)
 
 A project can opt into automatic delegation checkpoints — teaching a Claude Code session when to
@@ -271,8 +355,10 @@ Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 `%LOCALAPPDATA%\ccodex\index\<job_id>.json` that lets `status`/`wait`/`read` find the job from any
 directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
 `submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,
-`codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`, and
-`last_heartbeat_at` (see "Failure classes", "Hard timeout", and "Job management" below). Every
+`codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`,
+`last_heartbeat_at`, and — for a `--access worktree` job — `main_repo`, `worktree_repo`,
+`base_commit`, and `worktree_committed` (all `null` for non-worktree jobs; see "Failure classes",
+"Hard timeout", "Worktree-isolated implementation", and "Job management" below). Every
 writer of `status.json` — the worker's running/terminal writes, `cancel`, and `cleanup`'s
 thread-id scrub — now serializes through a per-job lock (`<job_dir>\.lock\`) so two writers can
 never race each other; a lock that cannot be acquired within its timeout surfaces as wrapper exit
@@ -313,21 +399,27 @@ ccodex debug <job_id>
 **`ccodex cleanup`** sweeps the jobs tree (not just the index — a crash mid-delete can leave an
 unindexed job directory the tree scan still finds) and deletes terminal jobs older than the
 retention threshold, in index-entry-then-directory order, plus any dangling index entries whose
-job directory is already gone. It never touches a young or still-live job. Pass `--dry-run` to
-preview without deleting; `--include-stalled` first reconciles non-terminal jobs with a dead
-worker (same check `status`/`wait`/`read` do) before judging them; `--scrub-thread-ids` blanks
-`codex_thread_id` (under the per-job lock, byte-stable rewrite — no other field changes) on
-retained jobs older than the thread TTL, making them non-resumable. `--older-than <Nd|Nh>` and
-`--thread-ttl <Nd>` override the configured thresholds for one run; `--repo <path>` narrows the
-sweep to one repo's jobs. Best-effort: exit `0` normally, `12` only if an individual delete/scrub
-failed (the sweep still completes and reports the count).
+job directory is already gone. It never touches a young or still-live job. When a deleted job
+carries a recorded worktree (a `--access worktree` job), its worktree directory is removed first
+via `git worktree remove` against the job's `main_repo` (best-effort — a worktree-teardown failure
+never blocks the job dir/index delete); separately, any *dangling* worktree directory under
+`worktrees\` whose job dir is already gone anywhere is swept too. Pass `--dry-run` to preview
+without deleting (worktree candidates are listed alongside job candidates); `--include-stalled`
+first reconciles non-terminal jobs with a dead worker (same check `status`/`wait`/`read` do)
+before judging them; `--scrub-thread-ids` blanks `codex_thread_id` (under the per-job lock,
+byte-stable rewrite — no other field changes) on retained jobs older than the thread TTL, making
+them non-resumable. `--older-than <Nd|Nh>` and `--thread-ttl <Nd>` override the configured
+thresholds for one run; `--repo <path>` narrows the sweep to one repo's jobs (the worktree sweep
+itself is deliberately unfiltered by `--repo`, since worktrees live in one global directory, not
+per-repo). Best-effort: exit `0` normally, `12` only if an individual delete/scrub failed (the
+sweep still completes and reports the count).
 
 ```powershell
 ccodex cleanup --dry-run                            # preview only
-ccodex cleanup                                      # delete aged terminal jobs
+ccodex cleanup                                      # delete aged terminal jobs (+ their worktrees)
 ccodex cleanup --older-than 7d --repo D:\some\repo   # narrower, repo-scoped sweep
 ccodex cleanup --include-stalled --scrub-thread-ids # reconcile stalled jobs + scrub old thread ids
-# -> cleanup: deleted=<n> reclaimed_kb=<n> dangling=<n> scrubbed=<n> skipped=<n> failed=<n>
+# -> cleanup: deleted=<n> reclaimed_kb=<n> dangling=<n> scrubbed=<n> skipped=<n> failed=<n> worktrees_swept=<n>
 ```
 
 **`ccodex doctor [--no-smoke] [--repo <path>]`** is the first move whenever a failure looks
@@ -392,8 +484,11 @@ Callers can rely on these wrapper exit codes:
 | `22` | `wait` returned because the job's terminal status is `cancelled` (someone ran `ccodex cancel` on it). |
 | `23` | The background worker failed to launch, or never stamped a startup sentinel, during `submit`. |
 | `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
+| `25` | `ccodex apply <job_id>` failed or conflicted; `git am --abort` ran and the main repo was force-restored to its pre-apply `HEAD` (never left mutated). Review `ccodex diff <job_id>`, resolve by hand, and re-run `apply`. |
 
-`cancel`, `tail`, `debug`, and `cleanup` additionally use exit `3` for an unknown job id (same as
+`diff` and `apply` additionally use exit `2` for a non-worktree job or (for `apply`) a dirty main
+repo/non-`done` job, and exit `4` for a job that hasn't finished yet — see "Worktree-isolated
+implementation" above. `cancel`, `tail`, `debug`, and `cleanup` additionally use exit `3` for an unknown job id (same as
 `status`/`wait`/`read`) and exit `12` for a wrapper-internal failure; `cleanup` and `doctor` are
 documented in full in "Job management" above.
 
@@ -477,23 +572,25 @@ rule destinations are fixed at `<ClaudeDir>\commands\ccodex.md` and
 `<ClaudeDir>\rules\ccodex-delegation.md`, `<ClaudeDir>` defaulting to `%USERPROFILE%\.claude`).
 
 Once installed, `/ccodex` is available as a slash command in Claude Code: it summarizes the task,
-calls `ccodex run`/`submit`/`wait`/`read`/`review`/`cancel`/`tail`/`debug`/`cleanup`/`doctor` as
-appropriate, and treats the wrapper's exit code as the source of truth for success/failure rather
-than parsing stderr prose. The installed rule at `~/.claude/rules/ccodex-delegation.md` is loaded
-automatically in every session (no slash command needed) and teaches the post-change/post-plan
-delegation checkpoints described above.
+calls `ccodex run`/`submit`/`wait`/`read`/`review`/`cancel`/`diff`/`apply`/`tail`/`debug`/
+`cleanup`/`doctor` as appropriate, and treats the wrapper's exit code as the source of truth for
+success/failure rather than parsing stderr prose. It always reviews a delegated implementation's
+`ccodex diff` before deciding whether to `ccodex apply` it — never automatically. The installed
+rule at `~/.claude/rules/ccodex-delegation.md` is loaded automatically in every session (no slash
+command needed) and teaches the post-change/post-plan delegation checkpoints described above.
 
 ## Repository layout
 
 ```text
 ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/review/
-                    #   cancel/tail/debug/cleanup/doctor/worker
+                    #   cancel/diff/apply/tail/debug/cleanup/doctor/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
 install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md,
                     #   ~\.claude\rules\ccodex-delegation.md, and ~\.claude\skills\ccodex\SKILL.md
 templates/          # worker-prompt contract, the /ccodex Claude command, the delegation rule
                     #   template, and the ccodex Claude Code agent skill
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
+                    #   (includes lib/Worktree.ps1 for --access worktree jobs)
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
 docs/               # design spec and phase plans
 ```
@@ -523,8 +620,10 @@ pwsh -NoProfile -File tests/Paths.tests.ps1
 - **Phase 2b — Job management:** retention config, per-job locks, `cleanup` (including
   `--scrub-thread-ids` for stale session data), `cancel`, heartbeat/health, `tail`, `debug`,
   `doctor`. *(done — [`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md))*
-- **Phase 4 — Worktree isolation:** edit-capable workers in an isolated git worktree, with
-  explicit `diff`/`apply`. *(planned — [`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md))*
+- **Phase 4 — Worktree isolation:** `--mode implement` (default `--access worktree`) runs
+  edit-capable workers in an isolated git worktree under the state root, with explicit
+  `ccodex diff`/`ccodex apply` and worktree-aware `cleanup`.
+  *(done — [`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md))*
 - **Phase 5 — Multi-turn advisor:** `ccodex resume <job_id>` continues a finished job's Codex
   session for follow-up discussion. *(planned — [`docs/2026-07-07-ccodex-phase5-plan.md`](docs/2026-07-07-ccodex-phase5-plan.md))*
 

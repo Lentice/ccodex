@@ -1,5 +1,5 @@
 ---
-description: Delegate a task to Codex CLI (via ccodex) for a second opinion, review, brainstorm, test run, or long/parallel background work.
+description: Delegate a task to Codex CLI (via ccodex) for a second opinion, review, brainstorm, test run, worktree-isolated implementation, or long/parallel background work.
 ---
 
 Use the installed `ccodex` CLI to delegate work to Codex as an external subagent. `$ARGUMENTS` is
@@ -53,7 +53,27 @@ conversation.
    `--path` is repeatable; add `--focus "<extra focus>"` for a specific angle. See
    `~/.claude/rules/ccodex-delegation.md` for when to run this automatically.
 
-4. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
+4. **For a delegated implementation** (the user or the task explicitly wants Codex to make an
+   edit, not just advise on one), use `--mode implement`. It runs inside an isolated, detached git
+   worktree under the state root — your own working tree is never touched by the job itself:
+
+   ```powershell
+   "<implementation task text>" | ccodex run --mode implement --repo <path>
+   ```
+
+   Then **always** inspect before integrating — never auto-apply:
+
+   ```powershell
+   ccodex diff <job_id>     # review every change yourself before deciding anything
+   ccodex apply <job_id>    # only after you've reviewed the diff and want it landed
+   ```
+
+   `apply` requires a clean main-repo working tree and only applies a `done` job; on conflict it
+   exits `25` and leaves the main repo untouched — report the conflict to the user rather than
+   retrying blindly. Treat the diff exactly like a human PR you're about to merge: read it, decide,
+   then act.
+
+5. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
    at once), submit it in the background instead of blocking on `run`:
 
    ```powershell
@@ -71,15 +91,15 @@ conversation.
 
    Submit multiple jobs before waiting on any of them to run them in parallel.
 
-5. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
+6. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
    decide success or failure; use the exit code:
 
    | Exit code | Meaning |
    | --- | --- |
    | `0`  | Success — stdout is the final result. |
    | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure). |
-   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`tail`/`debug`). |
-   | `4`  | Job exists but is not finished yet (`read` only) — use `wait` or check back later. |
+   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`). |
+   | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`) — use `wait` or check back later. |
    | `10` | Codex itself exited non-zero. |
    | `11` | Codex exited zero but produced no usable result. |
    | `12` | Wrapper-internal error. |
@@ -88,8 +108,9 @@ conversation.
    | `22` | `wait` returned because the job was cancelled (`ccodex cancel`). |
    | `23` | The background worker failed to start. |
    | `24` | The job hit `--hard-timeout-sec` and was killed. |
+   | `25` | `ccodex apply` conflicted or failed; the main repo was left untouched — review `ccodex diff <job_id>` and resolve by hand. |
 
-6. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
+7. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
    `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
    react accordingly:
 
@@ -115,7 +136,7 @@ conversation.
    "<task text>" | ccodex run --mode test --access workspace --hard-timeout-sec 120
    ```
 
-7. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
+8. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
 
    ```powershell
    ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
@@ -130,5 +151,7 @@ conversation.
    the user asks to reclaim disk / clear stale sessions), ideally after a `--dry-run` preview; add
    `--scrub-thread-ids` to also blank old jobs' `codex_thread_id` so they stop being resumable.
 
-8. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
+9. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.
+   The same applies to a delegated implementation: `ccodex apply` lands exactly what the diff
+   showed, nothing more — you decide whether it's landed, not Codex.
