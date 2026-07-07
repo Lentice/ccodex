@@ -893,6 +893,220 @@ function Invoke-CcodexDebugCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
 }
 
+function Invoke-CcodexDoctorProbe {
+    # Minimal one-shot process runner used only by `doctor` to invoke plain `codex
+    # --version` / `codex doctor` (no prompt on stdin, no job artifacts). Reuses the
+    # same launch-plan machinery as Invoke-CcodexCodexProcess (Get-CcodexProcessLaunchPlan,
+    # the cmd.exe /d /s /c wrapping for .cmd/.bat targets) so the .cmd-vs-.ps1 precedence
+    # guard and cmd metacharacter quoting apply identically here, but skips the
+    # timeout/heartbeat/log-file plumbing that command doesn't need. Stdin is closed
+    # immediately (no prompt content) since neither probed subcommand reads it, though
+    # the fake-codex fixture drains stdin unconditionally regardless.
+    param(
+        [Parameter(Mandatory)][string]$CodexPath,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    $plan = Get-CcodexProcessLaunchPlan -CodexPath $CodexPath -Arguments $Arguments
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $plan.FileName
+    if ($plan.FileName -eq "$env:SystemRoot\System32\cmd.exe") {
+        $psi.Arguments = $plan.ArgumentList -join ' '
+    } else {
+        foreach ($arg in $plan.ArgumentList) { [void]$psi.ArgumentList.Add($arg) }
+    }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $psi.StandardInputEncoding = $utf8NoBom
+    $psi.StandardOutputEncoding = $utf8NoBom
+    $psi.StandardErrorEncoding = $utf8NoBom
+    $psi.UseShellExecute = $false
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $process.StandardInput.Close()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }
+}
+
+function Invoke-CcodexDoctorCommand {
+    # Environment diagnosis (design: "doctor", Phase 2b Task 8). Checks are printed in
+    # order, one `ok|FAIL <name>: <detail>` line each; the index/jobs consistency check is
+    # purely informational (its counts never fail the command). Exit-code precedence: an
+    # environment check failure (codex unresolvable, `codex --version`/`codex doctor`
+    # nonzero, state root unwritable, or the worker-prompt template missing) always yields
+    # 12, even when the smoke test also ran and failed — an unhealthy environment is the
+    # more fundamental problem and is reported as such regardless of the smoke outcome. A
+    # bad --repo is a usage error (exit 2), matching `run`/`review`.
+    param(
+        [bool]$NoSmoke = $false,
+        [string]$CodexPath,
+        [string]$StateRoot = $env:LOCALAPPDATA,
+        [string]$AppDataRoot = $env:APPDATA,
+        [string]$RepoOverride
+    )
+
+    try {
+        $repoRoot = Resolve-CcodexRepo -RepoOverride $RepoOverride
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $_.Exception.Message }
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $extraBlocks = New-Object System.Collections.Generic.List[string]
+    $envFailed = $false
+
+    # --- Check 1: codex resolvable to a launchable .cmd/.exe + `codex --version` -----
+    $resolvedCodexPath = $null
+    try {
+        $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
+    } catch {
+        $envFailed = $true
+        $lines.Add("FAIL codex resolvable: $($_.Exception.Message)")
+    }
+
+    if ($resolvedCodexPath) {
+        try {
+            $versionProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('--version')
+            if ($versionProbe.ExitCode -eq 0) {
+                $versionLine = ($versionProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -First 1)
+                $lines.Add("ok codex resolvable: $resolvedCodexPath (version: $versionLine)")
+            } else {
+                $envFailed = $true
+                $lines.Add("FAIL codex resolvable: 'codex --version' exited $($versionProbe.ExitCode)")
+            }
+        } catch {
+            $envFailed = $true
+            $lines.Add("FAIL codex resolvable: could not run 'codex --version': $($_.Exception.Message)")
+        }
+    }
+
+    # --- Check 2: built-in delegation to `codex doctor` -------------------------------
+    if ($resolvedCodexPath) {
+        try {
+            $doctorProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('doctor')
+            $doctorOutputLines = @($doctorProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' })
+            $doctorLastLine = if ($doctorOutputLines.Count -gt 0) { $doctorOutputLines[$doctorOutputLines.Count - 1] } else { '(no output)' }
+            if ($doctorProbe.ExitCode -eq 0) {
+                $lines.Add("ok codex doctor: $doctorLastLine")
+            } else {
+                $envFailed = $true
+                $lines.Add("FAIL codex doctor: exited $($doctorProbe.ExitCode) ($doctorLastLine); see 'codex doctor' output below")
+                $extraBlocks.Add('== codex doctor output ==')
+                if ($doctorProbe.Stdout) { $extraBlocks.Add($doctorProbe.Stdout.TrimEnd()) }
+                if ($doctorProbe.Stderr) { $extraBlocks.Add($doctorProbe.Stderr.TrimEnd()) }
+            }
+        } catch {
+            $envFailed = $true
+            $lines.Add("FAIL codex doctor: could not run 'codex doctor': $($_.Exception.Message)")
+        }
+    } else {
+        $envFailed = $true
+        $lines.Add('FAIL codex doctor: skipped (codex not resolvable)')
+    }
+
+    # --- Check 3a: state root writable (create+delete a probe file under jobs\) -------
+    $jobsDir = Join-Path (Get-CcodexLocalAppDataRoot -Root $StateRoot) 'jobs'
+    $probeFile = Join-Path $jobsDir ".doctor-probe-$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        New-Item -ItemType Directory -Path $jobsDir -Force -ErrorAction Stop | Out-Null
+        Write-CcodexTextFile -Path $probeFile -Content 'doctor probe'
+        Remove-Item -LiteralPath $probeFile -Force -ErrorAction Stop
+        $lines.Add("ok state root writable: $jobsDir")
+    } catch {
+        $envFailed = $true
+        $lines.Add("FAIL state root writable: $jobsDir ($($_.Exception.Message))")
+    }
+
+    # --- Check 3b: worker-prompt template present -------------------------------------
+    $templatePath = Get-CcodexWorkerPromptTemplatePath -RepoRoot $repoRoot -AppDataRoot $AppDataRoot
+    if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
+        $lines.Add("ok worker prompt template: $templatePath")
+    } else {
+        $envFailed = $true
+        $lines.Add("FAIL worker prompt template: not found at $templatePath")
+    }
+
+    # --- Check 3c: index/jobs consistency (informational; counts never fail this) ----
+    $indexDir = Join-Path (Get-CcodexLocalAppDataRoot -Root $StateRoot) 'index'
+    $indexedJobIds = New-Object System.Collections.Generic.HashSet[string]
+    $danglingIndexCount = 0
+    if (Test-Path -LiteralPath $indexDir -PathType Container) {
+        foreach ($indexFile in Get-ChildItem -LiteralPath $indexDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+            $jobIdFromFile = [System.IO.Path]::GetFileNameWithoutExtension($indexFile.Name)
+            [void]$indexedJobIds.Add($jobIdFromFile)
+            $entry = $null
+            try { $entry = Get-Content -LiteralPath $indexFile.FullName -Raw | ConvertFrom-Json } catch { $entry = $null }
+            if (-not $entry -or -not $entry.job_dir -or -not (Test-Path -LiteralPath $entry.job_dir)) {
+                $danglingIndexCount++
+            }
+        }
+    }
+    $unindexedJobDirCount = 0
+    if (Test-Path -LiteralPath $jobsDir -PathType Container) {
+        foreach ($repoKeyDir in Get-ChildItem -LiteralPath $jobsDir -Directory -ErrorAction SilentlyContinue) {
+            foreach ($jobDirEntry in Get-ChildItem -LiteralPath $repoKeyDir.FullName -Directory -ErrorAction SilentlyContinue) {
+                if (-not $indexedJobIds.Contains($jobDirEntry.Name)) { $unindexedJobDirCount++ }
+            }
+        }
+    }
+    $lines.Add("ok index/jobs consistency: dangling_indexes=$danglingIndexCount unindexed_job_dirs=$unindexedJobDirCount")
+
+    # --- Check 4: live smoke through the normal run pipeline (unless -NoSmoke) --------
+    $smokeFailed = $false
+    if ($NoSmoke) {
+        $lines.Add('ok smoke test: skipped (--no-smoke)')
+    } else {
+        $smokeParams = @{
+            Mode             = 'review'
+            Access           = $null
+            RepoOverride     = $repoRoot
+            PromptFile       = $null
+            PositionalTask   = 'Reply with exactly the word OK.'
+            PipelineExpected = $false
+            PipelineObjects  = $null
+            LocalAppDataRoot = $StateRoot
+            AppDataRoot      = $AppDataRoot
+        }
+        if ($CodexPath) { $smokeParams['CodexPath'] = $CodexPath }
+        $smokeResult = Invoke-CcodexRun @smokeParams
+        if ($smokeResult.WrapperExitCode -eq 2) {
+            # A usage error from the shared init path (e.g. an invalid resolved repo)
+            # is a doctor usage error too, not an environment or smoke failure.
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $smokeResult.Message }
+        }
+        $smokeResultText = if ($smokeResult.Stdout) { $smokeResult.Stdout.Trim() } else { $null }
+        if ($smokeResult.WrapperExitCode -eq 0 -and $smokeResultText -eq 'OK') {
+            $lines.Add("ok smoke test: result '$smokeResultText'")
+        } else {
+            $smokeFailed = $true
+            $reportedResult = if ($smokeResultText) { $smokeResultText } else { '(none)' }
+            $lines.Add("FAIL smoke test: wrapper_exit_code=$($smokeResult.WrapperExitCode) result='$reportedResult'")
+        }
+    }
+
+    $allLines = New-Object System.Collections.Generic.List[string]
+    $allLines.AddRange([string[]]$lines.ToArray())
+    if ($extraBlocks.Count -gt 0) { $allLines.AddRange([string[]]$extraBlocks.ToArray()) }
+    $output = [string]::Join("`n", $allLines)
+
+    if ($envFailed) {
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $output }
+    }
+    if ($smokeFailed) {
+        return [pscustomobject]@{ WrapperExitCode = 10; Stdout = $null; Message = $output }
+    }
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
+}
+
 function ConvertTo-CcodexTailLinesCount {
     # --lines must be a positive whole number of lines (0 or negative is a usage error,
     # not "use the default"); non-numeric text is likewise a usage error, mirroring
@@ -1283,8 +1497,32 @@ try {
             Write-Output $cleanupResult.Stdout
             $exitCode = $cleanupResult.WrapperExitCode
         }
+        'doctor' {
+            # No positional job id. --no-smoke is a presence flag; --repo binds to $Repo;
+            # --codex-path/--state-root are hidden test-support flags mirroring the other
+            # subcommands (there is no --app-data-root flag — tests override $env:APPDATA
+            # directly, same as ReviewCommand/RealInvocation).
+            $doctorNoSmoke = ($args -contains '--no-smoke')
+            $doctorStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $doctorCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+
+            $doctorParams = @{
+                NoSmoke      = $doctorNoSmoke
+                RepoOverride = $Repo
+            }
+            if ($doctorStateRoot) { $doctorParams['StateRoot'] = $doctorStateRoot }
+            if ($doctorCodexPath) { $doctorParams['CodexPath'] = $doctorCodexPath }
+
+            $doctorResult = Invoke-CcodexDoctorCommand @doctorParams
+            if ($doctorResult.WrapperExitCode -eq 0) {
+                Write-Output $doctorResult.Stdout
+            } else {
+                Write-Host $doctorResult.Message
+            }
+            $exitCode = $doctorResult.WrapperExitCode
+        }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, debug, cleanup, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, debug, cleanup, doctor, worker."
             $exitCode = 2
         }
     }

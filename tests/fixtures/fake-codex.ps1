@@ -1,6 +1,29 @@
 param()
 $null = [Console]::In.ReadToEnd()
 $argsList = $args
+
+# Task 8 (doctor): the doctor command probes plain `codex --version` and
+# `codex doctor` argv (no `exec`, no --output-last-message) in addition to the
+# normal exec-mode invocation handled below. Both are answered from env vars so
+# tests can simulate ok/FAIL outcomes without a second fixture. Purely additive:
+# any other argv (e.g. the existing `--ask-for-approval never exec ...` shape)
+# falls through unchanged to the exec-mode behavior beneath.
+if ($argsList.Count -ge 1 -and $argsList[0] -eq '--version') {
+    $versionText = if ($env:CCODEX_FAKE_VERSION) { $env:CCODEX_FAKE_VERSION } else { 'codex-cli 0.0.0-fake' }
+    Write-Output $versionText
+    $exitCode = 0
+    if ($env:CCODEX_FAKE_VERSION_EXIT) { $exitCode = [int]$env:CCODEX_FAKE_VERSION_EXIT }
+    exit $exitCode
+}
+
+if ($argsList.Count -ge 1 -and $argsList[0] -eq 'doctor') {
+    $doctorText = if ($env:CCODEX_FAKE_DOCTOR_OUTPUT) { $env:CCODEX_FAKE_DOCTOR_OUTPUT } else { "codex doctor: all checks passed" }
+    Write-Output $doctorText
+    $exitCode = 0
+    if ($env:CCODEX_FAKE_DOCTOR_EXIT) { $exitCode = [int]$env:CCODEX_FAKE_DOCTOR_EXIT }
+    exit $exitCode
+}
+
 $resultPath = $null
 for ($i = 0; $i -lt $argsList.Count; $i++) {
     if ($argsList[$i] -eq '--output-last-message' -and ($i + 1) -lt $argsList.Count) {
