@@ -1048,6 +1048,124 @@ function Invoke-CcodexDiffCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$statOutput`n`n$diffOutput"; Message = $null }
 }
 
+function Invoke-CcodexApplyCommand {
+    # Applies a done worktree job's snapshot commit(s) onto the main repo (design: "apply
+    # <job_id>", Phase 4 Task 5). Shares the unknown/non-terminal/no-worktree/worktree-removed
+    # precondition chain (3/4/2/3) with `diff` via Resolve-CcodexWorktreeJobContext, then adds
+    # apply-only preconditions: the job must be `done` (a failed/timed_out/cancelled job -> 2),
+    # and the MAIN repo working tree must be clean (else -> 2). An empty change set is a no-op
+    # (exit 0). Otherwise `git format-patch <base>..HEAD --stdout` from the worktree is piped to
+    # `git am --3way` in the main repo. Success (a new commit landed) prints the applied range
+    # and exits 0. ANY non-success outcome -- textual conflict, or an already-applied/empty patch
+    # that git am accepts as a no-op without advancing HEAD -- is a failure: `git am --abort` is
+    # attempted best-effort, the main repo is force-restored to its pre-apply HEAD (its tree was
+    # verified clean beforehand, so this loses no user work), and the command exits 25 naming any
+    # conflicting files parsed from the am output and pointing at `ccodex diff <job_id>`. The main
+    # repo is NEVER left mutated except by a successful apply.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
+    if ($context.WrapperExitCode -ne 0) {
+        return [pscustomobject]@{ WrapperExitCode = $context.WrapperExitCode; Stdout = $context.Stdout; Message = $context.Message }
+    }
+
+    $statusObj = $context.StatusObject
+    $worktreePath = $context.WorktreePath
+    $baseCommit = $context.BaseCommit
+    $mainRepo = $context.MainRepo
+    $jobDir = $context.JobDir
+
+    # apply-only precondition: only `done` jobs may be applied. `diff` inspects any terminal
+    # job, but applying the partial output of a failed/timed_out/cancelled run is unsafe.
+    $statusText = if ($statusObj) { [string]$statusObj.status } else { 'unknown' }
+    if ($statusText -ne 'done') {
+        $message = "ccodex: only done jobs can be applied; job $JobId is '$statusText'.`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
+    }
+
+    if ([string]::IsNullOrEmpty($mainRepo) -or -not (Test-Path -LiteralPath $mainRepo -PathType Container)) {
+        $message = "ccodex: internal error: job $JobId has no recorded main_repo on disk (main_repo='$mainRepo').`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+
+    # Main repo working tree must be clean: `am` mutates the working tree, so any uncommitted
+    # local change could be silently entangled with (or clobbered by) the applied patch.
+    $porcelain = @(& git -C $mainRepo status --porcelain 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $message = "ccodex: internal error: git status --porcelain failed in main repo '$mainRepo': $($porcelain -join "`n")"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+    $dirtyLines = @($porcelain | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+    if ($dirtyLines.Count -gt 0) {
+        $message = "ccodex: main repo working tree is not clean; commit or stash your changes before applying job $JobId.`n  main repo: $mainRepo`n  dirty:`n$([string]::Join("`n", ($dirtyLines | ForEach-Object { "    $_" })))"
+        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
+    }
+
+    $range = "$baseCommit..HEAD"
+
+    # Empty change set (worker committed nothing) -> nothing to apply; exit 0 no-op.
+    $revList = @(& git -C $worktreePath rev-list $range 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $message = "ccodex: internal error: git rev-list $range failed in worktree '$worktreePath': $($revList -join "`n")"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+    if (@($revList | Where-Object { $_ -and $_.ToString().Trim() -ne '' }).Count -eq 0) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to apply for job $JobId ($range is empty); main repo unchanged."; Message = $null }
+    }
+
+    $preHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0) {
+        $message = "ccodex: internal error: git rev-parse HEAD failed in main repo '$mainRepo': $preHead"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+    $preHead = ([string]$preHead).Trim()
+
+    # format-patch --stdout emits the mbox patch stream on stdout (diagnostics go to its own
+    # stderr, which must NOT be merged into the pipe or it would corrupt the patch). The 2>&1 on
+    # `am` captures its progress/conflict lines for parsing. A native-to-native pipe in
+    # PowerShell 7 is byte-preserving, so patch content survives intact.
+    $amOutput = (& git -C $worktreePath format-patch $range --stdout | & git -C $mainRepo am --3way 2>&1 | Out-String)
+    $amExit = $LASTEXITCODE
+
+    $postHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
+    $postHead = ([string]$postHead).Trim()
+
+    if ($amExit -eq 0 -and $postHead -ne $preHead) {
+        # A new commit landed: the patch genuinely applied.
+        $stdout = "ccodex: applied job $JobId to $mainRepo`n  range: $baseCommit..$postHead"
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $stdout; Message = $null }
+    }
+
+    # Failure (nonzero am) OR a no-op that advanced nothing (already-applied/empty patch that
+    # `am --3way` accepts with exit 0 but no commit). Either way this is NOT a real application:
+    # abort any in-progress am (best-effort), then force the main repo back to its pre-apply HEAD.
+    & git -C $mainRepo am --abort 2>&1 | Out-Null
+    & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
+
+    $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
+    $restorePorcelain = @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+    $restored = ($restoredHead -eq $preHead) -and ($restorePorcelain.Count -eq 0)
+
+    # Parse conflicting file names out of the am output.
+    $conflictFiles = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($amOutput -split "`r?`n")) {
+        if ($line -match 'Merge conflict in (.+?)\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+        elseif ($line -match 'error: patch failed: (.+?):\d+\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+        elseif ($line -match 'error: (.+?): patch does not apply\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+    }
+    $uniqueConflicts = @($conflictFiles | Select-Object -Unique)
+    $filesText = if ($uniqueConflicts.Count -gt 0) { $uniqueConflicts -join ', ' } else { '(none reported; the patch may already be applied or empty)' }
+
+    $message = "ccodex: could not apply job $JobId to $mainRepo; git am failed and the main repo was restored to its previous state.`n  conflicting files: $filesText`n  run ``ccodex diff $JobId`` to inspect the changes."
+    if (-not $restored) {
+        $message += "`n  WARNING: the main repo could not be fully restored to its pre-apply state (HEAD='$restoredHead', expected '$preHead'); inspect it manually."
+    }
+    return [pscustomobject]@{ WrapperExitCode = 25; Stdout = $null; Message = $message }
+}
+
 function Get-CcodexTailLines {
     # Reads at most the last 64 KB of $Path via a stream seek from the end (never the
     # whole file), decodes it as UTF-8, and returns the last $Lines lines as a string
@@ -1752,6 +1870,27 @@ try {
                 Write-Host $diffResult.Message
             }
             $exitCode = $diffResult.WrapperExitCode
+        }
+        'apply' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`diff` use). --state-root is a
+            # hidden test-support flag.
+            $applyJobId = $PositionalTask
+            $applyStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $applyJobId) {
+                Write-Host "ccodex: apply requires a job id."
+                $exitCode = 2
+                break
+            }
+            $applyParams = @{ JobId = $applyJobId }
+            if ($applyStateRoot) { $applyParams['StateRoot'] = $applyStateRoot }
+            $applyResult = Invoke-CcodexApplyCommand @applyParams
+            if ($applyResult.WrapperExitCode -eq 0) {
+                Write-Output $applyResult.Stdout
+            } else {
+                Write-Host $applyResult.Message
+            }
+            $exitCode = $applyResult.WrapperExitCode
         }
         'review' {
             # Sugar over the `run` pipeline (mode review, access read-only): compose a

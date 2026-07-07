@@ -168,6 +168,142 @@ Assert-True ($diffRemoved.Message -like '*worktree removed*') 'exit-3 message sa
 Assert-True ($diffRemoved.Message -like "*$($runRemoved.JobDir)*") 'exit-3 message points at the surviving job dir'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# ============================================================================
+# apply
+# ============================================================================
+
+Write-Host "apply: clean apply -> main repo gains the snapshot commit content, author preserved, exit 0"
+$gitRepoApplyClean = Join-Path $tempRoot 'gitrepo-apply-clean'
+New-CcodexTestGitRepo -Path $gitRepoApplyClean
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'applied-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'applied content'
+$runApplyClean = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyClean }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyClean.WrapperExitCode 0 'setup: clean implement run succeeds'
+$statusApplyClean = Get-Content -LiteralPath (Join-Path $runApplyClean.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusApplyClean.status 'done' 'setup: apply-clean job is terminal done'
+$preHeadClean = (& git -C $gitRepoApplyClean rev-parse HEAD).Trim()
+
+$applyClean = Invoke-CcodexApplyCommand -JobId $statusApplyClean.job_id -StateRoot $localAppData
+Assert-Equal $applyClean.WrapperExitCode 0 'clean apply -> exit 0'
+Assert-True (Test-Path -LiteralPath (Join-Path $gitRepoApplyClean 'applied-file.txt')) 'main repo gained the worker-authored file'
+$appliedContent = Get-Content -LiteralPath (Join-Path $gitRepoApplyClean 'applied-file.txt') -Raw
+Assert-True ($appliedContent -like '*applied content*') 'applied file has the worker-authored content'
+$appliedAuthor = (& git -C $gitRepoApplyClean log -1 --format='%an <%ae>').Trim()
+Assert-Equal $appliedAuthor 'ccodex-worker <ccodex@local>' 'author identity preserved from the snapshot commit'
+$newHeadClean = (& git -C $gitRepoApplyClean rev-parse HEAD).Trim()
+Assert-True ($newHeadClean -ne $preHeadClean) 'main repo HEAD advanced by the applied commit'
+Assert-True ($applyClean.Stdout -like "*$newHeadClean*") 'stdout names the applied range new HEAD'
+
+Write-Host "apply: dirty main repo -> exit 2, repo untouched"
+$gitRepoApplyDirty = Join-Path $tempRoot 'gitrepo-apply-dirty'
+New-CcodexTestGitRepo -Path $gitRepoApplyDirty
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'applied-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'applied content'
+$runApplyDirty = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyDirty }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyDirty.WrapperExitCode 0 'setup: dirty-case implement run succeeds'
+$statusApplyDirty = Get-Content -LiteralPath (Join-Path $runApplyDirty.JobDir 'status.json') -Raw | ConvertFrom-Json
+# Dirty the MAIN repo working tree (uncommitted change) after the run.
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyDirty 'seed.txt'), "dirtied`n", $utf8NoBomTest)
+$preHeadDirty = (& git -C $gitRepoApplyDirty rev-parse HEAD).Trim()
+
+$applyDirty = Invoke-CcodexApplyCommand -JobId $statusApplyDirty.job_id -StateRoot $localAppData
+Assert-Equal $applyDirty.WrapperExitCode 2 'apply onto a dirty main repo -> exit 2'
+Assert-True ($applyDirty.Message -like '*clean*') 'exit-2 message names the not-clean working tree'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyDirty 'applied-file.txt'))) 'dirty main repo was not mutated (no applied file)'
+$postHeadDirty = (& git -C $gitRepoApplyDirty rev-parse HEAD).Trim()
+Assert-Equal $postHeadDirty $preHeadDirty 'dirty main repo HEAD unchanged'
+
+Write-Host "apply: textual conflict -> exit 25, main repo restored (clean + HEAD unchanged), diff hint"
+$gitRepoApplyConflict = Join-Path $tempRoot 'gitrepo-apply-conflict'
+New-CcodexTestGitRepo -Path $gitRepoApplyConflict
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'seed.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'worker version'
+$runApplyConflict = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyConflict }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyConflict.WrapperExitCode 0 'setup: conflict-case implement run succeeds'
+$statusApplyConflict = Get-Content -LiteralPath (Join-Path $runApplyConflict.JobDir 'status.json') -Raw | ConvertFrom-Json
+# Diverge the SAME file on the main repo, on top of the base, and commit it.
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyConflict 'seed.txt'), "main version`n", $utf8NoBomTest)
+& git -C $gitRepoApplyConflict add seed.txt | Out-Null
+& git -C $gitRepoApplyConflict commit -q -m 'main diverges seed.txt' | Out-Null
+$preHeadConflict = (& git -C $gitRepoApplyConflict rev-parse HEAD).Trim()
+
+$applyConflict = Invoke-CcodexApplyCommand -JobId $statusApplyConflict.job_id -StateRoot $localAppData
+Assert-Equal $applyConflict.WrapperExitCode 25 'apply with a textual conflict -> exit 25'
+$conflictPorcelain = @(& git -C $gitRepoApplyConflict status --porcelain | Where-Object { $_ -and $_.Trim() -ne '' })
+Assert-Equal $conflictPorcelain.Count 0 'main repo working tree is clean after the failed apply'
+$postHeadConflict = (& git -C $gitRepoApplyConflict rev-parse HEAD).Trim()
+Assert-Equal $postHeadConflict $preHeadConflict 'main repo HEAD unchanged after the failed apply'
+Assert-True ($applyConflict.Message -like '*seed.txt*') 'exit-25 message names the conflicting file'
+Assert-True ($applyConflict.Message -like "*ccodex diff $($statusApplyConflict.job_id)*") 'exit-25 message points at ccodex diff'
+
+Write-Host "apply: failed-status job -> exit 2 (only done jobs can be applied)"
+$gitRepoApplyFailed = Join-Path $tempRoot 'gitrepo-apply-failed'
+New-CcodexTestGitRepo -Path $gitRepoApplyFailed
+$env:CCODEX_FAKE_EXIT_CODE = '1'
+$env:CCODEX_FAKE_RESULT = 'boom'
+$env:CCODEX_FAKE_WRITE_FILE = 'applied-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'applied content'
+$runApplyFailed = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyFailed }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+$statusApplyFailed = Get-Content -LiteralPath (Join-Path $runApplyFailed.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusApplyFailed.status 'failed' 'setup: apply-failed job is terminal failed'
+
+$applyFailed = Invoke-CcodexApplyCommand -JobId $statusApplyFailed.job_id -StateRoot $localAppData
+Assert-Equal $applyFailed.WrapperExitCode 2 'apply on a failed-status job -> exit 2'
+Assert-True ($applyFailed.Message -like '*only done jobs can be applied*') 'exit-2 message says only done jobs can be applied'
+
+Write-Host "apply: empty change set -> exit 0 no-op, main repo unchanged"
+$gitRepoApplyEmpty = Join-Path $tempRoot 'gitrepo-apply-empty'
+New-CcodexTestGitRepo -Path $gitRepoApplyEmpty
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'nothing to change'
+$runApplyEmpty = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyEmpty; PositionalTask = 'inspect only' }
+Assert-Equal $runApplyEmpty.WrapperExitCode 0 'setup: no-write implement run succeeds'
+$statusApplyEmpty = Get-Content -LiteralPath (Join-Path $runApplyEmpty.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusApplyEmpty.worktree_committed $false 'setup: nothing was committed in the worktree'
+$preHeadEmpty = (& git -C $gitRepoApplyEmpty rev-parse HEAD).Trim()
+
+$applyEmpty = Invoke-CcodexApplyCommand -JobId $statusApplyEmpty.job_id -StateRoot $localAppData
+Assert-Equal $applyEmpty.WrapperExitCode 0 'apply on an empty-change job -> exit 0'
+Assert-True ($applyEmpty.Stdout -like '*no changes*') 'stdout is an informational no-changes message'
+$postHeadEmpty = (& git -C $gitRepoApplyEmpty rev-parse HEAD).Trim()
+Assert-Equal $postHeadEmpty $preHeadEmpty 'empty-change apply leaves main repo HEAD unchanged'
+
+Write-Host "apply: applying the same job twice -> second apply exit 25, main restored"
+$gitRepoApplyTwice = Join-Path $tempRoot 'gitrepo-apply-twice'
+New-CcodexTestGitRepo -Path $gitRepoApplyTwice
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'twice-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'twice content'
+$runApplyTwice = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyTwice }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyTwice.WrapperExitCode 0 'setup: twice-case implement run succeeds'
+$statusApplyTwice = Get-Content -LiteralPath (Join-Path $runApplyTwice.JobDir 'status.json') -Raw | ConvertFrom-Json
+
+$applyTwiceFirst = Invoke-CcodexApplyCommand -JobId $statusApplyTwice.job_id -StateRoot $localAppData
+Assert-Equal $applyTwiceFirst.WrapperExitCode 0 'first apply -> exit 0'
+$headAfterFirst = (& git -C $gitRepoApplyTwice rev-parse HEAD).Trim()
+
+$applyTwiceSecond = Invoke-CcodexApplyCommand -JobId $statusApplyTwice.job_id -StateRoot $localAppData
+Assert-Equal $applyTwiceSecond.WrapperExitCode 25 'applying the same job twice -> second apply exit 25'
+$twicePorcelain = @(& git -C $gitRepoApplyTwice status --porcelain | Where-Object { $_ -and $_.Trim() -ne '' })
+Assert-Equal $twicePorcelain.Count 0 'main repo working tree is clean after the already-applied attempt'
+$headAfterSecond = (& git -C $gitRepoApplyTwice rev-parse HEAD).Trim()
+Assert-Equal $headAfterSecond $headAfterFirst 'already-applied attempt leaves main repo HEAD at the first-apply commit'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Complete-CcodexTests
