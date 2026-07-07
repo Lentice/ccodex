@@ -307,5 +307,51 @@ $afterHbMismatch = Read-CcodexStatusFile -JobDir $jobHbMismatch.JobDir
 Assert-True ([string]::IsNullOrEmpty($afterHbMismatch.last_heartbeat_at)) 'heartbeat does not stamp a job whose backend_id no longer matches'
 Assert-Equal $afterHbMismatch.backend_id $otherBackendId 'heartbeat leaves the other backend_id untouched'
 
+# --- (g) worktree worker run: executes codex -C the worktree and snapshots the change ---
+
+Write-Host "Invoke-CcodexWorker: a seeded worktree job runs codex in the worktree and snapshots the worker output"
+$gitRepo = Join-Path $tempRoot 'gitrepo'
+New-Item -ItemType Directory -Path $gitRepo -Force | Out-Null
+& git -C $gitRepo init -q 2>$null | Out-Null
+& git -C $gitRepo config user.email 'test@example.com' | Out-Null
+& git -C $gitRepo config user.name 'ccodex test' | Out-Null
+$wtSeedNoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText((Join-Path $gitRepo 'seed.txt'), "seed`n", $wtSeedNoBom)
+& git -C $gitRepo add seed.txt | Out-Null
+& git -C $gitRepo commit -q -m 'init' | Out-Null
+
+# Seed a worktree job the way Initialize-CcodexJob would: reserve the dir + index, create the
+# detached worktree under the state root, write prompt.md, and stamp a 'created' status.json
+# carrying the worktree fields the worker reads back.
+$wtRepoKey = Get-CcodexRepoKey -RepoRoot $gitRepo
+$wtReservation = Reserve-CcodexJobDir -RepoKey $wtRepoKey -Mode 'implement' -Root $localAppData
+$wtJobId = $wtReservation.JobId
+$wtJobDir = $wtReservation.JobDir
+$wtIndexPath = Get-CcodexIndexPath -JobId $wtJobId -Root $localAppData
+New-Item -ItemType Directory -Path (Split-Path -Parent $wtIndexPath) -Force | Out-Null
+Write-CcodexJsonFileAtomic -Path $wtIndexPath -Object ([ordered]@{ job_id = $wtJobId; repo_key = $wtRepoKey; job_dir = $wtJobDir })
+$wtCreated = New-CcodexJobWorktree -MainRepo $gitRepo -JobId $wtJobId -StateRoot $localAppData
+$wtBaseHead = $wtCreated.BaseCommit
+Write-CcodexTextFile -Path (Join-Path $wtJobDir 'prompt.md') -Content 'worktree worker prompt body'
+Write-CcodexJsonFileAtomic -Path (Join-Path $wtJobDir 'status.json') -Object (New-CcodexStatusObject -JobId $wtJobId -Status 'created' -Mode 'implement' -Access 'worktree' -Repo $gitRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -MainRepo $gitRepo -WorktreeRepo $wtCreated.WorktreePath -BaseCommit $wtBaseHead)
+
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'WT WORKER OK'
+$env:CCODEX_FAKE_WRITE_FILE = 'wt-worker-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'seeded worker change'
+$resultWt = Invoke-CcodexWorker -JobId $wtJobId -StateRoot $localAppData -CodexPath $fixtureCmd
+Assert-Equal $resultWt.WrapperExitCode 0 'worktree worker run exits 0'
+$statusWt = Get-Content -LiteralPath (Join-Path $wtJobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusWt.status 'done' 'worktree worker reaches terminal done'
+Assert-Equal $statusWt.worktree_committed $true 'worktree worker records worktree_committed=true after the change'
+Assert-Equal $statusWt.worktree_repo $wtCreated.WorktreePath 'worktree worker preserves worktree_repo through the terminal write'
+Assert-Equal $statusWt.base_commit $wtBaseHead 'worktree worker preserves base_commit through the terminal write'
+Assert-True (Test-Path -LiteralPath (Join-Path $wtCreated.WorktreePath 'wt-worker-change.txt') -PathType Leaf) 'worker file exists inside the worktree'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepo 'wt-worker-change.txt'))) 'the main repo is never mutated by the worker'
+$wtAhead = (& git -C $wtCreated.WorktreePath rev-list --count "$wtBaseHead..HEAD").Trim()
+Assert-Equal $wtAhead '1' 'the worktree HEAD is exactly one snapshot commit ahead of base'
+Assert-Equal ((& git -C $gitRepo rev-parse HEAD).Trim()) $wtBaseHead 'the main repo HEAD is unchanged after the worktree worker run'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

@@ -9,6 +9,7 @@ Artifact directory: {{ARTIFACT_DIR}}
 For review tasks, lead with findings ordered by severity.
 For test tasks, include commands/actions run, observed result, evidence, and residual risks.
 For brainstorming tasks, include options, trade-offs, and a recommendation.
+For implement tasks, implement the requested change with focused commits or plain edits; the wrapper snapshots your work.
 
 Mode: {{MODE}}
 Access: {{ACCESS}}

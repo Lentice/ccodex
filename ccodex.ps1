@@ -51,6 +51,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\ReviewPrompt.ps1')
 . (Join-Path $PSScriptRoot 'lib\UserConfig.ps1')
 . (Join-Path $PSScriptRoot 'lib\Cleanup.ps1')
+. (Join-Path $PSScriptRoot 'lib\Worktree.ps1')
 
 function Complete-CcodexInternalFailure {
     # A wrapper-internal failure after the job dir is reserved (codex path
@@ -76,7 +77,12 @@ function Complete-CcodexInternalFailure {
         [string]$StartedAt = $null,
         [string]$ResultPath = $null,
         [string]$EventsPath = $null,
-        [string]$StderrPath = $null
+        [string]$StderrPath = $null,
+        # Phase 4: worktree jobs carry these on their initial status.json; preserve them on
+        # the terminal failure write too (append-only). Null/absent for non-worktree jobs.
+        [string]$MainRepo = $null,
+        [string]$WorktreeRepo = $null,
+        [string]$BaseCommit = $null
     )
     $completedAt = (Get-Date).ToString('o')
     $resultPresent = $false
@@ -91,7 +97,7 @@ function Complete-CcodexInternalFailure {
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
 
-    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId
+    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
     return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $hintedMessage`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
 }
@@ -258,6 +264,15 @@ function Invoke-CcodexJobExecution {
         [string]$BackendId = $null,
         [string]$StartedAt = $null,
         [int]$HardTimeoutSec = 0,
+        # Phase 4 worktree wiring: when $WorktreeRepo is set the job runs `--access worktree`.
+        # codex `-C` then targets the worktree (not the main repo), and after the process exits
+        # the wrapper snapshots the worker's output via Complete-CcodexJobWorktree. $MainRepo/
+        # $BaseCommit are carried onto every status.json write so the append-only worktree
+        # fields survive the running/terminal transitions. All null => a normal (non-worktree)
+        # job, byte-identical to before this parameter existed.
+        [string]$MainRepo = $null,
+        [string]$WorktreeRepo = $null,
+        [string]$BaseCommit = $null,
         # 2a review minor: the native worker path already stamps its own `running`
         # status.json (with its own backend_id/started_at) before calling into this core;
         # without this switch the core's own running-write below duplicates that stamp with
@@ -280,21 +295,27 @@ function Invoke-CcodexJobExecution {
         JobDir = $JobDir; JobId = $jobId; Mode = $Mode; Access = $Access; RepoRoot = $RepoRoot
         CreatedAt = $CreatedAt; Backend = $Backend; BackendId = $BackendId; StartedAt = $StartedAt
         ResultPath = $resultPath; EventsPath = $eventsPath; StderrPath = $stderrPath
+        MainRepo = $MainRepo; WorktreeRepo = $WorktreeRepo; BaseCommit = $BaseCommit
     }
+
+    # For a worktree job Codex runs INSIDE the worktree (`-C <worktree>`); the main repo is
+    # never handed to Codex and so is never mutated by the run. status.json's `repo` field
+    # stays the main repo (RepoRoot) for continuity; the worktree is recorded separately.
+    $codexTargetRepo = if ($WorktreeRepo) { $WorktreeRepo } else { $RepoRoot }
 
     try {
         $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
-    $codexArgs = Build-CcodexCodexArgs -Access $Access -RepoRoot $RepoRoot -ResultPath $resultPath
+    $codexArgs = Build-CcodexCodexArgs -Access $Access -RepoRoot $codexTargetRepo -ResultPath $resultPath
 
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
-    Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
+    Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit)
     if (-not $SkipRunningWrite) {
         $runningWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
             -StatusPath (Join-Path $JobDir 'status.json') `
-            -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
+            -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit)
         if (-not $runningWrite.LockAcquired) {
             return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the running status'
         }
@@ -304,6 +325,21 @@ function Invoke-CcodexJobExecution {
         $codexExitCode = Invoke-CcodexCodexProcess -CodexPath $resolvedCodexPath -Arguments $codexArgs -PromptContent $WorkerPrompt -EventsLogPath $eventsPath -StderrLogPath $stderrPath -ExitCodeFilePath $exitCodeFilePath -HardTimeoutMs ($HardTimeoutSec * 1000) -OnHeartbeat $OnHeartbeat
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
+    }
+
+    # Worktree snapshot finalization: after the Codex process (and its tree) has exited — for
+    # ANY exit code, including the hard-timeout kill (null) below — stage and commit whatever
+    # the worker left in the worktree so `diff`/`apply` have a deterministic <base>..HEAD range.
+    # Best-effort: a git failure here must not derail the terminal status write, so a throw is
+    # caught and recorded as "not committed" ($false) rather than propagated. worktree_committed
+    # stays $null for non-worktree jobs.
+    $worktreeCommitted = $null
+    if ($WorktreeRepo) {
+        try {
+            $worktreeCommitted = [bool](Complete-CcodexJobWorktree -WorktreePath $WorktreeRepo -JobId $jobId).Committed
+        } catch {
+            $worktreeCommitted = $false
+        }
     }
 
     if ($null -eq $codexExitCode) {
@@ -319,7 +355,7 @@ function Invoke-CcodexJobExecution {
         Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $timeoutComplete
 
         $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
-        $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt
+        $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted
         $timeoutWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
         if (-not $timeoutWrite.LockAcquired) {
             return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the timed_out status'
@@ -361,7 +397,7 @@ function Invoke-CcodexJobExecution {
     $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
-    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull
+    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted
     $finalWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
     if (-not $finalWrite.LockAcquired) {
         return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the terminal status'
@@ -466,20 +502,46 @@ function Initialize-CcodexJob {
         return Complete-CcodexUsageError -Message $_.Exception.Message -AccessForStatus $resolvedAccess
     }
 
+    # Worktree access (implement, and opt-in test): create a detached worktree at the main
+    # repo's current HEAD, under the state root (never inside the target repo). The worker then
+    # sees the WORKTREE as {{REPO_ROOT}} and Codex runs `-C` the worktree, so the caller's tree
+    # is never mutated by the run. Failure here is AFTER job-dir reservation, so it takes the
+    # existing internal-failure path (terminal failed/12 with evidence) rather than a usage error.
+    $mainRepo = $null
+    $worktreeRepo = $null
+    $baseCommit = $null
+    $promptRepoRoot = $repoRoot
+    if ($resolvedAccess -eq 'worktree') {
+        try {
+            $worktree = New-CcodexJobWorktree -MainRepo $repoRoot -JobId $jobId -StateRoot $LocalAppDataRoot
+        } catch {
+            $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $resolvedAccess `
+                -RepoRoot $repoRoot -CreatedAt $createdAt -Message $_.Exception.Message -Backend $Backend `
+                -ResultPath (Join-Path $jobDir 'result.md')
+            return [pscustomobject]@{ WrapperExitCode = 12; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $null; CreatedAt = $createdAt; Message = $failure.Message; MainRepo = $null; WorktreeRepo = $null; BaseCommit = $null }
+        }
+        $mainRepo = $repoRoot
+        $worktreeRepo = $worktree.WorktreePath
+        $baseCommit = $worktree.BaseCommit
+        $promptRepoRoot = $worktreeRepo
+    }
+
+    # Artifacts stay under the job dir (never the worktree). Worktree access gets an artifact
+    # dir exactly as workspace access does, so browser/test evidence has a home outside the repo.
     $artifactDir = $null
-    if ($resolvedAccess -eq 'workspace') {
+    if ($resolvedAccess -in @('workspace', 'worktree')) {
         $artifactDir = Join-Path $jobDir 'artifacts'
         New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
     }
 
     $templatePath = Get-CcodexWorkerPromptTemplatePath -RepoRoot $repoRoot -AppDataRoot $AppDataRoot
-    $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $repoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
+    $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $promptRepoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
 
     $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend -HardTimeoutSec $hardTimeoutSecOrNull)
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit)
 
-    return [pscustomobject]@{ WrapperExitCode = 0; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $workerPrompt; CreatedAt = $createdAt; Message = $null }
+    return [pscustomobject]@{ WrapperExitCode = 0; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $workerPrompt; CreatedAt = $createdAt; Message = $null; MainRepo = $mainRepo; WorktreeRepo = $worktreeRepo; BaseCommit = $baseCommit }
 }
 
 function Invoke-CcodexRun {
@@ -505,7 +567,7 @@ function Invoke-CcodexRun {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; Message = $init.Message }
     }
 
-    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec
+    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
 }
@@ -569,14 +631,18 @@ function Invoke-CcodexSubmit {
         # the sole active writer for jobDir at this point (no worker has been
         # launched yet), so this is single-writer-safe.
         $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $init.ResolvedAccess `
-            -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath
+            -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath `
+            -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit
         $message = "$($failure.Message)`n  job:      $jobId"
         return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
     }
 
-    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $init.RepoRoot -ResultPath $resultPath
+    # Pre-launch diagnostics only (the detached worker re-derives and overwrites both from
+    # status.json). For a worktree job Codex targets the worktree, so reflect that here too.
+    $submitCodexTargetRepo = if ($init.WorktreeRepo) { $init.WorktreeRepo } else { $init.RepoRoot }
+    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath
     Write-CcodexTextFile -Path (Join-Path $jobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
-    Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $Mode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native')
+    Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $Mode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native' -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit)
 
     $stateRootOverride = if ($PSBoundParameters.ContainsKey('LocalAppDataRoot')) { $LocalAppDataRoot } else { $null }
     $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }

@@ -46,7 +46,12 @@ function New-CcodexStatusObject {
         [Nullable[int]]$HardTimeoutSec = $null,
         [string]$TimeoutReason = $null,
         [string]$TerminatedAt = $null,
-        [string]$LastHeartbeatAt = $null
+        [string]$LastHeartbeatAt = $null,
+        # Phase 4 worktree fields (append-only additions; null for non-worktree jobs).
+        [string]$MainRepo = $null,
+        [string]$WorktreeRepo = $null,
+        [string]$BaseCommit = $null,
+        [Nullable[bool]]$WorktreeCommitted = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -70,6 +75,10 @@ function New-CcodexStatusObject {
         timeout_reason    = $TimeoutReason
         terminated_at     = $TerminatedAt
         last_heartbeat_at = $LastHeartbeatAt
+        main_repo         = $MainRepo
+        worktree_repo     = $WorktreeRepo
+        base_commit       = $BaseCommit
+        worktree_committed = $WorktreeCommitted
     }
 }
 
@@ -82,7 +91,11 @@ function New-CcodexDebugObject {
         [Parameter(Mandatory)][string]$Access,
         [Parameter(Mandatory)][string]$CodexPath,
         [Parameter(Mandatory)][string[]]$CodexArgs,
-        [string]$Backend = 'sync'
+        [string]$Backend = 'sync',
+        # Phase 4 worktree fields (null for non-worktree jobs).
+        [string]$MainRepo = $null,
+        [string]$WorktreeRepo = $null,
+        [string]$BaseCommit = $null
     )
     return [ordered]@{
         job_id              = $JobId
@@ -95,6 +108,9 @@ function New-CcodexDebugObject {
         backend             = $Backend
         codex_path          = $CodexPath
         codex_args          = $CodexArgs
+        main_repo           = $MainRepo
+        worktree_repo       = $WorktreeRepo
+        base_commit         = $BaseCommit
     }
 }
 

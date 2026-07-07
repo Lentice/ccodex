@@ -44,10 +44,19 @@ function Invoke-CcodexWorker {
     $hardTimeoutSec = if ($status.hard_timeout_sec) { [int]$status.hard_timeout_sec } else { 0 }
     $hardTimeoutSecOrNull = if ($hardTimeoutSec -gt 0) { $hardTimeoutSec } else { $null }
 
+    # Phase 4: worktree jobs carry main_repo/worktree_repo/base_commit on their `created`
+    # status.json (written by Initialize-CcodexJob). Read them back so the worker's own
+    # created->running write preserves them (append-only) and the execution core targets the
+    # worktree with `-C` and snapshots it afterward. Null/absent for non-worktree jobs.
+    $mainRepo = $status.main_repo
+    $worktreeRepo = $status.worktree_repo
+    $baseCommit = $status.base_commit
+
     $statusPath = Join-Path $jobDir 'status.json'
     $runningStatusObject = New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
-        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull
+        -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull `
+        -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit
 
     # The created->running transition is a status.json WRITE, so it goes through the
     # per-job lock like every other writer AND re-reads status under the lock before
@@ -69,6 +78,7 @@ function Invoke-CcodexWorker {
                 -Access $status.access -RepoRoot $status.repo -CreatedAt $status.created_at -Backend 'native' `
                 -BackendId $backendId -StartedAt $startedAt -ResultPath (Join-Path $jobDir 'result.md') `
                 -EventsPath (Join-Path $jobDir 'codex-events.jsonl') -StderrPath (Join-Path $jobDir 'stderr.log') `
+                -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit `
                 -Message $startResult.Message
             return [pscustomobject]@{ WrapperExitCode = $failResult.WrapperExitCode; Message = $failResult.Message }
         }
@@ -94,7 +104,7 @@ function Invoke-CcodexWorker {
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
         -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
-        -OnHeartbeat $onHeartbeat
+        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

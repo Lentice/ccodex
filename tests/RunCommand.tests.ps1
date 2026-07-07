@@ -22,6 +22,19 @@ Copy-Item -Path (Join-Path $PSScriptRoot '..\templates\worker-prompt.md') -Desti
 $repoRoot = Join-Path $tempRoot 'repo'
 New-Item -ItemType Directory -Path $repoRoot -Force | Out-Null
 
+# A real git repo (with one commit) is required for --access worktree runs (Phase 4 Task 3):
+# New-CcodexJobWorktree detaches a worktree at the main repo's HEAD. Read-only/workspace runs
+# keep using the plain $repoRoot above so their behavior stays byte-stable.
+$utf8NoBomTest = New-Object System.Text.UTF8Encoding($false)
+$gitRepo = Join-Path $tempRoot 'gitrepo'
+New-Item -ItemType Directory -Path $gitRepo -Force | Out-Null
+& git -C $gitRepo init -q 2>$null | Out-Null
+& git -C $gitRepo config user.email 'test@example.com' | Out-Null
+& git -C $gitRepo config user.name 'ccodex test' | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $gitRepo 'seed.txt'), "seed`n", $utf8NoBomTest)
+& git -C $gitRepo add seed.txt | Out-Null
+& git -C $gitRepo commit -q -m 'init' | Out-Null
+
 $fixtureCmd = Join-Path $PSScriptRoot 'fixtures\fake-codex.cmd'
 $ccodexScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\ccodex.ps1')).Path
 
@@ -69,11 +82,44 @@ Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction Sil
 $result2 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'test'; Access = $null }
 Assert-Equal $result2.WrapperExitCode 2 'exit code 2 for test mode without --access workspace'
 
-Write-Host "mode 'implement' is unlocked (defaults to worktree access; worktree wiring itself lands in a later task)"
+Write-Host "mode 'implement' runs in an isolated worktree and snapshots the worker's changes"
 $env:CCODEX_FAKE_EXIT_CODE = '0'
 $env:CCODEX_FAKE_RESULT = 'implement done'
-$result3 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; PositionalTask = 'do the implement task' }
-Assert-Equal $result3.WrapperExitCode 0 'exit code 0 for implement mode with default (worktree) access'
+$env:CCODEX_FAKE_WRITE_FILE = 'worker-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'worker wrote this'
+$baseHead = (& git -C $gitRepo rev-parse HEAD).Trim()
+$result3 = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; RepoOverride = $gitRepo; PositionalTask = 'do the implement task' }
+Assert-Equal $result3.WrapperExitCode 0 'exit code 0 for implement mode with worktree access'
+$status3 = Get-Content -LiteralPath (Join-Path $result3.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $status3.status 'done' 'worktree implement run reaches terminal done'
+Assert-Equal $status3.access 'worktree' 'implement run resolves to worktree access'
+Assert-Equal $status3.main_repo $gitRepo 'status.json records main_repo as the target repo'
+Assert-True (-not [string]::IsNullOrEmpty($status3.worktree_repo)) 'status.json records worktree_repo'
+Assert-Equal $status3.base_commit $baseHead 'status.json records the base commit (main repo HEAD at creation)'
+Assert-Equal $status3.worktree_committed $true 'worktree_committed is true when the worker changed a file'
+# The worker file lands in the WORKTREE, never in the main repo.
+Assert-True (Test-Path -LiteralPath (Join-Path $status3.worktree_repo 'worker-change.txt') -PathType Leaf) 'worker file exists inside the worktree'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepo 'worker-change.txt'))) 'worker file is absent from the main repo (never mutated)'
+# The worktree lives under the state root, never inside the target repo.
+Assert-True ($status3.worktree_repo -like "$localAppData*") 'the worktree lives under the state root'
+# The main repo HEAD is untouched by the run.
+Assert-Equal ((& git -C $gitRepo rev-parse HEAD).Trim()) $baseHead 'the main repo HEAD does not move during the run'
+# The worktree HEAD is ahead of base by exactly the one snapshot commit.
+$worktreeAhead = (& git -C $status3.worktree_repo rev-list --count "$baseHead..HEAD").Trim()
+Assert-Equal $worktreeAhead '1' 'the worktree HEAD is exactly one snapshot commit ahead of base'
+$worktreeCommitMsg = (& git -C $status3.worktree_repo log -1 '--format=%s').Trim()
+Assert-True ($worktreeCommitMsg -like 'ccodex: worker output *') 'the snapshot commit uses the fixed ccodex message template'
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+
+Write-Host "mode 'implement' with no worker changes -> worktree_committed=false, worktree HEAD stays at base"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'nothing to change'
+$baseHeadNoWrite = (& git -C $gitRepo rev-parse HEAD).Trim()
+$resultNoWrite = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; RepoOverride = $gitRepo; PositionalTask = 'inspect only' }
+Assert-Equal $resultNoWrite.WrapperExitCode 0 'no-write implement run still exits 0'
+$statusNoWrite = Get-Content -LiteralPath (Join-Path $resultNoWrite.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusNoWrite.worktree_committed $false 'worktree_committed is false when the worker wrote nothing'
+Assert-Equal ((& git -C $statusNoWrite.worktree_repo rev-parse HEAD).Trim()) $baseHeadNoWrite 'worktree HEAD stays at base when nothing was committed'
 
 Write-Host "mode 'implement' rejects --access workspace (worktree only)"
 $result3b = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; Access = 'workspace' }

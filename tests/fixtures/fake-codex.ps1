@@ -29,9 +29,16 @@ if ($argsList.Count -ge 1 -and $argsList[0] -eq 'doctor') {
 }
 
 $resultPath = $null
+# Phase 4 Task 3: parse the working-directory flag Codex is invoked with (`-C <dir>`) so a
+# worktree run can be simulated writing a file INTO the worktree the wrapper created. Purely
+# additive — every existing knob/behavior below is untouched when the write env vars are unset.
+$workDir = $null
 for ($i = 0; $i -lt $argsList.Count; $i++) {
     if ($argsList[$i] -eq '--output-last-message' -and ($i + 1) -lt $argsList.Count) {
         $resultPath = $argsList[$i + 1]
+    }
+    if ($argsList[$i] -eq '-C' -and ($i + 1) -lt $argsList.Count) {
+        $workDir = $argsList[$i + 1]
     }
 }
 # Record this process's own PID (before any delay) so hard-timeout tests can poll
@@ -40,6 +47,17 @@ if ($env:CCODEX_FAKE_PIDFILE) {
     [System.IO.File]::WriteAllText($env:CCODEX_FAKE_PIDFILE, "$PID", (New-Object System.Text.UTF8Encoding($false)))
 }
 if ($env:CCODEX_FAKE_DELAY_MS) { Start-Sleep -Milliseconds ([int]$env:CCODEX_FAKE_DELAY_MS) }
+# Phase 4 Task 3: simulate a worker file edit inside the working directory (`-C <dir>`),
+# opt-in via CCODEX_FAKE_WRITE_FILE (relative path). Additive: absent env var = no-op.
+if ($env:CCODEX_FAKE_WRITE_FILE -and $workDir) {
+    $writeText = if ($env:CCODEX_FAKE_WRITE_TEXT) { $env:CCODEX_FAKE_WRITE_TEXT } else { 'fake-codex worker change' }
+    $writeTarget = Join-Path $workDir $env:CCODEX_FAKE_WRITE_FILE
+    $writeTargetDir = Split-Path -Parent $writeTarget
+    if ($writeTargetDir -and -not (Test-Path -LiteralPath $writeTargetDir)) {
+        New-Item -ItemType Directory -Path $writeTargetDir -Force | Out-Null
+    }
+    [System.IO.File]::WriteAllText($writeTarget, $writeText, (New-Object System.Text.UTF8Encoding($false)))
+}
 Write-Output '{"type":"event","msg":"fake-codex ran"}'
 if ($env:CCODEX_FAKE_STDERR) {
     [Console]::Error.WriteLine($env:CCODEX_FAKE_STDERR)
