@@ -78,12 +78,14 @@ conversation.
    | --- | --- |
    | `0`  | Success — stdout is the final result. |
    | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure). |
-   | `3`  | Job id not found (`status`/`wait`/`read`). |
+   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`tail`/`debug`). |
    | `4`  | Job exists but is not finished yet (`read` only) — use `wait` or check back later. |
    | `10` | Codex itself exited non-zero. |
    | `11` | Codex exited zero but produced no usable result. |
    | `12` | Wrapper-internal error. |
    | `20` | `wait` timed out; the job is still running — re-run `wait` to keep waiting. |
+   | `21` | The per-job lock could not be acquired within its timeout — retry the command. |
+   | `22` | `wait` returned because the job was cancelled (`ccodex cancel`). |
    | `23` | The background worker failed to start. |
    | `24` | The job hit `--hard-timeout-sec` and was killed. |
 
@@ -101,6 +103,11 @@ conversation.
    | `20` | The job is still running — re-run `wait` rather than treating it as failed. |
    | `23` | Backend/environment issue — inspect the job directory (`status.json`, `stderr.log`) before retrying. |
 
+   When the failure looks environment-shaped rather than task-specific (auth, quota, sandbox
+   denial, or the `CreateProcessWithLogonW failed: 1385` signature), run `ccodex doctor` FIRST —
+   it isolates whether Codex/the wrapper/the state root itself is broken before you touch the
+   task again.
+
    For long-running work, pass `--hard-timeout-sec <n>` on `run`/`submit` to bound how long Codex
    may run before the wrapper kills it:
 
@@ -108,5 +115,20 @@ conversation.
    "<task text>" | ccodex run --mode test --access workspace --hard-timeout-sec 120
    ```
 
-7. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
+7. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
+
+   ```powershell
+   ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
+   ccodex tail <job_id> --lines 80   # raw stderr.log / codex-events.jsonl tail for a stuck job
+   ccodex debug <job_id>             # compact one-shot diagnosis + suggested next command
+   ccodex cleanup --dry-run          # periodic hygiene: preview the retention sweep first
+   ccodex cleanup --older-than 14d   # then actually delete aged terminal jobs
+   ```
+
+   Reach for `cancel` the moment a background job is known to be the wrong task or stuck — don't
+   just let it run to a timeout. Reach for `cleanup --older-than <Nd|Nh>` periodically (or when
+   the user asks to reclaim disk / clear stale sessions), ideally after a `--dry-run` preview; add
+   `--scrub-thread-ids` to also blank old jobs' `codex_thread_id` so they stop being resumable.
+
+8. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.

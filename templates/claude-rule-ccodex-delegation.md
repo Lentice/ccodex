@@ -104,8 +104,27 @@ README's failure-class table:
 | exit `10` with no `failure_reason` | Read `status.json.error`/stderr for context, then continue; use judgment, do not retry-loop. |
 | exit `11` | Codex produced no usable result; note it and continue without the review. |
 | exit `20` | The job is still running; re-run `wait` rather than treating it as failed. |
+| exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |
+| exit `22` | The job was cancelled (`ccodex cancel`); treat it as intentionally stopped, not a failure. |
 | exit `24` | The job hit its timeout; note it and continue — don't just retry unchanged. |
 | exit `2`/`3`/`12`/`23` | Wrapper/usage/internal error; note it and continue without the review. |
 
 In every failure case, the task itself is not blocked — a skipped or failed review is recorded as
 a note in your final report, not a reason to stop.
+
+**Environment-shaped failures first move:** when a failure looks environment-shaped rather than
+task-specific — `auth`, `quota_or_rate_limit`, `permission_or_sandbox`, or the
+`CreateProcessWithLogonW failed: 1385` signature — run `ccodex doctor` before retrying or trying a
+workaround. It isolates whether Codex itself, the wrapper, or the state root is the actual
+problem, so you react to the real cause instead of guessing.
+
+## Job lifecycle hygiene
+
+- **Stopping a background job:** if a `submit`ted job is known to be the wrong task, stuck, or no
+  longer needed, run `ccodex cancel <job_id>` rather than leaving it to run to a timeout or
+  ignoring it.
+- **Periodic hygiene:** run `ccodex cleanup --dry-run` occasionally (or whenever the user asks to
+  reclaim disk or clear stale session data), then `ccodex cleanup --older-than <Nd|Nh>` to
+  actually delete aged terminal jobs; add `--scrub-thread-ids` to also blank old jobs'
+  `codex_thread_id` so they stop being resumable. This is housekeeping, not a checkpoint — it does
+  not require `auto`/`ask`/`off` policy and is not counted against `max_codex_calls_per_task`.
