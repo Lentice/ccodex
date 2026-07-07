@@ -191,6 +191,62 @@ Assert-Equal $guardMatchResult.Written $true 'the terminal write happens when th
 $afterGuardMatch = Read-CcodexStatusFile -JobDir $jobGuardMatch.JobDir
 Assert-Equal $afterGuardMatch.status 'done' 'status.json on disk now reads done -- the guarded write landed'
 
+# --- (e4) Invoke-CcodexJobExecution: a skipped terminal write must route non-terminal
+#          guard mismatches to internal failure (exit 12), never to a fabricated
+#          success/unknown result. Both scenarios shadow Read-CcodexStatusFile so the
+#          RE-READ INSIDE THE LOCK (Write-CcodexStatusUnderLock's guard) sees a different
+#          value than what is actually on disk -- the same technique
+#          tests/JobStatus.tests.ps1 uses for its own re-read-guard test -- without needing
+#          real concurrency. The real on-disk status.json (read via plain Get-Content, never
+#          through the shadowed function) is what the assertions below check.
+
+Write-Host "Invoke-CcodexJobExecution: re-read under the lock is `$null during the terminal write -> exit 12, no success/unknown fabricated"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SHOULD NOT BE REPORTED AS SUCCESS'
+$jobNullReRead = New-CcodexTestJob
+$nullReReadBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+function Read-CcodexStatusFile {
+    param([Parameter(Mandatory)][string]$JobDir)
+    return $null
+}
+$nullReReadResult = Invoke-CcodexJobExecution -JobDir $jobNullReRead.JobDir -RepoRoot $targetRepo -Mode 'review' -Access 'read-only' `
+    -WorkerPrompt 'test worker prompt body' -CodexPath $fixtureCmd -CreatedAt ((Get-Date).ToString('o')) `
+    -Backend 'native' -BackendId $nullReReadBackendId -StartedAt ((Get-Date).ToString('o'))
+# Restore the real Read-CcodexStatusFile immediately so every assertion below (and every
+# later test in this file) sees real disk state again.
+. (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
+Assert-Equal $nullReReadResult.WrapperExitCode 12 'a $null re-read during the terminal write is an internal failure (exit 12), not success'
+Assert-Equal $nullReReadResult.Status 'failed' 'the internal-failure result reports status failed'
+Assert-True (-not [string]::IsNullOrEmpty($nullReReadResult.Message)) 'the internal-failure result carries a diagnostic message'
+$statusNullReRead = Get-Content -LiteralPath (Join-Path $jobNullReRead.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusNullReRead.status 'failed' 'status.json is left with an honest failed status, not a fabricated done/unknown one'
+Assert-Equal $statusNullReRead.wrapper_exit_code 12 'status.json records wrapper_exit_code 12 for the unreadable-re-read case'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobNullReRead.JobDir '.lock'))) 'the per-job lock is released after the internal-failure path'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "Invoke-CcodexJobExecution: re-read under the lock shows running with a DIFFERENT backend_id during the terminal write -> exit 12, on-disk status untouched"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SHOULD NOT BE REPORTED AS SUCCESS EITHER'
+$jobForeignBackend = New-CcodexTestJob
+$foreignTestOwnBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+$foreignTestOtherBackendId = '999999;2020-06-15T00:00:00.0000000Z'
+function Read-CcodexStatusFile {
+    param([Parameter(Mandatory)][string]$JobDir)
+    return [pscustomobject]@{ status = 'running'; backend_id = $foreignTestOtherBackendId; wrapper_exit_code = $null }
+}
+$foreignBackendResult = Invoke-CcodexJobExecution -JobDir $jobForeignBackend.JobDir -RepoRoot $targetRepo -Mode 'review' -Access 'read-only' `
+    -WorkerPrompt 'test worker prompt body' -CodexPath $fixtureCmd -CreatedAt ((Get-Date).ToString('o')) `
+    -Backend 'native' -BackendId $foreignTestOwnBackendId -StartedAt ((Get-Date).ToString('o'))
+. (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
+Assert-Equal $foreignBackendResult.WrapperExitCode 12 'a foreign (mismatched-backend_id) running status during the terminal write is an internal failure (exit 12), not success'
+Assert-Equal $foreignBackendResult.Status 'failed' 'the foreign-status result reports status failed to its own caller'
+Assert-True (-not [string]::IsNullOrEmpty($foreignBackendResult.Message)) 'the foreign-status result carries a diagnostic message'
+$statusForeignBackend = Get-Content -LiteralPath (Join-Path $jobForeignBackend.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusForeignBackend.status 'running' 'status.json on disk is untouched -- still the real running write, not clobbered to failed/done'
+Assert-Equal $statusForeignBackend.backend_id $foreignTestOwnBackendId "status.json on disk still carries this run's own backend_id (the real running-write), unaffected by the shadowed foreign re-read"
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobForeignBackend.JobDir '.lock'))) 'the per-job lock is released after the foreign-status path'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 # --- (f) Update-CcodexHeartbeat: never resurrects a status a concurrent writer changed ---
 
 $hbBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime

@@ -162,30 +162,73 @@ function Write-CcodexStatusUnderLock {
     return [pscustomobject]@{ LockAcquired = $true; Written = $true; CurrentStatus = $null }
 }
 
+function Test-CcodexTerminalStatus {
+    # True only for the four statuses the design treats as terminal (done/failed/
+    # timed_out/cancelled). Gates New-CcodexPreservedStatusResult: preserving "what's on
+    # disk" as a decided outcome is only safe when what's on disk really is a terminal
+    # outcome. A $null (unreadable) re-read, or a non-terminal status (created/running --
+    # whether under this run's own backend_id or a foreign one), must NEVER be reported as
+    # a preserved outcome; see the two call sites in Invoke-CcodexJobExecution.
+    param($StatusObject)
+    return ($null -ne $StatusObject) -and ($StatusObject.status -in @('done', 'failed', 'timed_out', 'cancelled'))
+}
+
 function New-CcodexPreservedStatusResult {
     # Builds the Invoke-CcodexJobExecution return value for the "terminal write skipped"
     # case: some concurrent writer (in practice only `cancel`) moved status.json off
     # `running` between this call's own running-write and its own terminal write, so
     # Write-CcodexStatusUnderLock's RequireStatus guard deliberately did not perform the
-    # write. Report what IS on disk instead of what this call computed, reusing the same
-    # wrapper-exit-code convention Invoke-CcodexWaitCommand uses for a terminal `cancelled`
-    # job (22); any other terminal status re-uses whatever wrapper_exit_code it already
-    # recorded, defaulting to 0.
+    # write. Report what IS on disk instead of what this call computed.
+    #
+    # CONTRACT: callers must only reach here when Test-CcodexTerminalStatus confirms
+    # $PreservedStatus is a genuine terminal status. A $null/unreadable re-read, or a
+    # readable-but-non-terminal status, must be routed elsewhere instead
+    # (Complete-CcodexInternalFailure for the unreadable case; New-CcodexUnaccountedStatusResult
+    # for the readable-non-terminal case) -- fabricating a success/"unknown" result for
+    # either was a real bug: a non-terminal or unreadable job could make `run` report
+    # WrapperExitCode 0 while the job was actually still running (or its state unknown).
+    #
+    # Wrapper-exit-code mapping mirrors Invoke-CcodexWaitCommand's own terminal-status
+    # mapping: done -> 0; failed -> its recorded wrapper_exit_code if one of {10,11,12},
+    # else 10; timed_out -> its recorded wrapper_exit_code if present, else 24;
+    # cancelled -> 22 always (regardless of what's recorded).
     param(
         [Parameter(Mandatory)][string]$JobId,
         [Parameter(Mandatory)][string]$JobDir,
-        $PreservedStatus
+        [Parameter(Mandatory)]$PreservedStatus
     )
-    $statusText = if ($PreservedStatus -and $PreservedStatus.status) { $PreservedStatus.status } else { 'unknown' }
-    $wrapperExitCode = if ($statusText -eq 'cancelled') {
-        22
-    } elseif ($PreservedStatus -and $null -ne $PreservedStatus.wrapper_exit_code) {
-        [int]$PreservedStatus.wrapper_exit_code
-    } else {
-        0
+    $statusText = $PreservedStatus.status
+    $recordedWrapperExitCode = if ($null -ne $PreservedStatus.wrapper_exit_code) { [int]$PreservedStatus.wrapper_exit_code } else { $null }
+    $wrapperExitCode = switch ($statusText) {
+        'cancelled' { 22 }
+        'done' { 0 }
+        'failed' { if ($recordedWrapperExitCode -in @(10, 11, 12)) { $recordedWrapperExitCode } else { 10 } }
+        'timed_out' { if ($null -ne $recordedWrapperExitCode) { $recordedWrapperExitCode } else { 24 } }
+        default { if ($null -ne $recordedWrapperExitCode) { $recordedWrapperExitCode } else { 0 } } # unreachable given the caller contract above
     }
     $message = "ccodex: job $JobId is '$statusText' (a concurrent writer changed its status before this run's own terminal write landed; leaving it as-is)`n  job dir: $JobDir"
     return [pscustomobject]@{ WrapperExitCode = $wrapperExitCode; Stdout = $null; Message = $message; CodexExitCode = $null; Status = $statusText }
+}
+
+function New-CcodexUnaccountedStatusResult {
+    # Sibling to New-CcodexPreservedStatusResult for the OTHER outcome of a skipped
+    # terminal write: the locked re-read came back READABLE but NON-terminal (e.g. still
+    # `running`, possibly under a different backend_id than this run's own -- evidence
+    # some other worker currently owns, or once owned, this job). Overwriting status.json
+    # here would risk corrupting THAT worker's own eventual guarded terminal write (it
+    # re-reads under the lock expecting to still see `running` + its own backend_id; if
+    # this call clobbers it first, that worker's guard also mismatches and ITS real result
+    # is silently dropped instead of this run's). So this path reports an internal failure
+    # to THIS run's caller only and deliberately leaves status.json exactly as found --
+    # unlike Complete-CcodexInternalFailure, which IS safe to call from the sibling
+    # $null/unreadable case (there is no other writer's state to protect there, and a job
+    # must never be left with zero terminal evidence at all).
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][string]$Message
+    )
+    return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $Message`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
 }
 
 function Invoke-CcodexJobExecution {
@@ -275,9 +318,19 @@ function Invoke-CcodexJobExecution {
         }
         if (-not $timeoutWrite.Written) {
             # The job moved off `running` under us (e.g. a concurrent cancel) before this
-            # write landed under the lock: its outcome is already decided elsewhere.
-            # Preserve what is on disk rather than clobbering it back to timed_out.
-            return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $timeoutWrite.CurrentStatus
+            # write landed under the lock: its outcome is already decided elsewhere -- IF
+            # what's on disk is a genuine terminal status. A $null/unreadable re-read, or a
+            # readable-but-non-terminal one, is NOT a decided outcome; reporting either as
+            # "preserved" would let this run report success/unknown over a job that is
+            # actually still running or whose state is unknown.
+            $preservedTimeout = $timeoutWrite.CurrentStatus
+            if (Test-CcodexTerminalStatus -StatusObject $preservedTimeout) {
+                return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $preservedTimeout
+            }
+            if ($null -eq $preservedTimeout) {
+                return Complete-CcodexInternalFailure @internalFailureParams -Message "job $jobId's status.json became unreadable during the timed_out write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
+            }
+            return New-CcodexUnaccountedStatusResult -JobId $jobId -JobDir $JobDir -Message "job $jobId is unexpectedly '$($preservedTimeout.status)' (backend_id '$($preservedTimeout.backend_id)') during the timed_out write; leaving status.json untouched rather than reporting a fabricated outcome"
         }
 
         $timeoutMessage = "ccodex: job $jobId timed_out ($timeoutReason)`n  job dir: $JobDir"
@@ -307,8 +360,18 @@ function Invoke-CcodexJobExecution {
     }
     if (-not $finalWrite.Written) {
         # Same race as the timed_out branch above: a concurrent writer (cancel) already
-        # decided this job's fate. Preserve what is on disk instead of overwriting it.
-        return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $finalWrite.CurrentStatus
+        # decided this job's fate -- IF what's on disk is a genuine terminal status. See
+        # the identical three-way branch there for why a $null/unreadable or
+        # readable-but-non-terminal re-read must never be reported as a preserved
+        # (successful-looking) outcome.
+        $preservedFinal = $finalWrite.CurrentStatus
+        if (Test-CcodexTerminalStatus -StatusObject $preservedFinal) {
+            return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $preservedFinal
+        }
+        if ($null -eq $preservedFinal) {
+            return Complete-CcodexInternalFailure @internalFailureParams -Message "job $jobId's status.json became unreadable during the terminal write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
+        }
+        return New-CcodexUnaccountedStatusResult -JobId $jobId -JobDir $JobDir -Message "job $jobId is unexpectedly '$($preservedFinal.status)' (backend_id '$($preservedFinal.backend_id)') during the terminal write; leaving status.json untouched rather than reporting a fabricated outcome"
     }
 
     if ($validation.WrapperExitCode -eq 0) {
