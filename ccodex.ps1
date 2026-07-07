@@ -952,6 +952,102 @@ function Invoke-CcodexCancelCommand {
     return $result
 }
 
+function Resolve-CcodexWorktreeJobContext {
+    # Shared precondition chain for `diff`/`apply` (Phase 4 Tasks 4/5): resolve the job,
+    # reconcile a narrowly-gated orphan exactly as status/wait/read do, then verify the job
+    # is terminal, was run with `--access worktree`, and its worktree still exists on disk.
+    # Returns WrapperExitCode=0 with the resolved job/worktree fields on success; any
+    # nonzero WrapperExitCode is a fully-formed error result the caller can return as-is.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    try {
+        $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
+    } catch {
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message; JobDir = $null; StatusObject = $null; WorktreePath = $null; BaseCommit = $null; MainRepo = $null }
+    }
+
+    $jobDir = $record.JobDir
+    $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+    $statusObj = Read-CcodexStatusFile -JobDir $jobDir
+    $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
+    if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+    $terminalStatuses = @('done', 'failed', 'timed_out', 'cancelled')
+    if ($statusText -notin $terminalStatuses) {
+        $line = "$JobId $statusText"
+        if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
+        $message = "$line`nccodex: job $JobId is not finished yet; run ``ccodex wait $JobId`` to block until it completes."
+        return [pscustomobject]@{ WrapperExitCode = 4; Stdout = $null; Message = $message; JobDir = $jobDir; StatusObject = $statusObj; WorktreePath = $null; BaseCommit = $null; MainRepo = $null }
+    }
+
+    $worktreePath = if ($statusObj) { [string]$statusObj.worktree_repo } else { $null }
+    if ([string]::IsNullOrEmpty($worktreePath)) {
+        $accessText = if ($statusObj -and $statusObj.access) { $statusObj.access } else { 'unknown' }
+        $message = "ccodex: job $JobId has no worktree (access=$accessText); this command requires a job run with --access worktree.`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message; JobDir = $jobDir; StatusObject = $statusObj; WorktreePath = $null; BaseCommit = $null; MainRepo = $null }
+    }
+
+    if (-not (Test-Path -LiteralPath $worktreePath -PathType Container)) {
+        $message = "ccodex: worktree removed; artifacts remain at $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $message; JobDir = $jobDir; StatusObject = $statusObj; WorktreePath = $null; BaseCommit = $null; MainRepo = $null }
+    }
+
+    return [pscustomobject]@{
+        WrapperExitCode = 0
+        Stdout          = $null
+        Message         = $null
+        JobDir          = $jobDir
+        StatusObject    = $statusObj
+        WorktreePath    = $worktreePath
+        BaseCommit      = [string]$statusObj.base_commit
+        MainRepo        = [string]$statusObj.main_repo
+    }
+}
+
+function Invoke-CcodexDiffCommand {
+    # Read-only inspection of a worktree job's changes (design: "diff <job_id>", Phase 4
+    # Task 4). Precondition chain (unknown/non-terminal/no-worktree/worktree-removed) lives
+    # in Resolve-CcodexWorktreeJobContext, shared with `apply`. On success prints
+    # `git diff --stat <base>..HEAD` followed by the full `git diff <base>..HEAD`; an empty
+    # change set prints an informational line instead (still exit 0).
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
+    if ($context.WrapperExitCode -ne 0) {
+        return [pscustomobject]@{ WrapperExitCode = $context.WrapperExitCode; Stdout = $context.Stdout; Message = $context.Message }
+    }
+
+    $worktreePath = $context.WorktreePath
+    $baseCommit = $context.BaseCommit
+    $range = "$baseCommit..HEAD"
+
+    $statOutput = (& git -C $worktreePath diff --stat $range 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        $message = "ccodex: internal error: git diff --stat failed in worktree '$worktreePath': $statOutput"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+    $statOutput = $statOutput.TrimEnd("`r", "`n")
+
+    if ([string]::IsNullOrWhiteSpace($statOutput)) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to diff for job $JobId ($range is empty)."; Message = $null }
+    }
+
+    $diffOutput = (& git -C $worktreePath diff $range 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        $message = "ccodex: internal error: git diff failed in worktree '$worktreePath': $diffOutput"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    }
+    $diffOutput = $diffOutput.TrimEnd("`r", "`n")
+
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$statOutput`n`n$diffOutput"; Message = $null }
+}
+
 function Get-CcodexTailLines {
     # Reads at most the last 64 KB of $Path via a stream seek from the end (never the
     # whole file), decodes it as UTF-8, and returns the last $Lines lines as a string
@@ -1636,6 +1732,27 @@ try {
             }
             $exitCode = $cancelResult.WrapperExitCode
         }
+        'diff' {
+            # Positional job id lands in $PositionalTask (same declaration-order binding
+            # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --state-root is a hidden
+            # test-support flag.
+            $diffJobId = $PositionalTask
+            $diffStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            if (-not $diffJobId) {
+                Write-Host "ccodex: diff requires a job id."
+                $exitCode = 2
+                break
+            }
+            $diffParams = @{ JobId = $diffJobId }
+            if ($diffStateRoot) { $diffParams['StateRoot'] = $diffStateRoot }
+            $diffResult = Invoke-CcodexDiffCommand @diffParams
+            if ($diffResult.WrapperExitCode -eq 0) {
+                Write-Output $diffResult.Stdout
+            } else {
+                Write-Host $diffResult.Message
+            }
+            $exitCode = $diffResult.WrapperExitCode
+        }
         'review' {
             # Sugar over the `run` pipeline (mode review, access read-only): compose a
             # scoped-review prompt from the diff selector/paths, then hand the composed
@@ -1812,7 +1929,7 @@ try {
             $exitCode = $doctorResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, tail, debug, cleanup, doctor, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, diff, tail, debug, cleanup, doctor, worker."
             $exitCode = 2
         }
     }
