@@ -161,8 +161,14 @@ the same Codex session instead of starting over:
 "<your follow-up>" | ccodex resume <job_id>
 ```
 
-If it exits 2 with a scrubbed/absent-thread message, or fails with
-`failure_reason: thread_expired`, the session is gone — start a fresh `run`.
+`resume` always creates a brand-new job (new job id/directory, `parent_job_id` lineage in its
+`status.json`) and inherits the parent's mode/access/repo — it never mutates the parent. It exits
+`3` if `<job_id>` doesn't exist, `4` if the parent hasn't reached a terminal status yet, and `2`
+if the parent ran with `--access worktree` or its `codex_thread_id` is absent/scrubbed (message
+names which). If it fails with `failure_reason: thread_expired` (Codex itself rejected the
+session), the session is gone either way — start a fresh `run` instead of retrying `resume`.
+Chain follow-ups off the newest child's job id, not the original parent, if the exchange
+continues past one reply.
 
 ## Exit codes and failure reactions
 

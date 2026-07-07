@@ -73,7 +73,21 @@ conversation.
    retrying blindly. Treat the diff exactly like a human PR you're about to merge: read it, decide,
    then act.
 
-5. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
+5. **When Codex's answer is a clarifying question, or a finding needs pushback or refinement**,
+   continue the *same* Codex session instead of starting a fresh `run` (which has no memory of
+   the prior turn):
+
+   ```powershell
+   "<reply to the clarifying question, or your pushback>" | ccodex resume <job_id>
+   ```
+
+   `resume` always creates a brand-new job (new job id, new artifacts) — it never mutates the
+   parent job you're resuming from. If it fails with exit `2` naming a scrubbed/absent thread id
+   or worktree access, or fails with `failure_reason: thread_expired`, the session is gone —
+   start a fresh `run` instead of retrying `resume`. Chain follow-ups off the latest child's job
+   id, not the original parent, if the conversation continues past one reply.
+
+6. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
    at once), submit it in the background instead of blocking on `run`:
 
    ```powershell
@@ -91,15 +105,15 @@ conversation.
 
    Submit multiple jobs before waiting on any of them to run them in parallel.
 
-6. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
+7. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
    decide success or failure; use the exit code:
 
    | Exit code | Meaning |
    | --- | --- |
    | `0`  | Success — stdout is the final result. |
-   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure). |
-   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`). |
-   | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`) — use `wait` or check back later. |
+   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure; also `resume` against a worktree parent or an absent/scrubbed thread id). |
+   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`/`resume`). |
+   | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`/`resume`) — use `wait` or check back later. |
    | `10` | Codex itself exited non-zero. |
    | `11` | Codex exited zero but produced no usable result. |
    | `12` | Wrapper-internal error. |
@@ -110,7 +124,7 @@ conversation.
    | `24` | The job hit `--hard-timeout-sec` and was killed. |
    | `25` | `ccodex apply` conflicted or failed; the main repo was left untouched — review `ccodex diff <job_id>` and resolve by hand. |
 
-7. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
+8. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
    `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
    react accordingly:
 
@@ -119,6 +133,7 @@ conversation.
    | `10` + `failure_reason: quota_or_rate_limit` | Report the limit to the user; do not auto-retry. |
    | `10` + `failure_reason: auth` | Suggest the user run `codex login`. |
    | `10` + `failure_reason: network` | Safe to retry once. |
+   | `10` + `failure_reason: thread_expired` (`resume` only) | Codex no longer recognizes the session; start a fresh `run` instead of retrying `resume`. |
    | `10` + `failure_reason` absent | Read `error` in `status.json` / stderr; use judgment. |
    | `24` (`timed_out`) | Raise `--hard-timeout-sec` or split the task into smaller pieces; don't just retry unchanged. |
    | `20` | The job is still running — re-run `wait` rather than treating it as failed. |
@@ -136,7 +151,7 @@ conversation.
    "<task text>" | ccodex run --mode test --access workspace --hard-timeout-sec 120
    ```
 
-8. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
+9. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
 
    ```powershell
    ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
@@ -151,7 +166,7 @@ conversation.
    the user asks to reclaim disk / clear stale sessions), ideally after a `--dry-run` preview; add
    `--scrub-thread-ids` to also blank old jobs' `codex_thread_id` so they stop being resumable.
 
-9. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
+10. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.
    The same applies to a delegated implementation: `ccodex apply` lands exactly what the diff
    showed, nothing more — you decide whether it's landed, not Codex.

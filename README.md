@@ -16,8 +16,9 @@ treat it like any other command it shells out to.
 
 **Phase 1 (synchronous CLI), Phase 2a (async result channel), Phase 2c (scoped review +
 delegation policy), Phase 2b (job management: locks, retention/cleanup, cancel, heartbeat/
-health, tail, debug, doctor), and Phase 4 (worktree-isolated `implement` mode with `diff`/`apply`)
-are done**, along with the Phase 3 `/ccodex` Claude command.
+health, tail, debug, doctor), Phase 4 (worktree-isolated `implement` mode with `diff`/`apply`),
+and Phase 5 (`ccodex resume` for multi-turn Codex sessions) are done**, along with the Phase 3
+`/ccodex` Claude command.
 `ccodex run` is synchronous end-to-end; `ccodex submit` returns a job id immediately and hands the
 work to a detached background worker that survives the submitting process exiting, with
 `status`/`wait`/`read` to retrieve lifecycle and the final result from any directory. `ccodex
@@ -25,26 +26,31 @@ review` adds a path-scoped code review over a git diff range; `cancel`/`cleanup`
 `doctor` round out job lifecycle management and environment diagnosis; `--mode implement` (default
 `--access worktree`) runs an edit-capable worker inside an isolated git worktree under the state
 root — never the caller's own working tree — and `ccodex diff`/`ccodex apply` let the caller
-inspect and explicitly land the worker's snapshot commit onto the main repo; and
-`.ccodex/ccodex.json` plus the installed `~/.claude/rules/ccodex-delegation.md` rule let a project
-opt every Claude Code session into automatic review/second-opinion checkpoints. See
+inspect and explicitly land the worker's snapshot commit onto the main repo; `ccodex resume
+<job_id>` continues a finished job's Codex session with a follow-up, always as a brand-new job
+that carries `parent_job_id` lineage; and `.ccodex/ccodex.json` plus the installed
+`~/.claude/rules/ccodex-delegation.md` rule let a project opt every Claude Code session into
+automatic review/second-opinion checkpoints. See
 [`docs/2026-07-03-ccodex-adapter-phase1-plan.md`](docs/2026-07-03-ccodex-adapter-phase1-plan.md),
 [`docs/2026-07-04-ccodex-adapter-phase2a-plan.md`](docs/2026-07-04-ccodex-adapter-phase2a-plan.md),
 [`docs/2026-07-05-ccodex-delegation-plan.md`](docs/2026-07-05-ccodex-delegation-plan.md),
-[`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md), and
-[`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md)
+[`docs/2026-07-07-ccodex-phase2b-plan.md`](docs/2026-07-07-ccodex-phase2b-plan.md),
+[`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md), and
+[`docs/2026-07-07-ccodex-phase5-plan.md`](docs/2026-07-07-ccodex-phase5-plan.md)
 for the task-by-task build logs and [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md)
 for the full design across all planned phases.
 
 Implemented so far:
 
-- `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, `review`, `cancel`,
-  `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker` subcommand;
-  `run`/`submit` accept `--mode` (including `implement`), `--access` (including `worktree`),
-  `--repo`, `--prompt-file`, a positional task argument, or a piped/redirected-stdin task;
-  `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
-  `--focus`, `--embed-diff`, and `--repo`; `diff`/`apply` take a worktree job id; `cancel`/`tail`/
-  `debug` take a job id (`tail` also accepts `--lines`); `cleanup` accepts `--older-than`,
+- `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, `review`, `resume`,
+  `cancel`, `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker`
+  subcommand; `run`/`submit` accept `--mode` (including `implement`), `--access` (including
+  `worktree`), `--repo`, `--prompt-file`, a positional task argument, or a piped/redirected-stdin
+  task; `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
+  `--focus`, `--embed-diff`, and `--repo`; `resume <job_id>` accepts the same prompt sources as
+  `run` (minus `--repo`, which is always inherited from the parent) plus `--hard-timeout-sec`;
+  `diff`/`apply` take a worktree job id; `cancel`/`tail`/`debug` take a job id (`tail` also
+  accepts `--lines`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
   accepts `--no-smoke` and `--repo`
 - `ccodex.cmd` — `PATH` shim that forwards to `pwsh -File ccodex.ps1`
@@ -95,20 +101,27 @@ Implemented so far:
   whatever the worker left behind (as `ccodex-worker <ccodex@local>`) into one deterministic
   snapshot commit after the process exits; `Remove-CcodexJobWorktree` tears the worktree down
   (best-effort when the main repo itself is already gone)
+- `lib/Resume.ps1` — the `ccodex resume` lifecycle: `Get-CcodexResumeContext` resolves a parent
+  job id to its Codex thread id and inherited mode/access/repo, enforcing the resume preconditions
+  (terminal parent, non-worktree access, a live `codex_thread_id`); `Build-CcodexResumeArgs`
+  splices `exec resume <thread_id>` into the same argument shape `run` uses, so result validation
+  and failure classification never fork
 - `templates/worker-prompt.md` — default worker-prompt contract template
 - `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template (includes `review`,
-  job-management, and delegated-implementation `implement` → `diff` → `apply` guidance)
+  job-management, delegated-implementation `implement` → `diff` → `apply`, and multi-turn
+  `resume` guidance)
 - `templates/claude-rule-ccodex-delegation.md` — the always-on delegation policy rule, installed
   to `~/.claude/rules/ccodex-delegation.md` (includes the never-auto-apply `implement`/`diff`/
-  `apply` guidance)
+  `apply` guidance and the resume-on-follow-up pattern)
 - `templates/claude-skill-ccodex.md` — the `ccodex` Claude Code agent skill, installed to
   `~/.claude/skills/ccodex/SKILL.md`, teaching any session how and when to use every phase's
   commands (discovered at runtime via `ccodex help`'s exit-2 command list)
 - A full plain-PowerShell test suite under `tests/` (no Pester; see Testing below)
 
-Not yet implemented: tmux and `resume` (Phase 5). Running `ccodex` with any subcommand other than
-`run`, `submit`, `status`, `wait`, `read`, `review`, `cancel`, `diff`, `apply`, `tail`, `debug`,
-`cleanup`, `doctor`, or `worker` exits 2 with a "not implemented" message.
+Not yet implemented: tmux (superseded by the native detached backend for async execution — see
+Phase 2a). Running `ccodex` with any subcommand other than `run`, `submit`, `status`, `wait`,
+`read`, `review`, `resume`, `cancel`, `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, or
+`worker` exits 2 with a "not implemented" message.
 
 ## Quick reference
 
@@ -125,6 +138,7 @@ One line per goal — full details in [Usage](#usage) below.
 | Inspect/apply a worker's changes | `ccodex diff <job_id>` then, once reviewed, `ccodex apply <job_id>` |
 | Long / parallel background job | `"<task>" \| ccodex submit --mode test --access workspace` then `ccodex wait <job_id>` |
 | Check on a background job | `ccodex status <job_id>` (non-blocking) / `ccodex read <job_id>` (result if finished) |
+| Continue a discussion with the same Codex session | `"<follow-up>" \| ccodex resume <job_id>` |
 | Bound a possibly-hanging job | add `--hard-timeout-sec <n>` to `run`/`submit` (kills the tree, exit `24`) |
 | Stop a background job | `ccodex cancel <job_id>` (kills the process tree; no-op on an already-terminal job) |
 | Inspect a job's raw logs | `ccodex tail <job_id> [--lines <n>]` (tails `stderr.log` + `codex-events.jsonl`) |
@@ -147,6 +161,10 @@ Picking the right verb:
   it runs inside an isolated git worktree under the state root, so your own working tree is never
   touched by the job itself. Inspect with `ccodex diff <job_id>` and land the change explicitly
   with `ccodex apply <job_id>` — never auto-apply; review the diff first.
+- **`resume <job_id>`** — Codex's last answer was a clarifying question, or a finding needs
+  pushback/refinement; continue the *same* Codex session with a follow-up instead of starting a
+  fresh `run` that has no memory of the prior turn. Always creates a brand-new job (never mutates
+  the parent).
 - **`cancel`** — a submitted job needs to be stopped (wrong task, taking too long, no longer
   needed) rather than waited out.
 - **`cleanup`** — periodic hygiene: run it (ideally with `--dry-run` first) to reclaim disk from
@@ -156,10 +174,12 @@ Picking the right verb:
   denial, the `CreateProcessWithLogonW failed: 1385` signature) rather than task-specific; it
   isolates whether Codex/the wrapper/the state root itself is broken before you re-run anything.
 
-Exit codes at a glance: `0` ok · `2` usage · `3` unknown job · `4` not finished yet (`read`) ·
-`10` codex failed · `11` empty result · `12` internal · `20` wait timeout · `21` job lock timeout
-· `22` job cancelled · `23` worker never started · `24` hard-timeout kill · `25` `apply` conflict/
-failure (main repo left untouched). On failure,
+Exit codes at a glance: `0` ok · `2` usage (also `resume` against a worktree parent or a
+scrubbed/absent thread id) · `3` unknown job (also `resume` against an unknown parent) · `4` not
+finished yet (`read`; also `resume` against a still-running parent) · `10` codex failed · `11`
+empty result · `12` internal · `20` wait timeout · `21` job lock timeout · `22` job cancelled ·
+`23` worker never started · `24` hard-timeout kill · `25` `apply` conflict/failure (main repo left
+untouched). On failure,
 `status.json.failure_reason` hints the reaction: `quota_or_rate_limit` → report it, don't retry ·
 `auth` → run `codex login` · `permission_or_sandbox` → consider `--access workspace` or narrow the
 task · `network` → one retry is safe. When the reason itself is unclear, run `ccodex doctor` (or
@@ -315,6 +335,66 @@ ccodex apply <job_id>
 removing its job dir, and separately sweeps any dangling worktree directory whose job dir is
 already gone — see "Job management" below.
 
+### Multi-turn sessions (`ccodex resume`)
+
+`ccodex resume <job_id>` continues a **finished** job's Codex session with a follow-up, instead of
+starting a fresh `run` that has no memory of the prior turn. It reads follow-up text from exactly
+the same prompt sources as `run` (piped/redirected stdin, `--prompt-file`, or — since the
+positional slot is taken by the parent job id — no positional task text) and accepts
+`--hard-timeout-sec` like `run`/`submit`. It never accepts `--repo`: the child always inherits the
+parent's `mode`, `access`, and `repo` verbatim.
+
+```powershell
+"Reply with exactly SEED." | ccodex run --mode brainstorm
+# -> <job_id_1>
+"Now say CONTINUED instead." | ccodex resume <job_id_1>
+# -> CONTINUED, from the SAME Codex thread — job_id_1's context carries forward
+```
+
+**`resume` always creates a brand-new job** — a fresh job id, job directory, `prompt.md`
+(containing only the follow-up text, never the worker-prompt template), and index entry — and the
+parent job's directory/`status.json` are strictly read-only to it; nothing about the parent is
+ever mutated. The child's `status.json` carries `parent_job_id` (the parent's job id) for lineage,
+alongside the same `codex_thread_id`. Internally it invokes `codex exec resume <thread_id>` (the
+Task-1 `--ask-for-approval never … --sandbox <mapped-access> --json --color never -C <repo>
+--output-last-message <result.md> -` shape with `exec resume <thread_id>` spliced in place of
+`exec`) so result validation, `failure_reason` classification, and the terminal status write are
+identical to `run`.
+
+**Preconditions**, checked in this order, each with its own exit code:
+
+| Precondition | Exit | Message shape |
+| --- | --- | --- |
+| Parent job id has no index entry, or its job directory is missing | `3` | same "not found" message `status`/`wait`/`read` use |
+| Parent job exists but is not yet terminal (`done`/`failed`/`timed_out`/`cancelled`) | `4` | names the job id and its current status |
+| Parent ran with `--access worktree` (Phase 4) | `2` | "ran in worktree access mode - resume is not supported for worktree jobs; start a fresh run" |
+| Parent's `codex_thread_id` is absent or was scrubbed | `2` | "has no codex thread id (absent or scrubbed by cleanup) - start a fresh run" |
+
+Worktree-access rejection is checked before the thread-id check, so a worktree parent always gets
+the worktree message even if it happens to still carry a thread id. Beyond these, `resume` shares
+`run`'s usual usage-error exit `2` (bad/ambiguous prompt source, etc.) and its `10`/`11`/`12`/`24`
+failure exits.
+
+**`thread_expired` failure class:** if Codex itself rejects the resume (its own session storage no
+longer recognizes the thread id — signature: "session not found", "thread not found", "no
+session", "conversation not found"), the job fails with wrapper exit `10` and
+`status.json.failure_reason = "thread_expired"` (hint: "Codex session expired or was pruned -
+start a fresh ccodex run."). This takes precedence over quota/auth/permission/network
+classification when its signature is present. It is distinct from the exit-`2` preconditions
+above: those are ccodex's own local checks before ever calling Codex; `thread_expired` is Codex
+itself rejecting a thread id that locally still looked valid.
+
+**Interplay with `cleanup --scrub-thread-ids`:** `cleanup`'s thread-TTL scrub (see "Job
+management" below) is what usually produces the exit-`2` "absent or scrubbed" case above — once a
+retained job's `codex_thread_id` is blanked (by age, or forced for testing via
+`--scrub-thread-ids --thread-ttl 0d`), that job becomes permanently non-resumable even though its
+artifacts and job directory remain. There is no way to un-scrub a thread id; the only recovery is
+a fresh `run`.
+
+If Codex's answer to a `resume` is itself another clarifying question, keep chaining
+`ccodex resume <job_id>` off of the latest child's job id, not the original parent — each call
+returns a new job id to resume from next.
+
 ### Delegation policy (`.ccodex/ccodex.json`)
 
 A project can opt into automatic delegation checkpoints — teaching a Claude Code session when to
@@ -356,9 +436,10 @@ Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
 `submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,
 `codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`,
-`last_heartbeat_at`, and — for a `--access worktree` job — `main_repo`, `worktree_repo`,
-`base_commit`, and `worktree_committed` (all `null` for non-worktree jobs; see "Failure classes",
-"Hard timeout", "Worktree-isolated implementation", and "Job management" below). Every
+`last_heartbeat_at`, `parent_job_id` (the parent's job id for a `resume`d job, `null` otherwise),
+and — for a `--access worktree` job — `main_repo`, `worktree_repo`, `base_commit`, and
+`worktree_committed` (all `null` for non-worktree jobs; see "Failure classes", "Hard timeout",
+"Worktree-isolated implementation", "Multi-turn sessions", and "Job management" below). Every
 writer of `status.json` — the worker's running/terminal writes, `cancel`, and `cleanup`'s
 thread-id scrub — now serializes through a per-job lock (`<job_dir>\.lock\`) so two writers can
 never race each other; a lock that cannot be acquired within its timeout surfaces as wrapper exit
@@ -387,7 +468,8 @@ ccodex tail <job_id> --lines 80
 ```
 
 **`ccodex debug <job_id>`** prints a compact one-shot diagnosis: status (with `health=ok|stale`
-while running), mode/access/backend/repo, every recorded timestamp, `backend_id` with a live/dead
+while running), mode/access/backend/repo, a `parent: <job_id>` line if the job was created by
+`ccodex resume`, every recorded timestamp, `backend_id` with a live/dead
 verdict, exit codes, `failure_reason` (with its hint line), `codex_thread_id` (or
 `absent/scrubbed`), whether `result.md` is present, the last 5 lines of `stderr.log`, the job
 directory, and a suggested next command (`ccodex wait`/`read`/`tail` depending on status).
@@ -490,7 +572,10 @@ Callers can rely on these wrapper exit codes:
 repo/non-`done` job, and exit `4` for a job that hasn't finished yet — see "Worktree-isolated
 implementation" above. `cancel`, `tail`, `debug`, and `cleanup` additionally use exit `3` for an unknown job id (same as
 `status`/`wait`/`read`) and exit `12` for a wrapper-internal failure; `cleanup` and `doctor` are
-documented in full in "Job management" above.
+documented in full in "Job management" above. `resume` additionally uses exit `3` for an unknown
+parent job id, exit `4` for a parent that hasn't reached a terminal status yet, and exit `2` for a
+worktree-access parent or a parent whose `codex_thread_id` is absent/scrubbed — see "Multi-turn
+sessions" above.
 
 ### Failure classes
 
@@ -506,12 +591,14 @@ treat `failure_reason` as a shortcut to the right reaction, not a guarantee:
 | `auth` | Codex auth/credential problem (signature: `login`, `auth`, `401`, `unauthorized`, `credential`). | Suggest running `codex login`. |
 | `permission_or_sandbox` | Sandbox or approval denial (signature: `sandbox`, `denied`, `approval`, `permission`). | Consider `--access workspace` or narrow the task. |
 | `network` | Transient network failure (signature: `network`, `connection`, `dns`, `502`, `503`). | One retry is safe. |
+| `thread_expired` | Codex itself no longer recognizes the resumed thread id (signature: "session not found", "thread not found", "no session", "conversation not found"). Only ever seen on `ccodex resume`. | Start a fresh `ccodex run` — the session is gone, not retryable. |
 | *(absent)* | No recognized signature, or the run succeeded. | Fall back to the exit code and `error` message. |
 
-Classification precedence when multiple signatures are present in the same failure: quota beats
-auth beats permission beats network. `status.json` also records `codex_thread_id` (the Codex
-`thread_id`, captured on both success and failure whenever the events log carries one) for
-future resume/debugging use.
+Classification precedence when multiple signatures are present in the same failure: thread_expired
+beats quota beats auth beats permission beats network. `status.json` also records
+`codex_thread_id` (the Codex `thread_id`, captured on both success and failure whenever the
+events log carries one) — this is exactly the value `ccodex resume <job_id>` uses to continue the
+session; see "Multi-turn sessions" above.
 
 ### Hard timeout
 
@@ -549,6 +636,9 @@ ccodex read <job_id>      # non-blocking result read; exits 4 if not finished ye
 
 Submit several jobs before waiting on any of them to run independent tasks in parallel.
 
+For a job created by `ccodex resume`, `status`/`debug` append `parent=<parent_job_id>` /
+`parent: <parent_job_id>` to name the job it continued — see "Multi-turn sessions" below.
+
 ## Installing
 
 ```powershell
@@ -572,10 +662,12 @@ rule destinations are fixed at `<ClaudeDir>\commands\ccodex.md` and
 `<ClaudeDir>\rules\ccodex-delegation.md`, `<ClaudeDir>` defaulting to `%USERPROFILE%\.claude`).
 
 Once installed, `/ccodex` is available as a slash command in Claude Code: it summarizes the task,
-calls `ccodex run`/`submit`/`wait`/`read`/`review`/`cancel`/`diff`/`apply`/`tail`/`debug`/
+calls `ccodex run`/`submit`/`wait`/`read`/`review`/`resume`/`cancel`/`diff`/`apply`/`tail`/`debug`/
 `cleanup`/`doctor` as appropriate, and treats the wrapper's exit code as the source of truth for
 success/failure rather than parsing stderr prose. It always reviews a delegated implementation's
-`ccodex diff` before deciding whether to `ccodex apply` it — never automatically. The installed
+`ccodex diff` before deciding whether to `ccodex apply` it — never automatically; and when Codex's
+answer is a clarifying question or a finding needs pushback, it continues the same session with
+`ccodex resume <job_id>` instead of starting over. The installed
 rule at `~/.claude/rules/ccodex-delegation.md` is loaded automatically in every session (no slash
 command needed) and teaches the post-change/post-plan delegation checkpoints described above.
 
@@ -583,14 +675,15 @@ command needed) and teaches the post-change/post-plan delegation checkpoints des
 
 ```text
 ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/review/
-                    #   cancel/diff/apply/tail/debug/cleanup/doctor/worker
+                    #   resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
 install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md,
                     #   ~\.claude\rules\ccodex-delegation.md, and ~\.claude\skills\ccodex\SKILL.md
 templates/          # worker-prompt contract, the /ccodex Claude command, the delegation rule
                     #   template, and the ccodex Claude Code agent skill
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
-                    #   (includes lib/Worktree.ps1 for --access worktree jobs)
+                    #   (includes lib/Worktree.ps1 for --access worktree jobs and
+                    #   lib/Resume.ps1 for ccodex resume)
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
 docs/               # design spec and phase plans
 ```
@@ -625,7 +718,8 @@ pwsh -NoProfile -File tests/Paths.tests.ps1
   `ccodex diff`/`ccodex apply` and worktree-aware `cleanup`.
   *(done — [`docs/2026-07-07-ccodex-phase4-plan.md`](docs/2026-07-07-ccodex-phase4-plan.md))*
 - **Phase 5 — Multi-turn advisor:** `ccodex resume <job_id>` continues a finished job's Codex
-  session for follow-up discussion. *(planned — [`docs/2026-07-07-ccodex-phase5-plan.md`](docs/2026-07-07-ccodex-phase5-plan.md))*
+  session for follow-up discussion, always as a brand-new job carrying `parent_job_id` lineage.
+  *(done — [`docs/2026-07-07-ccodex-phase5-plan.md`](docs/2026-07-07-ccodex-phase5-plan.md))*
 
 See [`docs/2026-07-03-ccodex-adapter-design.md`](docs/2026-07-03-ccodex-adapter-design.md) for the
 full rationale, non-goals, and phase-by-phase verification criteria, and

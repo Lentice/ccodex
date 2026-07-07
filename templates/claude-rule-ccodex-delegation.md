@@ -83,6 +83,23 @@ ccodex review --range <base>..HEAD --path <changed-path> --intent "<one-line cha
 - For a plan/spec second opinion, describe the plan's intent in `--intent`/`--focus` and scope
   `--path`/`--range` to the plan document(s) that changed.
 
+## Follow-up instead of starting over
+
+If Codex's answer to a `ccodex review`/`run` call is a clarifying question, or a finding needs
+pushback or refinement, continue the *same* Codex session instead of starting a fresh call that
+has no memory of the prior turn:
+
+```powershell
+"<reply, or your pushback>" | ccodex resume <job_id>
+```
+
+`resume` always creates a brand-new job — it never mutates the job you're resuming from — and
+inherits that job's mode/access/repo. If it exits `2` naming a scrubbed/absent thread id or
+worktree access, or fails with `failure_reason: thread_expired`, the session is gone; start a
+fresh `run`/`review` instead of retrying `resume`. This does not count as a separate checkpoint —
+it is a continuation of whichever checkpoint (or explicit request) started the original call, and
+still counts toward `max_codex_calls_per_task`.
+
 ## Triage every finding
 
 Never adopt a Codex finding uncritically and never dismiss one without checking it. For each
@@ -102,6 +119,8 @@ README's failure-class table:
 | exit `10` + `failure_reason: permission_or_sandbox` | Note it; consider `--access workspace` or a narrower scope on a future attempt, but do not retry automatically now. |
 | exit `10` + `failure_reason: network` | One retry is safe; if it fails again, note it and continue. |
 | exit `10` with no `failure_reason` | Read `status.json.error`/stderr for context, then continue; use judgment, do not retry-loop. |
+| exit `10` + `failure_reason: thread_expired` (`resume` only) | Codex no longer recognizes the resumed session; start a fresh `run`/`review` instead of retrying `resume`. |
+| exit `2`/`3`/`4` on `resume` | Parent is a worktree job or has an absent/scrubbed thread id (`2`), doesn't exist (`3`), or hasn't finished yet (`4`); start a fresh call or wait, as appropriate. |
 | exit `11` | Codex produced no usable result; note it and continue without the review. |
 | exit `20` | The job is still running; re-run `wait` rather than treating it as failed. |
 | exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |
