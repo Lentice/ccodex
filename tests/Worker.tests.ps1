@@ -138,6 +138,59 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobCancelledFirst.JobDir '
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobCancelledFirst.JobDir '.lock'))) 'worker releases the lock after skipping a cancelled job'
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
+# --- (e2) Start-CcodexWorkerRunning: an unreadable re-read under the lock is refused, not treated as `created` ---
+
+Write-Host "Start-CcodexWorkerRunning: status.json missing/unreadable under the lock -> internal failure (exit 12), running never written"
+$jobNullStatus = New-CcodexTestJob
+$nullStatusPath = Join-Path $jobNullStatus.JobDir 'status.json'
+# Simulate the re-read-under-the-lock coming back null (a mid-write/corrupt/vanished file)
+# by removing status.json entirely right before calling the function under test directly --
+# this isolates Start-CcodexWorkerRunning's OWN re-read from Invoke-CcodexWorker's earlier
+# (unrelated) initial read, which would otherwise short-circuit first.
+Remove-Item -LiteralPath $nullStatusPath -Force
+$nullRunningObj = New-CcodexStatusObject -JobId $jobNullStatus.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId 'should-not-be-written;2026-01-01T00:00:00.0000000Z' -StartedAt ((Get-Date).ToString('o'))
+$startResultNull = Start-CcodexWorkerRunning -JobDir $jobNullStatus.JobDir -StatusPath $nullStatusPath -JobId $jobNullStatus.JobId -RunningStatusObject $nullRunningObj
+Assert-Equal $startResultNull.Proceed $false 'Start-CcodexWorkerRunning refuses to proceed when the re-read under the lock is null'
+Assert-Equal $startResultNull.WrapperExitCode 12 'an unreadable status.json under the lock is an internal failure (exit 12), not permission to run'
+Assert-True (-not [string]::IsNullOrEmpty($startResultNull.Message)) 'the internal-failure result carries a diagnostic message'
+Assert-True (-not (Test-Path -LiteralPath $nullStatusPath -PathType Leaf)) 'status.json was NOT (re)written as running over the unknown/missing state'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobNullStatus.JobDir '.lock'))) 'the per-job lock is released after the internal-failure path'
+
+# --- (e3) Write-CcodexStatusUnderLock: RequireStatus/RequireBackendId guard the terminal write ---
+
+Write-Host "Write-CcodexStatusUnderLock: RequireStatus mismatch (status already moved off 'running') -> write skipped, on-disk status preserved"
+$jobGuardCancelled = New-CcodexTestJob
+$guardStatusPath = Join-Path $jobGuardCancelled.JobDir 'status.json'
+$guardBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+$guardRunning = New-CcodexStatusObject -JobId $jobGuardCancelled.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $guardBackendId -StartedAt ((Get-Date).ToString('o'))
+Write-CcodexJsonFileAtomic -Path $guardStatusPath -Object $guardRunning
+# A concurrent cancel lands between this run's own running-write and its terminal write.
+$guardCancelObj = [ordered]@{}
+foreach ($p in (Read-CcodexStatusFile -JobDir $jobGuardCancelled.JobDir).PSObject.Properties) { $guardCancelObj[$p.Name] = $p.Value }
+$guardCancelObj['status'] = 'cancelled'
+$guardCancelObj['cancelled_at'] = (Get-Date).ToUniversalTime().ToString('o')
+Write-CcodexJsonFileAtomic -Path $guardStatusPath -Object $guardCancelObj
+$guardTerminalObj = New-CcodexStatusObject -JobId $jobGuardCancelled.JobId -Status 'done' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $guardBackendId -StartedAt ((Get-Date).ToString('o')) -FinishedAt ((Get-Date).ToString('o')) -CodexExitCode 0 -WrapperExitCode 0
+$guardResult = Write-CcodexStatusUnderLock -JobDir $jobGuardCancelled.JobDir -StatusPath $guardStatusPath -StatusObject $guardTerminalObj -RequireStatus 'running' -RequireBackendId $guardBackendId
+Assert-Equal $guardResult.LockAcquired $true 'the guarded write still acquires the lock even when it ends up skipping the write'
+Assert-Equal $guardResult.Written $false 'the terminal write is skipped when the on-disk status already moved off running'
+Assert-Equal $guardResult.CurrentStatus.status 'cancelled' 'the returned CurrentStatus reflects what is actually on disk'
+$afterGuardCancelled = Read-CcodexStatusFile -JobDir $jobGuardCancelled.JobDir
+Assert-Equal $afterGuardCancelled.status 'cancelled' 'status.json on disk still reads cancelled -- the done write never landed'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobGuardCancelled.JobDir '.lock'))) 'the lock is released even when the guarded write is skipped'
+
+Write-Host "Write-CcodexStatusUnderLock: RequireStatus match (still running under the same backend) -> write happens normally"
+$jobGuardMatch = New-CcodexTestJob
+$guardMatchStatusPath = Join-Path $jobGuardMatch.JobDir 'status.json'
+$guardMatchRunning = New-CcodexStatusObject -JobId $jobGuardMatch.JobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $guardBackendId -StartedAt ((Get-Date).ToString('o'))
+Write-CcodexJsonFileAtomic -Path $guardMatchStatusPath -Object $guardMatchRunning
+$guardMatchTerminalObj = New-CcodexStatusObject -JobId $jobGuardMatch.JobId -Status 'done' -Mode 'review' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'native' -BackendId $guardBackendId -StartedAt ((Get-Date).ToString('o')) -FinishedAt ((Get-Date).ToString('o')) -CodexExitCode 0 -WrapperExitCode 0
+$guardMatchResult = Write-CcodexStatusUnderLock -JobDir $jobGuardMatch.JobDir -StatusPath $guardMatchStatusPath -StatusObject $guardMatchTerminalObj -RequireStatus 'running' -RequireBackendId $guardBackendId
+Assert-Equal $guardMatchResult.LockAcquired $true 'the guarded write acquires the lock'
+Assert-Equal $guardMatchResult.Written $true 'the terminal write happens when the on-disk status still matches the guard'
+$afterGuardMatch = Read-CcodexStatusFile -JobDir $jobGuardMatch.JobDir
+Assert-Equal $afterGuardMatch.status 'done' 'status.json on disk now reads done -- the guarded write landed'
+
 # --- (f) Update-CcodexHeartbeat: never resurrects a status a concurrent writer changed ---
 
 $hbBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime

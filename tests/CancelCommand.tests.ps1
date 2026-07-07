@@ -222,6 +222,36 @@ try {
 }
 
 # ============================================================
+# (e2) kill fails (best-effort taskkill failure swallowed) + worker stays alive ->
+#      cancel must NOT write `cancelled`; report the kill failure and exit 12
+# ============================================================
+
+Write-Host "Invoke-CcodexCancelCommand: kill fails and the worker is still alive after the poll -> no cancelled write, exit 12"
+$jobKillFails = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+$beforeKillFails = Get-Content -LiteralPath (Join-Path $jobKillFails.JobDir 'status.json') -Raw
+# Shadow Stop-CcodexProcessTree as a no-op: it is best-effort in production (it swallows
+# taskkill launch/exit failures), so this simulates a kill that silently failed. $aliveBackendId
+# names THIS test process itself, which we never actually try to kill, so it stays alive for
+# the whole poll window -- exactly the "kill failed, worker still alive" scenario. -KillPollTimeoutSec
+# 1 keeps the poll bounded-but-real without slowing the suite by the production 10s default.
+function Stop-CcodexProcessTree { param([int]$ProcessId) }
+try {
+    $resultKillFails = Invoke-CcodexCancelCommand -JobId $jobKillFails.JobId -StateRoot $localAppData -KillPollTimeoutSec 1
+} finally {
+    # Restore the real Stop-CcodexProcessTree immediately -- (f) below installs its own
+    # (throwing) shadow deliberately as the LAST override in this runspace, so this one must
+    # not leak into it or into the shell-level tests further down.
+    . (Join-Path $repoRoot 'lib\CodexInvoke.ps1')
+}
+Assert-Equal $resultKillFails.WrapperExitCode 12 'cancel exits 12 when the worker cannot be killed and is still alive after the poll'
+Assert-True (-not [string]::IsNullOrEmpty($resultKillFails.Message)) 'the kill-failure result carries a diagnostic message'
+Assert-True ($resultKillFails.Message -like '*could not*' -or $resultKillFails.Message -like '*failed to terminate*') 'the kill-failure message names the failure'
+$afterKillFails = Get-Content -LiteralPath (Join-Path $jobKillFails.JobDir 'status.json') -Raw
+Assert-Equal $afterKillFails $beforeKillFails 'status.json is byte-for-byte untouched (still running) when the kill fails -- never written as cancelled'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobKillFails.JobDir '.lock'))) 'the per-job lock is released after the failed-kill path'
+Assert-True (Test-CcodexWorkerAlive -BackendId $aliveBackendId) 'this test process (standing in for the unkillable worker) is still alive, confirming nothing was actually killed'
+
+# ============================================================
 # (f) leaked-lock regression: an exception in the post-lock body still releases the lock
 # ============================================================
 

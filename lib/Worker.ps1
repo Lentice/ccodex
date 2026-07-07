@@ -56,9 +56,12 @@ function Invoke-CcodexWorker {
     #   Proceed=$true            -> job was still `created`; running written; run codex.
     #   Proceed=$false, code 0   -> job already moved off `created` (e.g. cancelled);
     #                               leave that status intact and exit without running codex.
-    #   Proceed=$false, code 12  -> could not acquire the lock; fail terminally with
-    #                               evidence rather than dying silently (Complete-Ccodex-
-    #                               InternalFailure, mirroring Invoke-CcodexJobExecution).
+    #   Proceed=$false, code 12  -> could not acquire the lock, OR the re-read under the
+    #                               lock came back null/unreadable (unknown state); fail
+    #                               terminally with evidence rather than dying silently or
+    #                               writing `running` over state we cannot account for
+    #                               (Complete-CcodexInternalFailure, mirroring
+    #                               Invoke-CcodexJobExecution).
     $startResult = Start-CcodexWorkerRunning -JobDir $jobDir -StatusPath $statusPath -JobId $JobId -RunningStatusObject $runningStatusObject
     if (-not $startResult.Proceed) {
         if ($startResult.WrapperExitCode -eq 12) {
@@ -102,7 +105,11 @@ function Start-CcodexWorkerRunning {
     # `created` is never resurrected to `running`. Returns a result with:
     #   { Proceed = $true }                                 -> caller runs codex
     #   { Proceed = $false; WrapperExitCode = 0;  Message } -> job already terminal; exit clean
-    #   { Proceed = $false; WrapperExitCode = 12; Message } -> lock could not be acquired
+    #   { Proceed = $false; WrapperExitCode = 12; Message } -> lock could not be acquired, OR
+    #                                                           the re-read under the lock came
+    #                                                           back null/unreadable -- treated
+    #                                                           as unknown state, never as
+    #                                                           permission to write `running`.
     # Mirrors Write-CcodexStatusUnderLock's "one retry then give up" contract for the lock,
     # and releases the lock before returning in every case (codex then runs lock-free; the
     # heartbeat re-acquires the lock per beat).
@@ -130,7 +137,17 @@ function Start-CcodexWorkerRunning {
     }
     try {
         $current = Read-CcodexStatusFile -JobDir $JobDir
-        if ($null -ne $current -and $current.status -ne 'created') {
+        if ($null -eq $current) {
+            # A re-read that comes back null (missing/unreadable) under the lock is NOT
+            # evidence that the job is still safely `created` -- it is unknown state (a
+            # mid-write, a corrupt file, a status.json that vanished). Writing `running`
+            # over that would risk clobbering whatever a concurrent writer is doing to it.
+            # Fail conservatively instead: WrapperExitCode 12 routes the caller
+            # (Invoke-CcodexWorker) through Complete-CcodexInternalFailure, which stamps
+            # its OWN terminal status.json rather than leaving the job non-terminal.
+            return [pscustomobject]@{ Proceed = $false; WrapperExitCode = 12; Message = "ccodex: internal error: job $JobId has no readable status.json under the lock; refusing to write running over unknown state.`n  job dir: $JobDir" }
+        }
+        if ($current.status -ne 'created') {
             return [pscustomobject]@{ Proceed = $false; WrapperExitCode = 0; Message = "ccodex: job $JobId is '$($current.status)'; worker exiting without running codex.`n  job dir: $JobDir" }
         }
         Write-CcodexJsonFileAtomic -Path $StatusPath -Object $RunningStatusObject

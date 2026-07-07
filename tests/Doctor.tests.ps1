@@ -171,6 +171,33 @@ try {
     Remove-Item Env:\CCODEX_FAKE_DOCTOR_DELAY_MS -ErrorAction SilentlyContinue
 
     # ============================================================
+    # (j) Stop-CcodexProcessTree fails to kill a hung probe -> the bounded fallback
+    #     (second wait + Process.Kill($true)) still terminates it; doctor never hangs
+    # ============================================================
+    Reset-CcodexDoctorFakeEnv
+    Write-Host "Invoke-CcodexDoctorProbe: Stop-CcodexProcessTree fails to kill -> bounded Kill(`$true) fallback still terminates the probe (no hang)"
+    $env:CCODEX_FAKE_VERSION_DELAY_MS = '10000'
+    # Shadow Stop-CcodexProcessTree as a no-op: simulates a taskkill failure that is silently
+    # swallowed (Stop-CcodexProcessTree is best-effort in production). Without the bounded
+    # second wait + Kill($true) fallback, Invoke-CcodexDoctorProbe's old parameterless
+    # WaitForExit() would then block for as long as the fixture happens to sleep (10s here --
+    # and unboundedly long against a genuinely hung real codex process).
+    function Stop-CcodexProcessTree { param([int]$ProcessId) }
+    $probeStart = Get-Date
+    try {
+        $probeResult = Invoke-CcodexDoctorProbe -CodexPath $fakeCmd -Arguments @('--version') -TimeoutSec 1
+    } finally {
+        # Restore the real Stop-CcodexProcessTree immediately so the no-op shadow cannot
+        # leak into any later in-process test in this file.
+        . (Join-Path $repoRoot 'lib\CodexInvoke.ps1')
+    }
+    $probeElapsed = (Get-Date) - $probeStart
+    Assert-True $probeResult.TimedOut 'the probe reports TimedOut when the wait exceeds TimeoutSec'
+    Assert-Equal $probeResult.ExitCode $null 'a timed-out probe has no exit code'
+    Assert-True ($probeElapsed.TotalSeconds -lt 8) "the probe returns within its own bounded fallback window (~6s), well before the fixture's full 10s delay -- proving Process.Kill(`$true) (not the fixture exiting on its own) ended it"
+    Remove-Item Env:\CCODEX_FAKE_VERSION_DELAY_MS -ErrorAction SilentlyContinue
+
+    # ============================================================
     # shell-level: `ccodex.ps1 doctor` dispatcher wiring
     # ============================================================
     Reset-CcodexDoctorFakeEnv

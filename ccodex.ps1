@@ -101,15 +101,35 @@ function Write-CcodexStatusUnderLock {
     # writer (cancel, cleanup, or read-side reconciliation) can never clobber it. The
     # lock is held only for the duration of this one write and released immediately
     # (try/finally), so it is free again while the long-running Codex process executes
-    # between the `running` and terminal writes. Returns $true when the write happened;
-    # $false when the lock could not be acquired even after a single retry, leaving the
-    # caller to decide how to force a terminal failure (it must not die silently).
+    # between the `running` and terminal writes.
+    #
+    # RequireStatus/RequireBackendId (both optional): when RequireStatus is given, status.json
+    # is RE-READ inside the lock (never from a stale pre-lock snapshot) and the write only
+    # happens if the on-disk status still equals RequireStatus (and, when RequireBackendId is
+    # also given, its backend_id still matches). This is how a terminal write (timed_out/
+    # done/failed) avoids clobbering a status a concurrent cancel already moved off `running`
+    # -- mirrors Update-CcodexHeartbeat's/Update-CcodexOrphanStatus's re-read-under-the-lock
+    # idiom (lib/Worker.ps1, lib/JobStatus.ps1). Omit RequireStatus for a write that has no
+    # such precondition (the initial created->running stamp below: the native worker path's
+    # own equivalent transition is already guarded by Start-CcodexWorkerRunning).
+    #
+    # Returns a result object:
+    #   LockAcquired=$false                 -> could not get the lock; nothing read or
+    #                                           written; caller must force a terminal
+    #                                           failure rather than die silently.
+    #   LockAcquired=$true;  Written=$false -> RequireStatus was given and the on-disk
+    #                                           status no longer matched; the write was
+    #                                           skipped and CurrentStatus holds what IS on
+    #                                           disk (preserved, not clobbered).
+    #   LockAcquired=$true;  Written=$true  -> the write happened.
     param(
         [Parameter(Mandatory)][string]$JobDir,
         [Parameter(Mandatory)][string]$StatusPath,
         [Parameter(Mandatory)]$StatusObject,
         [string]$CommandName = 'worker',
-        [int]$TimeoutSec = 10
+        [int]$TimeoutSec = 10,
+        [string]$RequireStatus = $null,
+        [string]$RequireBackendId = $null
     )
     $acquired = $false
     try {
@@ -123,13 +143,49 @@ function Write-CcodexStatusUnderLock {
             $acquired = $false
         }
     }
-    if (-not $acquired) { return $false }
+    if (-not $acquired) {
+        return [pscustomobject]@{ LockAcquired = $false; Written = $false; CurrentStatus = $null }
+    }
     try {
+        if ($RequireStatus) {
+            $current = Read-CcodexStatusFile -JobDir $JobDir
+            $statusMatches = ($null -ne $current) -and ($current.status -eq $RequireStatus)
+            $backendMatches = (-not $RequireBackendId) -or ($null -ne $current -and [string]$current.backend_id -eq [string]$RequireBackendId)
+            if (-not ($statusMatches -and $backendMatches)) {
+                return [pscustomobject]@{ LockAcquired = $true; Written = $false; CurrentStatus = $current }
+            }
+        }
         Write-CcodexJsonFileAtomic -Path $StatusPath -Object $StatusObject
     } finally {
         Unlock-CcodexJob -JobDir $JobDir
     }
-    return $true
+    return [pscustomobject]@{ LockAcquired = $true; Written = $true; CurrentStatus = $null }
+}
+
+function New-CcodexPreservedStatusResult {
+    # Builds the Invoke-CcodexJobExecution return value for the "terminal write skipped"
+    # case: some concurrent writer (in practice only `cancel`) moved status.json off
+    # `running` between this call's own running-write and its own terminal write, so
+    # Write-CcodexStatusUnderLock's RequireStatus guard deliberately did not perform the
+    # write. Report what IS on disk instead of what this call computed, reusing the same
+    # wrapper-exit-code convention Invoke-CcodexWaitCommand uses for a terminal `cancelled`
+    # job (22); any other terminal status re-uses whatever wrapper_exit_code it already
+    # recorded, defaulting to 0.
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$JobDir,
+        $PreservedStatus
+    )
+    $statusText = if ($PreservedStatus -and $PreservedStatus.status) { $PreservedStatus.status } else { 'unknown' }
+    $wrapperExitCode = if ($statusText -eq 'cancelled') {
+        22
+    } elseif ($PreservedStatus -and $null -ne $PreservedStatus.wrapper_exit_code) {
+        [int]$PreservedStatus.wrapper_exit_code
+    } else {
+        0
+    }
+    $message = "ccodex: job $JobId is '$statusText' (a concurrent writer changed its status before this run's own terminal write landed; leaving it as-is)`n  job dir: $JobDir"
+    return [pscustomobject]@{ WrapperExitCode = $wrapperExitCode; Stdout = $null; Message = $message; CodexExitCode = $null; Status = $statusText }
 }
 
 function Invoke-CcodexJobExecution {
@@ -185,10 +241,10 @@ function Invoke-CcodexJobExecution {
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend)
     if (-not $SkipRunningWrite) {
-        $wroteRunning = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
+        $runningWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
             -StatusPath (Join-Path $JobDir 'status.json') `
             -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull)
-        if (-not $wroteRunning) {
+        if (-not $runningWrite.LockAcquired) {
             return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the running status'
         }
     }
@@ -213,9 +269,15 @@ function Invoke-CcodexJobExecution {
 
         $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
         $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt
-        $wroteTimeout = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj
-        if (-not $wroteTimeout) {
+        $timeoutWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
+        if (-not $timeoutWrite.LockAcquired) {
             return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the timed_out status'
+        }
+        if (-not $timeoutWrite.Written) {
+            # The job moved off `running` under us (e.g. a concurrent cancel) before this
+            # write landed under the lock: its outcome is already decided elsewhere.
+            # Preserve what is on disk rather than clobbering it back to timed_out.
+            return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $timeoutWrite.CurrentStatus
         }
 
         $timeoutMessage = "ccodex: job $jobId timed_out ($timeoutReason)`n  job dir: $JobDir"
@@ -239,9 +301,14 @@ function Invoke-CcodexJobExecution {
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
     $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull
-    $wroteFinal = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj
-    if (-not $wroteFinal) {
+    $finalWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
+    if (-not $finalWrite.LockAcquired) {
         return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the terminal status'
+    }
+    if (-not $finalWrite.Written) {
+        # Same race as the timed_out branch above: a concurrent writer (cancel) already
+        # decided this job's fate. Preserve what is on disk instead of overwriting it.
+        return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $finalWrite.CurrentStatus
     }
 
     if ($validation.WrapperExitCode -eq 0) {
@@ -634,7 +701,10 @@ function Invoke-CcodexCancelCommand {
     # holds it (that would deadlock the lock's own retry loop against itself).
     param(
         [Parameter(Mandatory)][string]$JobId,
-        [string]$StateRoot = $env:LOCALAPPDATA
+        [string]$StateRoot = $env:LOCALAPPDATA,
+        # Wall-clock bound for polling worker death after the kill request is issued.
+        # Overridable for tests; production callers keep the 10s default.
+        [int]$KillPollTimeoutSec = 10
     )
 
     try {
@@ -682,6 +752,7 @@ function Invoke-CcodexCancelCommand {
         }
         else {
             # Reached for `running` with a live worker, or `created` (never started).
+            $killFailed = $false
             if ($status.status -eq 'running') {
                 # Worker identity verified alive: force-kill the whole process tree (the
                 # worker process itself AND whatever codex child it spawned), then poll for
@@ -693,25 +764,41 @@ function Invoke-CcodexCancelCommand {
                 $workerPid = 0
                 if ([int]::TryParse($backendParts[0], [ref]$workerPid)) {
                     Stop-CcodexProcessTree -ProcessId $workerPid
-                    $killDeadline = (Get-Date).AddSeconds(10)
+                    $killDeadline = (Get-Date).AddSeconds($KillPollTimeoutSec)
                     while ((Get-Date) -lt $killDeadline -and (Test-CcodexWorkerAlive -BackendId $status.backend_id)) {
                         Start-Sleep -Milliseconds 200
                     }
                 }
+                # Stop-CcodexProcessTree is best-effort (it swallows taskkill launch/exit
+                # failures), so re-verify aliveness after the poll deadline before declaring
+                # the job cancelled. If the worker is STILL alive, writing `cancelled` now
+                # would race the live worker's own terminal status write
+                # (Invoke-CcodexJobExecution): that write could still land later and
+                # overwrite this cancellation right back to `done`/`failed`. Report the kill
+                # failure instead and leave status.json exactly as it was -- the job really
+                # is still running.
+                if (Test-CcodexWorkerAlive -BackendId $status.backend_id) {
+                    $killFailed = $true
+                }
             }
 
-            # Mark the job cancelled directly, preserving every existing field (append-only)
-            # and stamping cancelled_at. wrapper_exit_code is left exactly as it was (null
-            # for a job that never reached a terminal codex exit code).
-            $cancelledAt = (Get-Date).ToUniversalTime().ToString('o')
-            $updated = [ordered]@{}
-            foreach ($property in $status.PSObject.Properties) {
-                $updated[$property.Name] = $property.Value
+            if ($killFailed) {
+                $message = "ccodex: internal error: failed to terminate the worker process for job '$JobId' (backend_id=$($status.backend_id)); the job is still running.`n  job dir: $jobDir"
+                $result = [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+            } else {
+                # Mark the job cancelled directly, preserving every existing field (append-only)
+                # and stamping cancelled_at. wrapper_exit_code is left exactly as it was (null
+                # for a job that never reached a terminal codex exit code).
+                $cancelledAt = (Get-Date).ToUniversalTime().ToString('o')
+                $updated = [ordered]@{}
+                foreach ($property in $status.PSObject.Properties) {
+                    $updated[$property.Name] = $property.Value
+                }
+                $updated['status'] = 'cancelled'
+                $updated['cancelled_at'] = $cancelledAt
+                Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $updated
+                $result = [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
             }
-            $updated['status'] = 'cancelled'
-            $updated['cancelled_at'] = $cancelledAt
-            Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $updated
-            $result = [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$JobId cancelled"; Message = $null }
         }
     } finally {
         Unlock-CcodexJob -JobDir $jobDir
@@ -957,11 +1044,28 @@ function Invoke-CcodexDoctorProbe {
     $timeoutMs = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { [int]::MaxValue }
     if (-not $process.WaitForExit($timeoutMs)) {
         Stop-CcodexProcessTree -ProcessId $process.Id
-        try { $process.WaitForExit() } catch { }
+        # Stop-CcodexProcessTree is best-effort (it swallows taskkill failures); a
+        # parameterless WaitForExit() right after it would block forever if the kill did
+        # not actually land. Bound the second wait, and if the process is STILL alive after
+        # it, fall back to .NET's own Kill($true) (kills the whole tree directly, no
+        # external taskkill dependency) before waiting again -- so this probe always
+        # terminates instead of hanging `doctor` indefinitely.
+        $secondWaitMs = 5000
+        $exited = $false
+        try { $exited = $process.WaitForExit($secondWaitMs) } catch { $exited = $false }
+        if (-not $exited) {
+            try { $process.Kill($true) } catch { }
+            try { $exited = $process.WaitForExit($secondWaitMs) } catch { $exited = $false }
+        }
         $partialStdout = ''
         $partialStderr = ''
-        try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
-        try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+        if ($exited) {
+            # Only read the async output tasks once the process has definitely exited --
+            # otherwise GetResult() blocks until EOF, which a still-alive process will never
+            # produce. Abandon the reads (report empty/partial output) rather than risk that.
+            try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
+            try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+        }
         try { $process.StandardOutput.Close() } catch { }
         try { $process.StandardError.Close() } catch { }
         return [pscustomobject]@{ ExitCode = $null; Stdout = $partialStdout; Stderr = $partialStderr; TimedOut = $true }
