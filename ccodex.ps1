@@ -2068,7 +2068,7 @@ try {
             $exitCode = $doctorResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, diff, tail, debug, cleanup, doctor, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, submit, status, wait, read, cancel, diff, apply, tail, debug, cleanup, doctor, worker."
             $exitCode = 2
         }
     }

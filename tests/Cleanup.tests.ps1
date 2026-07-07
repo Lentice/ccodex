@@ -9,6 +9,7 @@
 . (Join-Path $PSScriptRoot '..\lib\JobStatus.ps1')
 . (Join-Path $PSScriptRoot '..\lib\UserConfig.ps1')
 . (Join-Path $PSScriptRoot '..\lib\Cleanup.ps1')
+. (Join-Path $PSScriptRoot '..\lib\Worktree.ps1')
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ccodexPs = Join-Path $repoRoot 'ccodex.ps1'
@@ -52,14 +53,18 @@ function New-CleanupJob {
         [Nullable[int]]$CodexExitCode,
         [Nullable[int]]$WrapperExitCode,
         [switch]$NoIndex,
-        [hashtable]$Files
+        [hashtable]$Files,
+        [string]$MainRepo,
+        [string]$WorktreeRepo,
+        [string]$BaseCommit
     )
     $jobDir = Get-CcodexJobDir -RepoKey $RepoKey -JobId $JobId -Root $StateRoot
     New-Item -ItemType Directory -Path $jobDir -Force | Out-Null
     if (-not $CreatedAt) { $CreatedAt = (Get-Date).ToUniversalTime().ToString('o') }
     $statusObj = New-CcodexStatusObject -JobId $JobId -Status $Status -Mode 'review' -Access 'read-only' `
         -Repo 'C:\repo' -CreatedAt $CreatedAt -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode `
-        -BackendId $BackendId -FinishedAt $FinishedAt -CodexThreadId $CodexThreadId
+        -BackendId $BackendId -FinishedAt $FinishedAt -CodexThreadId $CodexThreadId `
+        -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
     if (-not $NoIndex) {
         $idxPath = Get-CcodexIndexPath -JobId $JobId -Root $StateRoot
@@ -75,6 +80,17 @@ function New-CleanupJob {
 }
 
 function Get-Ago { param([double]$Days) return (Get-Date).ToUniversalTime().AddDays(-$Days).ToString('o') }
+
+function New-CleanupGitRepo {
+    $script:StateRootSeq++
+    $repo = Join-Path $tempRoot "gitrepo-$($script:StateRootSeq)"
+    New-Item -ItemType Directory -Path $repo -Force | Out-Null
+    & git -C $repo init -q 2>&1 | Out-Null
+    Set-Content -LiteralPath (Join-Path $repo 'seed.txt') -Value 'seed' -NoNewline
+    & git -C $repo -c user.name=seed -c user.email=seed@local add -A 2>&1 | Out-Null
+    & git -C $repo -c user.name=seed -c user.email=seed@local commit -q -m seed 2>&1 | Out-Null
+    return $repo
+}
 
 $repoKeyA = 'aaaaaaaaaaaa'
 $repoKeyB = 'bbbbbbbbbbbb'
@@ -310,6 +326,52 @@ $youngNd = New-CleanupJob -StateRoot $s16 -RepoKey $repoKeyA -JobId 'nd-young' -
 & pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 14d --state-root $s16 | Out-Null
 Assert-True (-not (Test-Path -LiteralPath $oldNd)) 'dispatcher --older-than 14d deletes a 40-day-old job'
 Assert-True (Test-Path -LiteralPath $youngNd) 'dispatcher --older-than 14d keeps a 1-day-old job'
+
+# --- (17) old done worktree job: worktree removed alongside job dir/index ---
+
+Write-Host "Invoke-CcodexCleanup: an old done worktree job has its worktree removed alongside its job dir and index"
+$s17 = New-CleanupStateRoot
+$app17 = New-CleanupAppData
+$mainRepo17 = New-CleanupGitRepo
+$wt17 = New-CcodexJobWorktree -MainRepo $mainRepo17 -JobId 'wtjob' -StateRoot $s17
+$wtJobDir = New-CleanupJob -StateRoot $s17 -RepoKey $repoKeyA -JobId 'wtjob' -Status 'done' -CreatedAt (Get-Ago 41) -FinishedAt (Get-Ago 40) `
+    -CodexExitCode 0 -WrapperExitCode 0 -MainRepo $mainRepo17 -WorktreeRepo $wt17.WorktreePath -BaseCommit $wt17.BaseCommit
+$wtJobIdx = Get-CcodexIndexPath -JobId 'wtjob' -Root $s17
+Assert-True (Test-Path -LiteralPath $wt17.WorktreePath -PathType Container) 'worktree exists before cleanup'
+$r17 = Invoke-CcodexCleanup -OlderThanDays 14 -DryRun $false -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s17 -AppDataRoot $app17
+Assert-True ($r17.Deleted -contains 'wtjob') 'old done worktree job reported in Deleted'
+Assert-True (-not (Test-Path -LiteralPath $wtJobDir)) 'old done worktree job dir removed'
+Assert-True (-not (Test-Path -LiteralPath $wtJobIdx)) 'old done worktree job index entry removed'
+Assert-True (-not (Test-Path -LiteralPath $wt17.WorktreePath)) 'worktree directory removed from disk'
+$wtListAfter17 = @(& git -C $mainRepo17 worktree list)
+$wtStillListed17 = @($wtListAfter17 | Where-Object { $_ -like "*$($wt17.WorktreePath)*" })
+Assert-Equal $wtStillListed17.Count 0 'git worktree list in the main repo no longer shows the removed worktree'
+
+# --- (18) dangling worktree (job dir gone) is swept ---
+
+Write-Host "Invoke-CcodexCleanup: a dangling worktree with no corresponding job dir is swept"
+$s18 = New-CleanupStateRoot
+$app18 = New-CleanupAppData
+$mainRepo18 = New-CleanupGitRepo
+$wt18 = New-CcodexJobWorktree -MainRepo $mainRepo18 -JobId 'ghostwt' -StateRoot $s18
+Assert-True (Test-Path -LiteralPath $wt18.WorktreePath -PathType Container) 'dangling worktree exists before cleanup'
+$r18 = Invoke-CcodexCleanup -OlderThanDays 14 -DryRun $false -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s18 -AppDataRoot $app18
+Assert-True (-not (Test-Path -LiteralPath $wt18.WorktreePath)) 'dangling worktree directory removed'
+Assert-Equal $r18.WorktreesSweptCount 1 'dangling worktree counted as swept'
+
+# --- (19) dry-run lists a worktree job's worktree as a delete candidate without deleting it ---
+
+Write-Host "Invoke-CcodexCleanup -DryRun: a worktree job's worktree is listed alongside its job, and nothing is deleted"
+$s19 = New-CleanupStateRoot
+$app19 = New-CleanupAppData
+$mainRepo19 = New-CleanupGitRepo
+$wt19 = New-CcodexJobWorktree -MainRepo $mainRepo19 -JobId 'wtjobdry' -StateRoot $s19
+$wtJobDir19 = New-CleanupJob -StateRoot $s19 -RepoKey $repoKeyA -JobId 'wtjobdry' -Status 'done' -CreatedAt (Get-Ago 41) -FinishedAt (Get-Ago 40) `
+    -CodexExitCode 0 -WrapperExitCode 0 -MainRepo $mainRepo19 -WorktreeRepo $wt19.WorktreePath -BaseCommit $wt19.BaseCommit
+$r19 = Invoke-CcodexCleanup -OlderThanDays 14 -DryRun $true -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s19 -AppDataRoot $app19
+Assert-True (Test-Path -LiteralPath $wtJobDir19) 'dry-run does not delete the worktree job dir'
+Assert-True (Test-Path -LiteralPath $wt19.WorktreePath -PathType Container) 'dry-run does not delete the worktree directory'
+Assert-True ($r19.Stdout -match [regex]::Escape("wtjobdry worktree $($wt19.WorktreePath) -> delete")) 'dry-run lists the worktree delete candidate line'
 
 # --- cleanup temp ---
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

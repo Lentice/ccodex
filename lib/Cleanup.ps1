@@ -89,6 +89,7 @@ function Invoke-CcodexCleanup {
     $skippedCount = 0
     $failedCount = 0
     $danglingCount = 0
+    $worktreesSweptCount = 0
     $reclaimedBytes = 0L
     $lines = @()
 
@@ -101,13 +102,24 @@ function Invoke-CcodexCleanup {
     # ----- helpers scoped to this invocation (close over the accumulators) -----
 
     function Remove-CleanupJob {
-        param([string]$JobId, [string]$JobDir, [string]$StatusText, [double]$AgeDays)
+        # Deletes a terminal job's index entry and job dir. When the job carries a
+        # recorded worktree (main_repo/worktree_repo), the worktree is removed first via
+        # Remove-CcodexJobWorktree (best-effort; never blocks the job dir/index delete).
+        param([string]$JobId, [string]$JobDir, [string]$StatusText, [double]$AgeDays, [string]$MainRepo, [string]$WorktreePath)
         $size = Get-CcodexDirSizeBytes -Path $JobDir
         if ($DryRun) {
             $script:__ccxLines += ('{0} {1} age={2}d size={3}KB -> delete' -f $JobId, $StatusText, [int][math]::Floor($AgeDays), [int][math]::Round($size / 1024))
+            if ($WorktreePath) {
+                $script:__ccxLines += "$JobId worktree $WorktreePath -> delete"
+                $script:__ccxWtSwept++
+            }
             $script:__ccxDeleted += $JobId
             $script:__ccxReclaimed += $size
             return
+        }
+        if ($WorktreePath) {
+            try { Remove-CcodexJobWorktree -MainRepo $MainRepo -WorktreePath $WorktreePath | Out-Null } catch { }
+            $script:__ccxWtSwept++
         }
         try {
             $idxPath = Get-CcodexIndexPath -JobId $JobId -Root $StateRoot
@@ -163,7 +175,8 @@ function Invoke-CcodexCleanup {
         $ageDays = ($nowUtc - $endUtc).TotalDays
 
         if ($ageDays -gt $jobsDays) {
-            Remove-CleanupJob -JobId $JobId -JobDir $JobDir -StatusText $statusText -AgeDays $ageDays
+            Remove-CleanupJob -JobId $JobId -JobDir $JobDir -StatusText $statusText -AgeDays $ageDays `
+                -MainRepo $Status.main_repo -WorktreePath $Status.worktree_repo
             return
         }
         # retained terminal job
@@ -180,6 +193,7 @@ function Invoke-CcodexCleanup {
     $script:__ccxScrubbed = $scrubbedCount
     $script:__ccxSkipped = $skippedCount
     $script:__ccxFailed = $failedCount
+    $script:__ccxWtSwept = $worktreesSweptCount
 
     # ----- walk the jobs tree -----
     if (Test-Path -LiteralPath $jobsRoot -PathType Container) {
@@ -269,6 +283,39 @@ function Invoke-CcodexCleanup {
         }
     }
 
+    # ----- dangling worktrees (no corresponding job dir under any repo) -----
+    # Worktrees live under a single global <root>\worktrees\<JobId> dir, not per-repo, so
+    # this sweep always considers the whole jobs tree regardless of -RepoFilter — a job
+    # dir under some other repo key still counts as "not dangling".
+    $worktreesRoot = Join-Path $localRoot 'worktrees'
+    if (Test-Path -LiteralPath $worktreesRoot -PathType Container) {
+        $knownJobIds = @{}
+        if (Test-Path -LiteralPath $jobsRoot -PathType Container) {
+            foreach ($repoDir in @(Get-ChildItem -LiteralPath $jobsRoot -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($jd in @(Get-ChildItem -LiteralPath $repoDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    $knownJobIds[$jd.Name] = $true
+                }
+            }
+        }
+        foreach ($wtDir in @(Get-ChildItem -LiteralPath $worktreesRoot -Directory -ErrorAction SilentlyContinue)) {
+            $wtJobId = $wtDir.Name
+            if ($knownJobIds.ContainsKey($wtJobId)) { continue }
+
+            if ($DryRun) {
+                $script:__ccxLines += "$wtJobId dangling-worktree -> remove"
+                $script:__ccxWtSwept++
+                continue
+            }
+            try {
+                Remove-Item -LiteralPath $wtDir.FullName -Recurse -Force -ErrorAction Stop
+                $script:__ccxWtSwept++
+            } catch {
+                $script:__ccxFailed++
+                $script:__ccxLines += "$wtJobId dangling-worktree -> remove FAILED: $($_.Exception.Message)"
+            }
+        }
+    }
+
     # ----- fold the script-scoped accumulators back -----
     $lines = $script:__ccxLines
     $deleted = @($script:__ccxDeleted)
@@ -276,20 +323,22 @@ function Invoke-CcodexCleanup {
     $scrubbedCount = $script:__ccxScrubbed
     $skippedCount = $script:__ccxSkipped
     $failedCount = $script:__ccxFailed
+    $worktreesSweptCount = $script:__ccxWtSwept
 
     $reclaimedKb = [int][math]::Round($reclaimedBytes / 1024)
-    $summary = "cleanup: deleted=$($deleted.Count) reclaimed_kb=$reclaimedKb dangling=$danglingCount scrubbed=$scrubbedCount skipped=$skippedCount failed=$failedCount"
+    $summary = "cleanup: deleted=$($deleted.Count) reclaimed_kb=$reclaimedKb dangling=$danglingCount scrubbed=$scrubbedCount skipped=$skippedCount failed=$failedCount worktrees_swept=$worktreesSweptCount"
     if ($DryRun) { $summary += ' (dry-run)' }
     $lines += $summary
 
     $exit = if ($failedCount -gt 0) { 12 } else { 0 }
 
     return [pscustomobject]@{
-        WrapperExitCode = $exit
-        Stdout          = ($lines -join "`n")
-        Deleted         = @($deleted)
-        ScrubbedCount   = $scrubbedCount
-        SkippedCount    = $skippedCount
-        FailedCount     = $failedCount
+        WrapperExitCode      = $exit
+        Stdout               = ($lines -join "`n")
+        Deleted              = @($deleted)
+        ScrubbedCount        = $scrubbedCount
+        SkippedCount         = $skippedCount
+        FailedCount          = $failedCount
+        WorktreesSweptCount  = $worktreesSweptCount
     }
 }
