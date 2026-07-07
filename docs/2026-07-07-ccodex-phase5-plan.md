@@ -137,7 +137,9 @@ Phase 2b landed it); extend `tests/StatusWaitRead.tests.ps1`.
 ### Task 4: Guidance, docs, live smoke
 
 **Files:** modify `README.md`, `templates/claude-command-ccodex.md`,
-`templates/claude-rule-ccodex-delegation.md`; re-run `install.ps1`.
+`templates/claude-rule-ccodex-delegation.md`, `templates/claude-skill-ccodex.md` (verify the
+resume claims match implemented behavior; fix only inaccuracies — the skill is
+availability-gated); re-run `install.ps1`.
 
 - [ ] Step 1: `/ccodex` command + delegation rule gain the follow-up pattern: "if Codex's answer
   is a clarifying question, or a finding needs pushback/refinement, answer with

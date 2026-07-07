@@ -37,6 +37,17 @@ try {
         Assert-True $commandBytesMatch "claude command byte-matches template"
     }
 
+    $skillDest = Join-Path $claudeDir 'skills\ccodex\SKILL.md'
+    $skillSource = Join-Path $repoRoot 'templates\claude-skill-ccodex.md'
+    Assert-True (Test-Path -LiteralPath $skillSource -PathType Leaf) "skill template exists at $skillSource"
+    Assert-True (Test-Path -LiteralPath $skillDest -PathType Leaf) "claude skill copied to $skillDest"
+    if ((Test-Path -LiteralPath $skillDest -PathType Leaf) -and (Test-Path -LiteralPath $skillSource -PathType Leaf)) {
+        $skillBytesMatch = [System.IO.File]::ReadAllBytes($skillDest) -join ',' -eq ([System.IO.File]::ReadAllBytes($skillSource) -join ',')
+        Assert-True $skillBytesMatch "claude skill byte-matches template"
+        $skillHead = [System.IO.File]::ReadAllLines($skillDest)[0]
+        Assert-Equal '---' $skillHead "SKILL.md starts with YAML frontmatter"
+    }
+
     $workerPromptDest = Join-Path $templatesDir 'worker-prompt.md'
     $workerPromptSource = Join-Path $repoRoot 'templates\worker-prompt.md'
     Assert-True (Test-Path -LiteralPath $workerPromptDest -PathType Leaf) "worker prompt template copied to $workerPromptDest"

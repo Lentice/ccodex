@@ -201,8 +201,9 @@ tests/ImplementE2E.tests.ps1
 ### Task 7: E2E, docs, live smoke
 
 **Files:** create `tests/ImplementE2E.tests.ps1`; modify `README.md`,
-`templates/claude-command-ccodex.md`, `templates/claude-rule-ccodex-delegation.md`; re-run
-`install.ps1`.
+`templates/claude-command-ccodex.md`, `templates/claude-rule-ccodex-delegation.md`,
+`templates/claude-skill-ccodex.md` (verify the worktree/diff/apply claims match implemented
+behavior; fix only inaccuracies — the skill is availability-gated); re-run `install.ps1`.
 
 - [ ] Step 1: `tests/ImplementE2E.tests.ps1` — shim-level (RealInvocation-style staging):
   piped implement task → `submit` → `wait` (fixture writes a file via `-C` parsing) →

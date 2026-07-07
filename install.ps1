@@ -37,11 +37,17 @@ New-Item -ItemType Directory -Path $claudeRulesDir -Force | Out-Null
 $claudeRuleDest = Join-Path $claudeRulesDir 'ccodex-delegation.md'
 Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-rule-ccodex-delegation.md') -Destination $claudeRuleDest -Force
 
+$claudeSkillDir = Join-Path $ClaudeDir 'skills\ccodex'
+New-Item -ItemType Directory -Path $claudeSkillDir -Force | Out-Null
+$claudeSkillDest = Join-Path $claudeSkillDir 'SKILL.md'
+Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-skill-ccodex.md') -Destination $claudeSkillDest -Force
+
 Write-Host "ccodex installed to $destScriptDir"
 Write-Host "shim: $shimPath"
 Write-Host "default template: $templateDest"
 Write-Host "claude command: $claudeCommandDest"
 Write-Host "claude delegation rule: $claudeRuleDest"
+Write-Host "claude skill: $claudeSkillDest"
 if (($env:PATH -split ';') -notcontains $InstallDir) {
     Write-Host "WARNING: $InstallDir is not on PATH. Add it to your user PATH to use 'ccodex' from any directory." -ForegroundColor Yellow
 }

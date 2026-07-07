@@ -327,8 +327,12 @@ D:\Documents\GitHub\ccodex\install.ps1
 This copies `ccodex.ps1` and `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes a `ccodex.cmd`
 shim there, installs the default worker-prompt template to
 `%APPDATA%\ccodex\templates\worker-prompt.md`, installs the `/ccodex` Claude command to
-`%USERPROFILE%\.claude\commands\ccodex.md`, and installs the delegation policy rule to
-`%USERPROFILE%\.claude\rules\ccodex-delegation.md` (overwriting any previous copy of each). Add
+`%USERPROFILE%\.claude\commands\ccodex.md`, installs the delegation policy rule to
+`%USERPROFILE%\.claude\rules\ccodex-delegation.md`, and installs the `ccodex` agent skill to
+`%USERPROFILE%\.claude\skills\ccodex\SKILL.md` (overwriting any previous copy of each). The
+skill teaches any Claude agent on a fresh machine how and when to use ccodex; it documents all
+phases and instructs agents to discover which commands are actually installed via `ccodex help`,
+so one skill file serves every phase. Add
 `%USERPROFILE%\.local\bin` to your user `PATH` if it isn't already there (the script warns if it's
 missing) so `ccodex` is callable from any directory. Pass `-InstallDir`/`-TemplatesDir`/`-ClaudeDir`
 to `install.ps1` to override the script/template/Claude-config locations (the Claude command and

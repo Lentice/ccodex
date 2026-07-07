@@ -282,7 +282,9 @@ rewrite branch); extend `tests/JobStatus.tests.ps1`.
 ### Task 9: Phase docs, README, /ccodex + rule updates, live smokes
 
 **Files:** modify `README.md`, `templates/claude-command-ccodex.md`,
-`templates/claude-rule-ccodex-delegation.md`; re-run `pwsh -NoProfile -File install.ps1`.
+`templates/claude-rule-ccodex-delegation.md`, `templates/claude-skill-ccodex.md` (verify the
+Phase 2b command claims match implemented behavior; the skill is availability-gated so wording
+usually needs no change — fix only inaccuracies); re-run `pwsh -NoProfile -File install.ps1`.
 
 - [ ] Step 1: README — per CLAUDE.md's mandate: move Phase 2b to done; document
   `cleanup`/`cancel`/`tail`/`debug`/`doctor` with examples; exit-code table gains 21/22 rows
