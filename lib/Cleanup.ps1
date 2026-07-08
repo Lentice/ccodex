@@ -118,8 +118,18 @@ function Invoke-CcodexCleanup {
             return
         }
         if ($WorktreePath) {
-            try { Remove-CcodexJobWorktree -MainRepo $MainRepo -WorktreePath $WorktreePath | Out-Null } catch { }
-            $script:__ccxWtSwept++
+            # Count worktrees_swept only when the removal actually succeeded (function returned
+            # $true) or the path is gone regardless. A stubborn failure (returned $false with the
+            # dir still present) must NOT inflate the swept count — record it as a failure so the
+            # summary doesn't over-report.
+            $wtRemoved = $false
+            try { $wtRemoved = [bool](Remove-CcodexJobWorktree -MainRepo $MainRepo -WorktreePath $WorktreePath) } catch { $wtRemoved = $false }
+            if ($wtRemoved -or -not (Test-Path -LiteralPath $WorktreePath)) {
+                $script:__ccxWtSwept++
+            } else {
+                $script:__ccxFailed++
+                $script:__ccxLines += "$JobId worktree $WorktreePath -> remove FAILED"
+            }
         }
         try {
             $idxPath = Get-CcodexIndexPath -JobId $JobId -Root $StateRoot

@@ -373,6 +373,33 @@ Assert-True (Test-Path -LiteralPath $wtJobDir19) 'dry-run does not delete the wo
 Assert-True (Test-Path -LiteralPath $wt19.WorktreePath -PathType Container) 'dry-run does not delete the worktree directory'
 Assert-True ($r19.Stdout -match [regex]::Escape("wtjobdry worktree $($wt19.WorktreePath) -> delete")) 'dry-run lists the worktree delete candidate line'
 
+# --- (20) worktree removal failure is NOT counted as swept (over-count guard) ---
+
+Write-Host "Invoke-CcodexCleanup: a worktree whose removal fails is excluded from worktrees_swept and counted as a failure"
+$s20 = New-CleanupStateRoot
+$app20 = New-CleanupAppData
+# A worktree dir OUTSIDE the state root's worktrees/ tree, so the dangling-worktree sweep (which
+# scans <root>\worktrees) never finds it — the ONLY chance to count it is Remove-CleanupJob, the
+# path this fix guards.
+$wt20Path = Join-Path $tempRoot "standalone-wt-$($script:StateRootSeq)"
+New-Item -ItemType Directory -Path $wt20Path -Force | Out-Null
+$wtFailJobDir = New-CleanupJob -StateRoot $s20 -RepoKey $repoKeyA -JobId 'wtfail' -Status 'done' -CreatedAt (Get-Ago 41) -FinishedAt (Get-Ago 40) `
+    -CodexExitCode 0 -WrapperExitCode 0 -MainRepo 'C:\ccodex-nonexistent-main' -WorktreeRepo $wt20Path -BaseCommit 'deadbeef'
+# Stub the teardown to report failure WITHOUT deleting, so the path remains and the swept count
+# must exclude it. Save/restore so later use of the real function elsewhere is unaffected.
+$origRemoveWorktree = ${function:Remove-CcodexJobWorktree}
+${function:Remove-CcodexJobWorktree} = { param($MainRepo, $WorktreePath) return $false }
+try {
+    $r20 = Invoke-CcodexCleanup -OlderThanDays 14 -DryRun $false -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s20 -AppDataRoot $app20
+} finally {
+    ${function:Remove-CcodexJobWorktree} = $origRemoveWorktree
+}
+Assert-Equal $r20.WorktreesSweptCount 0 'a failed worktree removal is excluded from worktrees_swept'
+Assert-True ($r20.FailedCount -ge 1) 'a failed worktree removal is counted as a failure'
+Assert-Equal $r20.WrapperExitCode 12 'a failed worktree removal makes cleanup exit 12'
+Assert-True ($r20.Stdout -match 'worktrees_swept=0') 'summary reports worktrees_swept=0 (not over-counted)'
+Assert-True (Test-Path -LiteralPath $wt20Path) 'the stubbed-failure worktree dir is still present (removal really did fail)'
+
 # --- cleanup temp ---
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 
