@@ -32,9 +32,16 @@ as a deferred task:
   anything a user can now do or must now do differently.
 - **`docs/2026-07-08-ccodex-reference.md`** (developer-facing): update the command/flag
   reference and contract tables for the same change.
-- Re-run `install.ps1` after user-facing changes and verify the installed copy under
-  `%USERPROFILE%\.local\bin\ccodex\` matches the repo (templates and the Claude skill install
-  from this repo too).
+- **`templates/`** (the installed Claude integration): when a change adds or alters a command,
+  flag, or behavior Claude should know about, update the matching template(s) —
+  `claude-skill-ccodex.md`, `claude-command-ccodex.md`, `claude-rule-ccodex-delegation.md`,
+  `worker-prompt.md` — in the same piece of work. Stale templates mean every future Claude
+  session is taught the old behavior.
+- Re-run `install.ps1` after user-facing or template changes, then **verify the installed copies
+  byte-match the repo** (e.g. compare `Get-FileHash` per file) — at minimum the CLI under
+  `%USERPROFILE%\.local\bin\ccodex\` and the installed skill at
+  `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`, which MUST carry the latest template content
+  (plus the installed command/rule when their templates changed).
 
 ## Testing
 
