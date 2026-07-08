@@ -53,7 +53,8 @@ Read in this order for a full picture; consult individually as needed.
 | `docs/2026-07-07-ccodex-phase2b-plan.md` | Executed (all 9 tasks, reviews clean). Historical record. |
 | `docs/2026-07-07-ccodex-phase4-plan.md` | Executed (all 7 tasks; T3–T7 reviews deferred, T7's E2E + live smoke deferred — see § 4). |
 | `docs/2026-07-07-ccodex-phase5-plan.md` | Executed (all 4 tasks; reviews deferred, T4's live smoke deferred — see § 4). |
-| `README.md` | User-facing usage, quick reference, exit-code/failure-class cheat sheet, delegation config. Must be updated as part of each phase (CLAUDE.md rule). |
+| `README.md` | User-facing readme: why ccodex exists, key features, installation, concise usage flows, and a short cheat sheet. Must be updated as part of each phase (CLAUDE.md rule). |
+| `docs/2026-07-08-ccodex-reference.md` | Developer-facing technical reference: full per-command/flag reference, exit-code and failure-class contracts, `status.json` field notes, repository/module layout, testing, and roadmap/status history. |
 | `CLAUDE.md` | Repo conventions: what this repo is, testing policy (no Pester), encoding, README-per-phase rule, git/commit policy. |
 | `templates/worker-prompt.md` | The worker prompt contract prepended to `run`/`submit` prompts (installed to `%APPDATA%\ccodex\templates\`). |
 | `templates/claude-command-ccodex.md` | Source of the installed `/ccodex` slash command. |
