@@ -204,6 +204,14 @@ Assert-True ($script:CcodexLastError -like '*--effort*') 'the wrong-case error n
 Assert-Throws { ConvertTo-CcodexEffort -FlagName '--effort' -ValueText 'turbo' } 'an unknown value is rejected'
 Assert-True ($script:CcodexLastError -like '*--effort*') 'the unknown-value error names the flag'
 
+Write-Host "Get-CcodexRequiredArgValue: value returned when present; null when flag absent; missing/flag-shaped value throws naming the flag"
+Assert-Equal (Get-CcodexRequiredArgValue -ArgumentList @('--model', 'gpt-5-codex') -FlagName '--model') 'gpt-5-codex' 'a present flag with a value returns the value'
+Assert-True ($null -eq (Get-CcodexRequiredArgValue -ArgumentList @('--other', 'x') -FlagName '--model')) 'an absent flag returns null (not an error)'
+Assert-Throws { Get-CcodexRequiredArgValue -ArgumentList @('--repo', 'D:\X', '--model') -FlagName '--model' } 'a trailing flag with no value throws'
+Assert-True ($script:CcodexLastError -like '*--model*') 'the missing-value error names the flag'
+Assert-Throws { Get-CcodexRequiredArgValue -ArgumentList @('--model', '--effort', 'high') -FlagName '--model' } 'a value that is itself another flag throws instead of being consumed'
+Assert-True ($script:CcodexLastError -like '*--model*') 'the flag-shaped-value error names the flag'
+
 Write-Host "ConvertTo-CcodexHardTimeoutSec: 0 and positive integers parse; negative/non-numeric throw naming the flag"
 Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '0') 0 '0 (never) parses as a valid value'
 Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '120') 120 'a positive integer parses through unchanged'
@@ -238,6 +246,14 @@ try {
     $badEffortRunOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --effort turbo
     Assert-Equal $LASTEXITCODE 2 'run --effort turbo exits 2'
     Assert-True ((($badEffortRunOut -join "`n")) -like '*--effort*') 'usage error names the --effort flag (invalid value)'
+
+    $noValueModelOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --model
+    Assert-Equal $LASTEXITCODE 2 'run with a trailing valueless --model exits 2 (not silently ignored)'
+    Assert-True ((($noValueModelOut -join "`n")) -like '*--model*') 'usage error names the --model flag (missing value)'
+
+    $flagValueModelOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --model --effort high
+    Assert-Equal $LASTEXITCODE 2 'run --model --effort high exits 2 (never forwards -m --effort to codex)'
+    Assert-True ((($flagValueModelOut -join "`n")) -like '*--model*') 'usage error names the --model flag (flag-shaped value)'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppDataForHardTimeout
     $env:APPDATA = $savedAppDataForHardTimeout

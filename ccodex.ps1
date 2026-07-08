@@ -1841,6 +1841,27 @@ function ConvertTo-CcodexHardTimeoutSec {
     return $parsed
 }
 
+function Get-CcodexRequiredArgValue {
+    # Get-CcodexArgValue variant for public flags whose silent misparse would be worse than a
+    # usage error: with plain Get-CcodexArgValue a trailing `--model` is silently ignored (it
+    # returns $null) and `--model --effort high` consumes `--effort` as the model, forwarding
+    # `-m --effort` to Codex. Here a PRESENT flag must be followed by a real value — end of
+    # line, or a next token that is itself a `--`-shaped flag, throws a usage error naming the
+    # flag (callers map it to exit 2). An absent flag still returns $null, exactly like
+    # Get-CcodexArgValue. Legitimate values never start with `--` for the flags routed here.
+    param([object[]]$ArgumentList, [Parameter(Mandatory)][string]$FlagName)
+    if (-not $ArgumentList) { return $null }
+    for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
+        if ($ArgumentList[$i] -eq $FlagName) {
+            if (($i + 1) -ge $ArgumentList.Count -or ([string]$ArgumentList[$i + 1]).StartsWith('--')) {
+                throw "ccodex: $FlagName requires a value."
+            }
+            return $ArgumentList[$i + 1]
+        }
+    }
+    return $null
+}
+
 function ConvertTo-CcodexEffort {
     # --effort passes through to Codex as `-c model_reasoning_effort=<value>`, so only the
     # values Codex itself accepts are allowed, case-sensitively (Codex's TOML enum match is
@@ -1884,8 +1905,14 @@ try {
             # See the header comment for why. The PipelineExpected/PipelineObjects
             # parameters remain on Invoke-CcodexRun for direct/test callers.
             $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            $runModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
-            $runEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
+            try {
+                $runModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
+                $runEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
             $runParams = @{
                 Mode             = $Mode
                 Access           = $Access
@@ -1932,8 +1959,16 @@ try {
             $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
             $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            $submitModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
-            $submitEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
+            $submitModel = $null
+            $submitEffortText = $null
+            try {
+                $submitModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
+                $submitEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
 
             $submitParams = @{
                 Mode             = $Mode
@@ -1987,8 +2022,16 @@ try {
             $resumeStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $resumeCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $resumeHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            $resumeModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
-            $resumeEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
+            $resumeModel = $null
+            $resumeEffortText = $null
+            try {
+                $resumeModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
+                $resumeEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
             if (-not $resumeParentJobId) {
                 Write-Host "ccodex: resume requires a job id."
                 $exitCode = 2
@@ -2217,8 +2260,16 @@ try {
             $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
             $reviewStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $reviewCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-            $reviewModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
-            $reviewEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
+            $reviewModel = $null
+            $reviewEffortText = $null
+            try {
+                $reviewModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
+                $reviewEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
 
             # Resolve the repo up front: the self-diff prompt names it and the embed form
             # runs git from it. A bad --repo is a usage error (exit 2), same as `run`.

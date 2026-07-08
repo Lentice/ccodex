@@ -36,6 +36,9 @@ Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -De
 # commands/ccodex/<name>.md, which Claude Code exposes as /ccodex:<name>.
 $claudeNamespacedDir = Join-Path $claudeCommandsDir 'ccodex'
 New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
+# Mirror the source set exactly: a template renamed or deleted in a later version must not
+# leave a ghost /ccodex:<name> command behind from a previous install.
+Remove-Item -Path (Join-Path $claudeNamespacedDir '*.md') -Force -ErrorAction SilentlyContinue
 Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-commands\*.md') -Destination $claudeNamespacedDir -Force
 
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'
