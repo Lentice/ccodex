@@ -1546,6 +1546,8 @@ function Invoke-CcodexDoctorProbe {
     $psi.StandardOutputEncoding = $utf8NoBom
     $psi.StandardErrorEncoding = $utf8NoBom
     $psi.UseShellExecute = $false
+    # Same no-console-window rule as Invoke-CcodexCodexProcess: never flash a window.
+    $psi.CreateNoWindow = $true
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $psi

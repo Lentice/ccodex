@@ -145,6 +145,9 @@ function Invoke-CcodexCodexProcess {
     $psi.StandardOutputEncoding = $utf8NoBom
     $psi.StandardErrorEncoding = $utf8NoBom
     $psi.UseShellExecute = $false
+    # Never allocate a console window for the codex child: when the parent has no visible
+    # console (hidden detached worker) a console app would otherwise pop one up.
+    $psi.CreateNoWindow = $true
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $psi

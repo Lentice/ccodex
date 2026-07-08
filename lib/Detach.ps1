@@ -66,9 +66,15 @@ function Start-CcodexDetachedWorker {
     if ($Mechanism -eq 'cim') {
         $commandLine = "pwsh $argumentLine"
 
+        # ShowWindow = 0 (SW_HIDE): without an explicit Win32_ProcessStartup the created
+        # console worker gets a visible console window that flashes up at the user. The
+        # startup instance is ClientOnly — it is marshalled as the method's startup info,
+        # never persisted to WMI.
+        $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
         $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
-            CommandLine      = $commandLine
-            CurrentDirectory = $WorkingDirectory
+            CommandLine               = $commandLine
+            CurrentDirectory          = $WorkingDirectory
+            ProcessStartupInformation = $startup
         }
         if ($result.ReturnValue -ne 0) {
             throw "ccodex: native backend failed to launch the worker (Win32_Process.Create returned $($result.ReturnValue))."
