@@ -89,7 +89,11 @@ function Complete-CcodexInternalFailure {
         [string]$WorktreeFinalizeError = $null,
         # Phase 5 resume lineage: carried onto the terminal failure status so a resumed job's
         # parentage survives even the internal-failure path. Null/absent for non-resume jobs.
-        [string]$ParentJobId = $null
+        [string]$ParentJobId = $null,
+        # Phase 5 resume: the parent's thread id, used as the codex_thread_id fallback when this
+        # job's own events log carries no thread.started event (a resume continues the SAME thread,
+        # so the parent's id is correct). Null for non-resume jobs (no fallback; unchanged).
+        [string]$FallbackCodexThreadId = $null
     )
     $completedAt = (Get-Date).ToString('o')
     $resultPresent = $false
@@ -101,6 +105,7 @@ function Complete-CcodexInternalFailure {
 
     $failureReason = Get-CcodexFailureReason -CodexExitCode $null -StderrPath $StderrPath -EventsPath $EventsPath
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $EventsPath
+    if ([string]::IsNullOrEmpty($codexThreadId) -and -not [string]::IsNullOrEmpty($FallbackCodexThreadId)) { $codexThreadId = $FallbackCodexThreadId }
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
 
@@ -295,7 +300,14 @@ function Invoke-CcodexJobExecution {
         [string[]]$CodexArgs = $null,
         # Phase 5 (resume): stamped onto every status.json this core writes (running/terminal/
         # timeout) so a resumed job's lineage survives all transitions. Null for non-resume jobs.
-        [string]$ParentJobId = $null
+        [string]$ParentJobId = $null,
+        # Phase 5 (resume): the parent's Codex thread id. A resume continues the SAME thread, but
+        # the resumed invocation may emit no thread.started event of its own — in which case
+        # Get-CcodexCodexThreadId returns null and the child would end with a blank codex_thread_id,
+        # breaking `ccodex resume <child>`. Used as the fallback for EVERY status write that stamps
+        # codex_thread_id (created/running/terminal/timeout/internal-failure) whenever the
+        # event-derived id is empty. Null for non-resume jobs => no fallback, behavior unchanged.
+        [string]$FallbackCodexThreadId = $null
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -310,7 +322,7 @@ function Invoke-CcodexJobExecution {
         CreatedAt = $CreatedAt; Backend = $Backend; BackendId = $BackendId; StartedAt = $StartedAt
         ResultPath = $resultPath; EventsPath = $eventsPath; StderrPath = $stderrPath
         MainRepo = $MainRepo; WorktreeRepo = $WorktreeRepo; BaseCommit = $BaseCommit
-        ParentJobId = $ParentJobId
+        ParentJobId = $ParentJobId; FallbackCodexThreadId = $FallbackCodexThreadId
     }
 
     # For a worktree job Codex runs INSIDE the worktree (`-C <worktree>`); the main repo is
@@ -330,7 +342,7 @@ function Invoke-CcodexJobExecution {
     if (-not $SkipRunningWrite) {
         $runningWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
             -StatusPath (Join-Path $JobDir 'status.json') `
-            -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -ParentJobId $ParentJobId)
+            -StatusObject (New-CcodexStatusObject -JobId $jobId -Status 'running' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -CodexThreadId $FallbackCodexThreadId -ParentJobId $ParentJobId)
         if (-not $runningWrite.LockAcquired) {
             return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the running status'
         }
@@ -376,6 +388,7 @@ function Invoke-CcodexJobExecution {
         Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $timeoutComplete
 
         $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
+        if ([string]::IsNullOrEmpty($codexThreadId) -and -not [string]::IsNullOrEmpty($FallbackCodexThreadId)) { $codexThreadId = $FallbackCodexThreadId }
         $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId
         $timeoutWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
         if (-not $timeoutWrite.LockAcquired) {
@@ -417,6 +430,7 @@ function Invoke-CcodexJobExecution {
     # success and failure whenever present").
     $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
+    if ([string]::IsNullOrEmpty($codexThreadId) -and -not [string]::IsNullOrEmpty($FallbackCodexThreadId)) { $codexThreadId = $FallbackCodexThreadId }
 
     $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId
     $finalWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
@@ -665,14 +679,16 @@ function Invoke-CcodexResume {
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $followUp
 
     $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
-    # Initial status carries parent_job_id + the parent-inherited mode/access/repo.
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -HardTimeoutSec $hardTimeoutSecOrNull -ParentJobId $ParentJobId)
+    # Initial status carries parent_job_id + the parent-inherited mode/access/repo, and the
+    # parent's thread id (a resume continues the SAME thread) so the child is resumable from the
+    # moment it is created, even before its own events log is written.
+    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -HardTimeoutSec $hardTimeoutSecOrNull -CodexThreadId $ctx.ThreadId -ParentJobId $ParentJobId)
 
     $resumeArgs = Build-CcodexResumeArgs -ThreadId $ctx.ThreadId -Access $ctx.Access -RepoRoot $repoRoot -ResultPath (Join-Path $jobDir 'result.md')
 
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $repoRoot -Mode $ctx.Mode -Access $ctx.Access `
         -WorkerPrompt $followUp -CodexPath $CodexPath -CreatedAt $createdAt -HardTimeoutSec $HardTimeoutSec `
-        -CodexArgs $resumeArgs -ParentJobId $ParentJobId
+        -CodexArgs $resumeArgs -ParentJobId $ParentJobId -FallbackCodexThreadId $ctx.ThreadId
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $jobDir; JobId = $jobId; Message = $coreResult.Message }
 }

@@ -133,6 +133,25 @@ $parentStatusAfter = Get-Content -LiteralPath (Join-Path (Get-CcodexJobRecord -J
 Assert-Equal $parentStatusAfter.status 'done' 'parent status is untouched by resume'
 Assert-True ([string]::IsNullOrEmpty($parentStatusAfter.parent_job_id)) 'parent never gains a parent_job_id from being resumed'
 
+Write-Host "Invoke-CcodexResume: child inherits the parent's thread id when its own run emits NO thread event"
+# No CCODEX_FAKE_THREAD_ID => the fixture emits no thread.started event, so Get-CcodexCodexThreadId
+# finds nothing and the child must fall back to the parent's thread id (a resume continues the SAME
+# thread). Without the fallback the child would end with a blank codex_thread_id and be un-resumable.
+Remove-Item Env:\CCODEX_FAKE_THREAD_ID -ErrorAction SilentlyContinue
+New-CcodexTestParentJob -JobId 'cmd-parent-nofallback' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-parent-inherited' -Root $cmdStateRoot | Out-Null
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'answer with no thread event'
+$noEventResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-nofallback' -PositionalTask 'follow up' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $noEventResume.WrapperExitCode 0 'resume with no thread event still exits 0'
+$noEventChildStatus = Get-Content -LiteralPath (Join-Path $noEventResume.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $noEventChildStatus.codex_thread_id 'thread-parent-inherited' 'child codex_thread_id falls back to the parent thread id when no thread event was emitted'
+# The child is now itself resumable: a second resume addressing the child passes the thread-id precondition.
+$noEventChildId = $noEventResume.JobId
+$secondCtx = Get-CcodexResumeContext -ParentJobId $noEventChildId -StateRoot $cmdStateRoot
+Assert-Equal $secondCtx.ThreadId 'thread-parent-inherited' 'resuming the child inherits the same thread id (chaining works)'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 Write-Host "Invoke-CcodexResume: still-running parent -> exit 4 (not-terminal precondition)"
 New-CcodexTestParentJob -JobId 'cmd-parent-running' -Status 'running' -Repo $realRepo -CodexThreadId 'thread-run' -Root $cmdStateRoot | Out-Null
 $runningResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-running' -PositionalTask 'q' `
