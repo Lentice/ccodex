@@ -187,6 +187,34 @@ $shellOut = 'piped follow up text' | & pwsh -NoLogo -NoProfile -File $ccodexScri
 Assert-Equal $LASTEXITCODE 0 'shell-level resume exits 0'
 Assert-True ((($shellOut -join "`n")) -like '*shell resumed answer*') 'shell-level resume prints the resumed result'
 
+Write-Host "shell-level: resume rejects --repo/--mode/--access (inherited from parent) and extra positionals -> exit 2"
+# A resumable parent so that WITHOUT the guard these invocations would run to exit 0 (silently
+# ignoring the flag / dropping the extra positional). The guard makes each exit 2 before any work.
+New-CcodexTestParentJob -JobId 'cmd-parent-reject' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-reject' -Root $cmdStateRoot | Out-Null
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'should not run'
+
+$rejRepo = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --repo $realRepo --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume with --repo exits 2'
+Assert-True ((($rejRepo -join "`n")) -like '*--repo*') 'resume --repo rejection names --repo'
+
+$rejMode = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --mode brainstorm --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume with --mode exits 2'
+Assert-True ((($rejMode -join "`n")) -like '*--mode*') 'resume --mode rejection names --mode'
+
+$rejAccess = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --access workspace --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume with --access exits 2'
+Assert-True ((($rejAccess -join "`n")) -like '*--access*') 'resume --access rejection names --access'
+
+$rejPositional = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject extratext --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume with an extra positional after the job id exits 2'
+Assert-True ((($rejPositional -join "`n")) -like '*extra positional*') 'extra-positional rejection mentions extra positional arguments'
+
+# The plain piped-follow-up form (no rejected flags/positionals) is still accepted -> exit 0.
+$rejOk = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 0 'plain piped resume (no rejected flags) still exits 0'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $cmdRoot -Recurse -Force
 Remove-Item -LiteralPath $tempRoot -Recurse -Force

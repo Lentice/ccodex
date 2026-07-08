@@ -341,8 +341,10 @@ already gone — see "Job management" below.
 starting a fresh `run` that has no memory of the prior turn. It reads follow-up text from exactly
 the same prompt sources as `run` (piped/redirected stdin, `--prompt-file`, or — since the
 positional slot is taken by the parent job id — no positional task text) and accepts
-`--hard-timeout-sec` like `run`/`submit`. It never accepts `--repo`: the child always inherits the
-parent's `mode`, `access`, and `repo` verbatim.
+`--hard-timeout-sec` like `run`/`submit`. It rejects `--repo`, `--mode`, and `--access` with a
+usage error (exit `2`): the child always inherits the parent's `mode`, `access`, and `repo`
+verbatim. It likewise rejects a second positional argument after the job id (exit `2`) — the
+follow-up text must come from stdin or `--prompt-file`, never a positional.
 
 ```powershell
 "Reply with exactly SEED." | ccodex run --mode brainstorm

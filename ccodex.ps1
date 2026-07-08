@@ -1931,6 +1931,21 @@ try {
                 $exitCode = 2
                 break
             }
+            # resume inherits mode/access/repo from the parent job verbatim, so it must not accept
+            # --mode/--access/--repo (which bind to $Mode/$Access/$Repo). A second positional after
+            # the job id ALSO binds to those params in declaration order, so the same guard rejects
+            # `ccodex resume <job> <text>` instead of silently dropping the text (the follow-up must
+            # come from stdin or --prompt-file). Reject before doing any work; --state-root/
+            # --codex-path/--hard-timeout-sec (hidden/supported flags) land in $args and are unaffected.
+            $resumeReject = $null
+            if ($Repo)   { $resumeReject = '--repo' }
+            elseif ($Mode)   { $resumeReject = '--mode' }
+            elseif ($Access) { $resumeReject = '--access' }
+            if ($resumeReject) {
+                Write-Host "ccodex: resume does not accept $resumeReject or extra positional arguments; it inherits mode, access, and repo from the parent job. Pass only the job id (the follow-up text comes from stdin or --prompt-file)."
+                $exitCode = 2
+                break
+            }
             $resumeParams = @{
                 ParentJobId      = $resumeParentJobId
                 PromptFile       = $PromptFile
