@@ -303,6 +303,38 @@ Assert-Equal $twicePorcelain.Count 0 'main repo working tree is clean after the 
 $headAfterSecond = (& git -C $gitRepoApplyTwice rev-parse HEAD).Trim()
 Assert-Equal $headAfterSecond $headAfterFirst 'already-applied attempt leaves main repo HEAD at the first-apply commit'
 
+Write-Host "apply: per-main-repo lock held externally -> exit 21, main repo untouched"
+$gitRepoApplyLocked = Join-Path $tempRoot 'gitrepo-apply-locked'
+New-CcodexTestGitRepo -Path $gitRepoApplyLocked
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'locked-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'locked content'
+$runApplyLocked = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyLocked }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyLocked.WrapperExitCode 0 'setup: locked-case implement run succeeds'
+$statusApplyLocked = Get-Content -LiteralPath (Join-Path $runApplyLocked.JobDir 'status.json') -Raw | ConvertFrom-Json
+$lockedMainRepo = [string]$statusApplyLocked.main_repo
+$lockedRepoKey = Get-CcodexRepoKey -RepoRoot $lockedMainRepo
+$lockedApplyLockDir = Join-Path (Join-Path (Get-CcodexLocalAppDataRoot -Root $localAppData) 'locks') "apply-$lockedRepoKey"
+New-Item -ItemType Directory -Path $lockedApplyLockDir -Force | Out-Null
+# Hold the same per-main-repo apply lock this process would otherwise take, so the apply below
+# cannot acquire it and must time out. The owner is THIS (alive) process, so the lock is never
+# broken as stale within the short timeout.
+Lock-CcodexJob -JobDir $lockedApplyLockDir -TimeoutSec 5 -CommandName 'test-holder' | Out-Null
+$preHeadLocked = (& git -C $gitRepoApplyLocked rev-parse HEAD).Trim()
+$applyLocked = Invoke-CcodexApplyCommand -JobId $statusApplyLocked.job_id -StateRoot $localAppData -LockTimeoutSec 1
+Assert-Equal $applyLocked.WrapperExitCode 21 'apply while the per-main-repo lock is held -> exit 21'
+Assert-True ($applyLocked.Message -like '*apply lock*') 'exit-21 message names the apply lock'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyLocked 'locked-file.txt'))) 'main repo was not mutated while the lock was held (no applied file)'
+$postHeadLocked = (& git -C $gitRepoApplyLocked rev-parse HEAD).Trim()
+Assert-Equal $postHeadLocked $preHeadLocked 'main repo HEAD unchanged when apply cannot acquire the lock'
+Unlock-CcodexJob -JobDir $lockedApplyLockDir
+# With the lock released, the same apply now succeeds (proves the lock, not some other gate,
+# was what blocked it).
+$applyAfterUnlock = Invoke-CcodexApplyCommand -JobId $statusApplyLocked.job_id -StateRoot $localAppData
+Assert-Equal $applyAfterUnlock.WrapperExitCode 0 'apply succeeds once the lock is released'
+
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 

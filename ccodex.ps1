@@ -1165,7 +1165,11 @@ function Invoke-CcodexApplyCommand {
     # repo is NEVER left mutated except by a successful apply.
     param(
         [Parameter(Mandatory)][string]$JobId,
-        [string]$StateRoot = $env:LOCALAPPDATA
+        [string]$StateRoot = $env:LOCALAPPDATA,
+        # Wall-clock bound for acquiring the per-main-repo apply lock (see below). Overridable
+        # for tests; production callers keep the default. A timeout yields exit 21, matching the
+        # lock-timeout contract `cancel` already uses.
+        [int]$LockTimeoutSec = 30
     )
 
     $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
@@ -1192,79 +1196,99 @@ function Invoke-CcodexApplyCommand {
         return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
     }
 
-    # Main repo working tree must be clean: `am` mutates the working tree, so any uncommitted
-    # local change could be silently entangled with (or clobbered by) the applied patch.
-    $porcelain = @(& git -C $mainRepo status --porcelain 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        $message = "ccodex: internal error: git status --porcelain failed in main repo '$mainRepo': $($porcelain -join "`n")"
-        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+    # Serialize the ENTIRE main-repo mutation section (clean check -> preHead capture -> git am
+    # -> restore/verification) under a per-main-repo lock. Without it, two concurrent applies to
+    # the same main repo can both capture the same preHead; if one succeeds and the other then
+    # fails, the failing one's `reset --hard $preHead` erases the successful apply's commit. The
+    # lock lives under the STATE ROOT (keyed by the main repo's repo key), never inside the target
+    # repo, and reuses the same per-directory lock machinery as the per-job lock. A timeout yields
+    # exit 21, mirroring `cancel`'s lock-timeout contract.
+    $mainRepoKey = Get-CcodexRepoKey -RepoRoot $mainRepo
+    $applyLockDir = Join-Path (Join-Path (Get-CcodexLocalAppDataRoot -Root $StateRoot) 'locks') "apply-$mainRepoKey"
+    New-Item -ItemType Directory -Path $applyLockDir -Force | Out-Null
+    try {
+        Lock-CcodexJob -JobDir $applyLockDir -TimeoutSec $LockTimeoutSec -CommandName 'apply' | Out-Null
+    } catch {
+        $message = "ccodex: could not acquire the apply lock for main repo '$mainRepo' within ${LockTimeoutSec}s.`n  main repo: $mainRepo"
+        return [pscustomobject]@{ WrapperExitCode = 21; Stdout = $null; Message = $message }
     }
-    $dirtyLines = @($porcelain | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-    if ($dirtyLines.Count -gt 0) {
-        $message = "ccodex: main repo working tree is not clean; commit or stash your changes before applying job $JobId.`n  main repo: $mainRepo`n  dirty:`n$([string]::Join("`n", ($dirtyLines | ForEach-Object { "    $_" })))"
-        return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
+    try {
+        # Main repo working tree must be clean: `am` mutates the working tree, so any uncommitted
+        # local change could be silently entangled with (or clobbered by) the applied patch.
+        $porcelain = @(& git -C $mainRepo status --porcelain 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $message = "ccodex: internal error: git status --porcelain failed in main repo '$mainRepo': $($porcelain -join "`n")"
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        $dirtyLines = @($porcelain | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+        if ($dirtyLines.Count -gt 0) {
+            $message = "ccodex: main repo working tree is not clean; commit or stash your changes before applying job $JobId.`n  main repo: $mainRepo`n  dirty:`n$([string]::Join("`n", ($dirtyLines | ForEach-Object { "    $_" })))"
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
+        }
+
+        $range = "$baseCommit..HEAD"
+
+        # Empty change set (worker committed nothing) -> nothing to apply; exit 0 no-op.
+        $revList = @(& git -C $worktreePath rev-list $range 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $message = "ccodex: internal error: git rev-list $range failed in worktree '$worktreePath': $($revList -join "`n")"
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        if (@($revList | Where-Object { $_ -and $_.ToString().Trim() -ne '' }).Count -eq 0) {
+            return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to apply for job $JobId ($range is empty); main repo unchanged."; Message = $null }
+        }
+
+        $preHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) {
+            $message = "ccodex: internal error: git rev-parse HEAD failed in main repo '$mainRepo': $preHead"
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        $preHead = ([string]$preHead).Trim()
+
+        # format-patch --stdout emits the mbox patch stream on stdout (diagnostics go to its own
+        # stderr, which must NOT be merged into the pipe or it would corrupt the patch). The 2>&1 on
+        # `am` captures its progress/conflict lines for parsing. A native-to-native pipe in
+        # PowerShell 7 is byte-preserving, so patch content survives intact.
+        $amOutput = (& git -C $worktreePath format-patch $range --stdout | & git -C $mainRepo am --3way 2>&1 | Out-String)
+        $amExit = $LASTEXITCODE
+
+        $postHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
+        $postHead = ([string]$postHead).Trim()
+
+        if ($amExit -eq 0 -and $postHead -ne $preHead) {
+            # A new commit landed: the patch genuinely applied.
+            $stdout = "ccodex: applied job $JobId to $mainRepo`n  range: $baseCommit..$postHead"
+            return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $stdout; Message = $null }
+        }
+
+        # Failure (nonzero am) OR a no-op that advanced nothing (already-applied/empty patch that
+        # `am --3way` accepts with exit 0 but no commit). Either way this is NOT a real application:
+        # abort any in-progress am (best-effort), then force the main repo back to its pre-apply HEAD.
+        & git -C $mainRepo am --abort 2>&1 | Out-Null
+        & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
+
+        $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
+        $restorePorcelain = @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+        $restored = ($restoredHead -eq $preHead) -and ($restorePorcelain.Count -eq 0)
+
+        # Parse conflicting file names out of the am output.
+        $conflictFiles = New-Object System.Collections.Generic.List[string]
+        foreach ($line in ($amOutput -split "`r?`n")) {
+            if ($line -match 'Merge conflict in (.+?)\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+            elseif ($line -match 'error: patch failed: (.+?):\d+\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+            elseif ($line -match 'error: (.+?): patch does not apply\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
+        }
+        $uniqueConflicts = @($conflictFiles | Select-Object -Unique)
+        $filesText = if ($uniqueConflicts.Count -gt 0) { $uniqueConflicts -join ', ' } else { '(none reported; the patch may already be applied or empty)' }
+
+        $message = "ccodex: could not apply job $JobId to $mainRepo; git am failed and the main repo was restored to its previous state.`n  conflicting files: $filesText`n  run ``ccodex diff $JobId`` to inspect the changes."
+        if (-not $restored) {
+            $message += "`n  WARNING: the main repo could not be fully restored to its pre-apply state (HEAD='$restoredHead', expected '$preHead'); inspect it manually."
+        }
+        return [pscustomobject]@{ WrapperExitCode = 25; Stdout = $null; Message = $message }
+    } finally {
+        Unlock-CcodexJob -JobDir $applyLockDir
     }
-
-    $range = "$baseCommit..HEAD"
-
-    # Empty change set (worker committed nothing) -> nothing to apply; exit 0 no-op.
-    $revList = @(& git -C $worktreePath rev-list $range 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        $message = "ccodex: internal error: git rev-list $range failed in worktree '$worktreePath': $($revList -join "`n")"
-        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
-    }
-    if (@($revList | Where-Object { $_ -and $_.ToString().Trim() -ne '' }).Count -eq 0) {
-        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to apply for job $JobId ($range is empty); main repo unchanged."; Message = $null }
-    }
-
-    $preHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
-    if ($LASTEXITCODE -ne 0) {
-        $message = "ccodex: internal error: git rev-parse HEAD failed in main repo '$mainRepo': $preHead"
-        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
-    }
-    $preHead = ([string]$preHead).Trim()
-
-    # format-patch --stdout emits the mbox patch stream on stdout (diagnostics go to its own
-    # stderr, which must NOT be merged into the pipe or it would corrupt the patch). The 2>&1 on
-    # `am` captures its progress/conflict lines for parsing. A native-to-native pipe in
-    # PowerShell 7 is byte-preserving, so patch content survives intact.
-    $amOutput = (& git -C $worktreePath format-patch $range --stdout | & git -C $mainRepo am --3way 2>&1 | Out-String)
-    $amExit = $LASTEXITCODE
-
-    $postHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
-    $postHead = ([string]$postHead).Trim()
-
-    if ($amExit -eq 0 -and $postHead -ne $preHead) {
-        # A new commit landed: the patch genuinely applied.
-        $stdout = "ccodex: applied job $JobId to $mainRepo`n  range: $baseCommit..$postHead"
-        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $stdout; Message = $null }
-    }
-
-    # Failure (nonzero am) OR a no-op that advanced nothing (already-applied/empty patch that
-    # `am --3way` accepts with exit 0 but no commit). Either way this is NOT a real application:
-    # abort any in-progress am (best-effort), then force the main repo back to its pre-apply HEAD.
-    & git -C $mainRepo am --abort 2>&1 | Out-Null
-    & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
-
-    $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
-    $restorePorcelain = @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-    $restored = ($restoredHead -eq $preHead) -and ($restorePorcelain.Count -eq 0)
-
-    # Parse conflicting file names out of the am output.
-    $conflictFiles = New-Object System.Collections.Generic.List[string]
-    foreach ($line in ($amOutput -split "`r?`n")) {
-        if ($line -match 'Merge conflict in (.+?)\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
-        elseif ($line -match 'error: patch failed: (.+?):\d+\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
-        elseif ($line -match 'error: (.+?): patch does not apply\s*$') { $conflictFiles.Add($Matches[1].Trim()) }
-    }
-    $uniqueConflicts = @($conflictFiles | Select-Object -Unique)
-    $filesText = if ($uniqueConflicts.Count -gt 0) { $uniqueConflicts -join ', ' } else { '(none reported; the patch may already be applied or empty)' }
-
-    $message = "ccodex: could not apply job $JobId to $mainRepo; git am failed and the main repo was restored to its previous state.`n  conflicting files: $filesText`n  run ``ccodex diff $JobId`` to inspect the changes."
-    if (-not $restored) {
-        $message += "`n  WARNING: the main repo could not be fully restored to its pre-apply state (HEAD='$restoredHead', expected '$preHead'); inspect it manually."
-    }
-    return [pscustomobject]@{ WrapperExitCode = 25; Stdout = $null; Message = $message }
 }
 
 function Get-CcodexTailLines {
