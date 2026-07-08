@@ -189,5 +189,36 @@ $nonNumericSubmitOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $cco
 Assert-Equal $LASTEXITCODE 2 'submit --hard-timeout-sec abc exits 2'
 Assert-True ((($nonNumericSubmitOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (non-numeric value)'
 
+# --- (h) shell-level: submit --model/--effort threads through to the detached worker ---
+
+Write-Host "shell-level: submit --model/--effort reaches the detached worker; the worker's command.txt records -m/-c"
+# The worker re-derives command.txt from the job on startup, so model/effort must reach it via
+# the worker launch command line (NOT status.json). Waiting for terminal proves the worker's
+# own re-derived command.txt carries the flags -- true end-to-end passthrough, not just submit's
+# pre-launch diagnostics.
+$savedAppData2 = $env:APPDATA
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'SUBMIT MODEL EFFORT OK'
+try {
+    $env:APPDATA = $appData
+    $meOut = "review this please" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --model gpt-5-codex --effort high
+    Assert-Equal $LASTEXITCODE 0 'shell-level submit with --model/--effort exits 0'
+    $meLines = @($meOut | Where-Object { $_ -ne $null -and $_ -ne '' })
+    $meJobDir = $meLines[1]
+    $meTerminal = Wait-CcodexTestTerminalStatus -JobDir $meJobDir -TimeoutSec 20
+    Assert-True ($meTerminal -ne $null) 'submitted model/effort job reaches a terminal status object'
+    Assert-Equal $meTerminal.status 'done' 'submitted model/effort job reaches terminal done via the detached worker'
+    $meCommand = Get-Content -LiteralPath (Join-Path $meJobDir 'command.txt') -Raw
+    Assert-True ($meCommand -like '*-m gpt-5-codex -c model_reasoning_effort=high -*') 'the worker-derived command.txt carries -m/-c before the trailing - (model/effort threaded through the worker launch)'
+} finally {
+    $env:APPDATA = $savedAppData2
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+}
+
+Write-Host "shell-level: submit --effort turbo is a usage error (exit 2), no worker ever launched"
+$badEffortSubmitOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --effort turbo
+Assert-Equal $LASTEXITCODE 2 'submit --effort turbo exits 2'
+Assert-True ((($badEffortSubmitOut -join "`n")) -like '*--effort*') 'usage error names the --effort flag (invalid value)'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests

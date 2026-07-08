@@ -137,6 +137,19 @@ try {
     Assert-True ($promptText -like '*git diff abc..def -- lib/*') 'prompt.md contains the scoped git diff instruction'
     Assert-True ($promptText -like '*check scoping*') 'prompt.md carries the change intent'
 
+    Write-Host "review --model/--effort flows through the run pipeline into command.txt's exec-level segment"
+    $meOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --range abc..def --path lib/ --repo $targetRepo --model gpt-5-codex --effort medium
+    Assert-Equal $LASTEXITCODE 0 'review with --model/--effort exits 0'
+    Assert-True (($meOut -join "`n") -like '*Verdict: ship it.*') 'review with model/effort still prints the result'
+    $meCommandFiles = Get-ChildItem -Recurse -Path (Join-Path $localAppData 'ccodex\jobs') -Filter command.txt | Sort-Object LastWriteTime
+    $meCommandText = [System.IO.File]::ReadAllText($meCommandFiles[-1].FullName, $utf8NoBom)
+    Assert-True ($meCommandText -like '*-m gpt-5-codex -c model_reasoning_effort=medium -*') 'command.txt splices -m/-c after the exec options and before the trailing - prompt positional'
+
+    Write-Host "review --effort turbo is a usage error (exit 2) naming the flag"
+    $badEffortReviewOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --range abc..def --path lib/ --repo $targetRepo --effort turbo
+    Assert-Equal $LASTEXITCODE 2 'review --effort turbo exits 2'
+    Assert-True (($badEffortReviewOut -join "`n") -like '*--effort*') 'usage error names the --effort flag'
+
     Write-Host "invalid flag combo (no range/staged/working) exits 2 without invoking codex"
     $badOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --repo $targetRepo
     Assert-Equal $LASTEXITCODE 2 'missing selector exits 2'

@@ -33,11 +33,19 @@ function Get-CcodexWorkerArgumentLine {
         [Parameter(Mandatory)][string]$ScriptPath,
         [Parameter(Mandatory)][string]$JobId,
         [string]$StateRoot,
-        [string]$CodexPath
+        [string]$CodexPath,
+        [string]$Model,
+        [string]$Effort
     )
     $line = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" worker --job-id $JobId"
     if ($StateRoot) { $line += " --state-root `"$StateRoot`"" }
     if ($CodexPath) { $line += " --codex-path `"$CodexPath`"" }
+    # --model/--effort are per-invocation knobs that status.json deliberately never carries,
+    # so the launch command line is their ONLY route into the detached worker. Model is quoted
+    # like the path arguments (model names are an open set); effort is validated upstream to
+    # minimal|low|medium|high and never needs quoting.
+    if ($Model) { $line += " --model `"$Model`"" }
+    if ($Effort) { $line += " --effort $Effort" }
     return $line
 }
 
@@ -48,20 +56,23 @@ function Start-CcodexDetachedWorker {
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [string]$StateRoot,
         [string]$CodexPath,
-        [ValidateSet('cim', 'startprocess')][string]$Mechanism = 'cim'
+        [ValidateSet('cim', 'startprocess')][string]$Mechanism = 'cim',
+        [string]$Model,
+        [string]$Effort
     )
 
     # Dogfood #4: a double-quote is illegal in a Windows path and would corrupt the
     # hand-built CIM command line below (or, less catastrophically but still wrong, silently
     # mis-tokenize a Start-Process argument). Fail loudly here rather than launching a
-    # broken/ambiguous worker process.
-    foreach ($pathArg in @($ScriptPath, $StateRoot, $CodexPath)) {
+    # broken/ambiguous worker process. Model rides the same quoted-argument path, so the
+    # same guard applies to it.
+    foreach ($pathArg in @($ScriptPath, $StateRoot, $CodexPath, $Model)) {
         if ($pathArg -and $pathArg.Contains('"')) {
             throw "ccodex: internal error: path argument contains an illegal double-quote character: $pathArg"
         }
     }
 
-    $argumentLine = Get-CcodexWorkerArgumentLine -ScriptPath $ScriptPath -JobId $JobId -StateRoot $StateRoot -CodexPath $CodexPath
+    $argumentLine = Get-CcodexWorkerArgumentLine -ScriptPath $ScriptPath -JobId $JobId -StateRoot $StateRoot -CodexPath $CodexPath -Model $Model -Effort $Effort
 
     if ($Mechanism -eq 'cim') {
         $commandLine = "pwsh $argumentLine"

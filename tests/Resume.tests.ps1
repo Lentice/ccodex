@@ -83,6 +83,15 @@ $argsWorkspace = Build-CcodexResumeArgs -ThreadId 'thread-xyz' -Access 'workspac
 $expectedWorkspace = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'workspace-write', '--json', '--color', 'never', '-C', 'D:\OtherRepo', '--output-last-message', 'D:\Job2\result.md', 'resume', 'thread-xyz', '-')
 Assert-Equal ($argsWorkspace -join '|') ($expectedWorkspace -join '|') 'workspace access produces the exact spliced resume argument shape (sandbox mapped via ConvertTo-CcodexSandboxFlag)'
 
+Write-Host "Build-CcodexResumeArgs: --model/--effort splice into the exec-level segment BEFORE the resume token"
+$argsResumeME = Build-CcodexResumeArgs -ThreadId 'thread-me' -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model 'gpt-5-codex' -Effort 'high'
+$expectedResumeME = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-m', 'gpt-5-codex', '-c', 'model_reasoning_effort=high', 'resume', 'thread-me', '-')
+Assert-Equal ($argsResumeME -join '|') ($expectedResumeME -join '|') 'model/effort land in the exec-level segment (before the resume <thread-id> token), matching Build-CcodexCodexArgs placement'
+
+Write-Host "Build-CcodexResumeArgs: neither model nor effort -> byte-identical to the pre-feature spliced shape"
+$argsResumeNeither = Build-CcodexResumeArgs -ThreadId 'thread-abc' -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model $null -Effort ''
+Assert-Equal ($argsResumeNeither -join '|') ($expectedReadOnly -join '|') 'omitting both flags (null/empty) leaves the resume argv byte-identical'
+
 # --- Invoke-CcodexResume (command level) ---
 
 # Bring in the full wrapper (dot-sources every lib and defines Invoke-CcodexResume /
@@ -214,6 +223,26 @@ Assert-True ((($rejPositional -join "`n")) -like '*extra positional*') 'extra-po
 $rejOk = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
 Assert-Equal $LASTEXITCODE 0 'plain piped resume (no rejected flags) still exits 0'
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "shell-level: resume ACCEPTS --model/--effort (per-invocation knobs) and splices them before the resume token"
+# Unlike --repo/--mode/--access (inherited parent context, rejected above), --model/--effort are
+# per-invocation and must be accepted. The child's command.txt records -m/-c in the exec-level
+# segment, before the `resume <thread-id>` token.
+New-CcodexTestParentJob -JobId 'cmd-parent-modeleffort' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-me-shell' -Root $cmdStateRoot | Out-Null
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'resumed with model/effort'
+$meOut = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-modeleffort --model gpt-5-codex --effort high --state-root $cmdStateRoot --codex-path $fixtureCmd
+Assert-Equal $LASTEXITCODE 0 'resume with --model/--effort exits 0 (both are accepted per-invocation knobs)'
+Assert-True ((($meOut -join "`n")) -like '*resumed with model/effort*') 'resume with model/effort still prints the resumed result'
+$meCmdFiles = Get-ChildItem -Recurse -Path (Join-Path $cmdStateRoot 'ccodex\jobs') -Filter command.txt | Sort-Object LastWriteTime
+$meCommand = Get-Content -LiteralPath $meCmdFiles[-1].FullName -Raw
+Assert-True ($meCommand -like '*-m gpt-5-codex -c model_reasoning_effort=high resume thread-me-shell*') 'command.txt places -m/-c in the exec-level segment, before the resume <thread-id> token'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "shell-level: resume with an invalid --effort is a usage error (exit 2) naming the flag"
+$badEffortOut = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-modeleffort --effort turbo --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume with invalid --effort exits 2'
+Assert-True ((($badEffortOut -join "`n")) -like '*--effort*') 'invalid --effort usage error names the flag'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $cmdRoot -Recurse -Force

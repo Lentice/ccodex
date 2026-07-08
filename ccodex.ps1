@@ -307,7 +307,12 @@ function Invoke-CcodexJobExecution {
         # breaking `ccodex resume <child>`. Used as the fallback for EVERY status write that stamps
         # codex_thread_id (created/running/terminal/timeout/internal-failure) whenever the
         # event-derived id is empty. Null for non-resume jobs => no fallback, behavior unchanged.
-        [string]$FallbackCodexThreadId = $null
+        [string]$FallbackCodexThreadId = $null,
+        # Optional --model/--effort passthrough, forwarded to Build-CcodexCodexArgs. Ignored when
+        # a prebuilt $CodexArgs is supplied (the resume path bakes them into its own argv). Both
+        # absent => argv byte-identical to before these parameters existed.
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -335,7 +340,7 @@ function Invoke-CcodexJobExecution {
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
-    $codexArgs = if ($CodexArgs) { $CodexArgs } else { Build-CcodexCodexArgs -Access $Access -RepoRoot $codexTargetRepo -ResultPath $resultPath }
+    $codexArgs = if ($CodexArgs) { $CodexArgs } else { Build-CcodexCodexArgs -Access $Access -RepoRoot $codexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort }
 
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit)
@@ -591,7 +596,10 @@ function Invoke-CcodexRun {
         [string]$CodexPath,
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
-        [int]$HardTimeoutSec = 0
+        [int]$HardTimeoutSec = 0,
+        # Optional --model/--effort passthrough (effort already validated at the dispatcher).
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
 
     $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
@@ -602,7 +610,7 @@ function Invoke-CcodexRun {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; Message = $init.Message }
     }
 
-    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit
+    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit -Model $Model -Effort $Effort
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
 }
@@ -629,7 +637,12 @@ function Invoke-CcodexResume {
         [string]$CodexPath,
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
-        [int]$HardTimeoutSec = 0
+        [int]$HardTimeoutSec = 0,
+        # Optional --model/--effort passthrough. Unlike --repo/--mode/--access (inherited parent
+        # context, rejected at the dispatcher), these are per-invocation knobs: a follow-up may
+        # legitimately want a different model/effort than the parent ran with.
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
 
     # Resolve the parent context first. Get-CcodexResumeContext's three throw classes map to
@@ -684,7 +697,7 @@ function Invoke-CcodexResume {
     # moment it is created, even before its own events log is written.
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -HardTimeoutSec $hardTimeoutSecOrNull -CodexThreadId $ctx.ThreadId -ParentJobId $ParentJobId)
 
-    $resumeArgs = Build-CcodexResumeArgs -ThreadId $ctx.ThreadId -Access $ctx.Access -RepoRoot $repoRoot -ResultPath (Join-Path $jobDir 'result.md')
+    $resumeArgs = Build-CcodexResumeArgs -ThreadId $ctx.ThreadId -Access $ctx.Access -RepoRoot $repoRoot -ResultPath (Join-Path $jobDir 'result.md') -Model $Model -Effort $Effort
 
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $repoRoot -Mode $ctx.Mode -Access $ctx.Access `
         -WorkerPrompt $followUp -CodexPath $CodexPath -CreatedAt $createdAt -HardTimeoutSec $HardTimeoutSec `
@@ -719,7 +732,13 @@ function Invoke-CcodexSubmit {
         # caller's own script, since PowerShell binds it per script-defining file). Tests
         # that need to force a deterministic startup-sentinel timeout (exit 23) without
         # depending on a race against a real worker process point this at a stub script.
-        [string]$WorkerScriptPath = $PSCommandPath
+        [string]$WorkerScriptPath = $PSCommandPath,
+        # Optional --model/--effort passthrough. status.json deliberately carries neither
+        # (append-only contract; they are per-invocation knobs, not job lifecycle state), so
+        # they must reach the detached worker via its launch command line — the worker
+        # re-derives command.txt/debug.json and the actual codex argv from what it received.
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
 
     $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
@@ -761,7 +780,7 @@ function Invoke-CcodexSubmit {
     # Pre-launch diagnostics only (the detached worker re-derives and overwrites both from
     # status.json). For a worktree job Codex targets the worktree, so reflect that here too.
     $submitCodexTargetRepo = if ($init.WorktreeRepo) { $init.WorktreeRepo } else { $init.RepoRoot }
-    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath
+    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort
     Write-CcodexTextFile -Path (Join-Path $jobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $Mode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native' -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit)
 
@@ -770,7 +789,8 @@ function Invoke-CcodexSubmit {
 
     try {
         Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
-            -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism | Out-Null
+            -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism `
+            -Model $Model -Effort $Effort | Out-Null
         Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec | Out-Null
     } catch {
         # Do NOT rewrite status.json here: a slow-but-alive worker may still be starting,
@@ -1821,6 +1841,21 @@ function ConvertTo-CcodexHardTimeoutSec {
     return $parsed
 }
 
+function ConvertTo-CcodexEffort {
+    # --effort passes through to Codex as `-c model_reasoning_effort=<value>`, so only the
+    # values Codex itself accepts are allowed, case-sensitively (Codex's TOML enum match is
+    # case-sensitive; forwarding 'High' would silently degrade to the default effort). An
+    # invalid value is a usage error naming the flag (exit 2), same shape as
+    # ConvertTo-CcodexHardTimeoutSec. --model is deliberately NOT validated: model names are
+    # an open set that changes with Codex releases, so it is forwarded verbatim as `-m <model>`.
+    param([Parameter(Mandatory)][string]$FlagName, [Parameter(Mandatory)][string]$ValueText)
+    $valid = @('minimal', 'low', 'medium', 'high')
+    if ($ValueText -cnotin $valid) {
+        throw "ccodex: $FlagName must be one of: $($valid -join ', ') (case-sensitive); got '$ValueText'."
+    }
+    return $ValueText
+}
+
 function Get-CcodexArgValues {
     # Repeatable-flag counterpart to Get-CcodexArgValue: collects EVERY value that
     # follows an occurrence of $FlagName in $args (e.g. `--path a --path b`). Always
@@ -1849,6 +1884,8 @@ try {
             # See the header comment for why. The PipelineExpected/PipelineObjects
             # parameters remain on Invoke-CcodexRun for direct/test callers.
             $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            $runModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
+            $runEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
             $runParams = @{
                 Mode             = $Mode
                 Access           = $Access
@@ -1861,6 +1898,16 @@ try {
             if ($runHardTimeoutSecText) {
                 try {
                     $runParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $runHardTimeoutSecText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
+            if ($runModel) { $runParams['Model'] = $runModel }
+            if ($runEffortText) {
+                try {
+                    $runParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $runEffortText
                 } catch {
                     Write-Host $_.Exception.Message
                     $exitCode = 2
@@ -1885,6 +1932,8 @@ try {
             $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
             $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            $submitModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
+            $submitEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
 
             $submitParams = @{
                 Mode             = $Mode
@@ -1901,6 +1950,16 @@ try {
             if ($submitHardTimeoutSecText) {
                 try {
                     $submitParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $submitHardTimeoutSecText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
+            if ($submitModel) { $submitParams['Model'] = $submitModel }
+            if ($submitEffortText) {
+                try {
+                    $submitParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $submitEffortText
                 } catch {
                     Write-Host $_.Exception.Message
                     $exitCode = 2
@@ -1928,6 +1987,8 @@ try {
             $resumeStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $resumeCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $resumeHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            $resumeModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
+            $resumeEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
             if (-not $resumeParentJobId) {
                 Write-Host "ccodex: resume requires a job id."
                 $exitCode = 2
@@ -1966,6 +2027,20 @@ try {
                     break
                 }
             }
+            # Unlike --repo/--mode/--access above, --model/--effort are ACCEPTED on resume:
+            # they are per-invocation knobs (this follow-up's model/effort), not inherited
+            # parent context. They land in $args (hyphenated flags never bind to the script
+            # params), so the rejection guard above never sees them.
+            if ($resumeModel) { $resumeParams['Model'] = $resumeModel }
+            if ($resumeEffortText) {
+                try {
+                    $resumeParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $resumeEffortText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
             $resumeResult = Invoke-CcodexResume @resumeParams
             if ($resumeResult.WrapperExitCode -eq 0) {
                 Write-Output $resumeResult.Stdout
@@ -1980,6 +2055,11 @@ try {
             $workerJobId = Get-CcodexArgValue -ArgumentList $args -FlagName '--job-id'
             $workerStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $workerCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+            # --model/--effort arrive on the wrapper-authored launch line built by
+            # Get-CcodexWorkerArgumentLine; effort was already validated by `submit`, so the
+            # internal worker entrypoint forwards both verbatim.
+            $workerModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
+            $workerEffort = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
             if (-not $workerJobId) {
                 Write-Host "ccodex: worker requires --job-id <id>."
                 $exitCode = 2
@@ -1988,6 +2068,8 @@ try {
             $workerParams = @{ JobId = $workerJobId }
             if ($workerStateRoot) { $workerParams['StateRoot'] = $workerStateRoot }
             if ($workerCodexPath) { $workerParams['CodexPath'] = $workerCodexPath }
+            if ($workerModel) { $workerParams['Model'] = $workerModel }
+            if ($workerEffort) { $workerParams['Effort'] = $workerEffort }
             $workerResult = Invoke-CcodexWorker @workerParams
             if ($workerResult.Message) {
                 Write-Host $workerResult.Message
@@ -2135,6 +2217,8 @@ try {
             $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
             $reviewStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $reviewCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
+            $reviewModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
+            $reviewEffortText = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
 
             # Resolve the repo up front: the self-diff prompt names it and the embed form
             # runs git from it. A bad --repo is a usage error (exit 2), same as `run`.
@@ -2166,6 +2250,16 @@ try {
             }
             if ($reviewStateRoot) { $reviewParams['LocalAppDataRoot'] = $reviewStateRoot }
             if ($reviewCodexPath) { $reviewParams['CodexPath'] = $reviewCodexPath }
+            if ($reviewModel) { $reviewParams['Model'] = $reviewModel }
+            if ($reviewEffortText) {
+                try {
+                    $reviewParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $reviewEffortText
+                } catch {
+                    Write-Host $_.Exception.Message
+                    $exitCode = 2
+                    break
+                }
+            }
 
             $reviewResult = Invoke-CcodexRun @reviewParams
             if ($reviewResult.WrapperExitCode -eq 0) {

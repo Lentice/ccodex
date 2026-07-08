@@ -63,7 +63,11 @@ function Build-CcodexResumeArgs {
         [Parameter(Mandatory)][string]$ThreadId,
         [Parameter(Mandatory)][string]$Access,
         [Parameter(Mandatory)][string]$RepoRoot,
-        [Parameter(Mandatory)][string]$ResultPath
+        [Parameter(Mandatory)][string]$ResultPath,
+        # Optional per-invocation knobs; like every other exec-level option they must precede
+        # the `resume <thread-id>` token (same placement as Build-CcodexCodexArgs).
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
     $sandbox = ConvertTo-CcodexSandboxFlag -Access $Access
     return @(
@@ -73,7 +77,8 @@ function Build-CcodexResumeArgs {
         '--json',
         '--color', 'never',
         '-C', $RepoRoot,
-        '--output-last-message', $ResultPath,
+        '--output-last-message', $ResultPath
+    ) + (Get-CcodexModelEffortArgs -Model $Model -Effort $Effort) + @(
         'resume', $ThreadId,
         '-'
     )

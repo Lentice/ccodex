@@ -86,6 +86,9 @@ ccodex status <job_id>                                             # one-line st
 
 # Runaway guard for any run/submit
 "..." | ccodex run --mode review --hard-timeout-sec 900 --repo <repo>
+
+# Optional per-call Codex knobs (run/submit/review/resume); omit both for Codex's defaults
+"..." | ccodex run --mode brainstorm --model gpt-5-codex --effort high --repo <repo>
 ```
 
 Notes:

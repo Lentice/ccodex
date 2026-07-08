@@ -10,7 +10,12 @@ function Invoke-CcodexWorker {
     param(
         [Parameter(Mandatory)][string]$JobId,
         [string]$StateRoot = $env:LOCALAPPDATA,
-        [string]$CodexPath
+        [string]$CodexPath,
+        # Optional --model/--effort passthrough, received on the worker launch command line
+        # (status.json deliberately never carries them) and forwarded to the execution core's
+        # Build-CcodexCodexArgs call.
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
 
     try {
@@ -104,7 +109,8 @@ function Invoke-CcodexWorker {
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
         -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
-        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit
+        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit `
+        -Model $Model -Effort $Effort
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

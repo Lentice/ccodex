@@ -36,4 +36,23 @@ Write-Host "Build-CcodexCodexArgs"
 $codexArgs = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md'
 Assert-Equal ($codexArgs -join '|') (@('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-') -join '|') 'produces the exact codex exec argument shape'
 
+Write-Host "Build-CcodexCodexArgs: --model only splices -m <model> in the exec-level segment before the trailing prompt positional"
+$argsModel = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model 'gpt-5-codex'
+$expectedModel = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-m', 'gpt-5-codex', '-')
+Assert-Equal ($argsModel -join '|') ($expectedModel -join '|') '--model adds -m <model> after the exec options and before the trailing -'
+
+Write-Host "Build-CcodexCodexArgs: --effort only splices -c model_reasoning_effort=<effort> as one bare element before the trailing prompt positional"
+$argsEffort = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Effort 'high'
+$expectedEffort = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-c', 'model_reasoning_effort=high', '-')
+Assert-Equal ($argsEffort -join '|') ($expectedEffort -join '|') '--effort adds -c model_reasoning_effort=<effort> (one bare unquoted element) before the trailing -'
+
+Write-Host "Build-CcodexCodexArgs: --model and --effort together, model before effort, both before the trailing -"
+$argsBoth = Build-CcodexCodexArgs -Access 'workspace' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model 'gpt-5-codex' -Effort 'low'
+$expectedBoth = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'workspace-write', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-m', 'gpt-5-codex', '-c', 'model_reasoning_effort=low', '-')
+Assert-Equal ($argsBoth -join '|') ($expectedBoth -join '|') 'both flags splice -m then -c before the trailing prompt positional'
+
+Write-Host "Build-CcodexCodexArgs: neither flag -> argv byte-identical to the pre-feature shape"
+$argsNeither = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model $null -Effort ''
+Assert-Equal ($argsNeither -join '|') (@('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-') -join '|') 'omitting both flags (null/empty) leaves the argv byte-identical'
+
 Complete-CcodexTests

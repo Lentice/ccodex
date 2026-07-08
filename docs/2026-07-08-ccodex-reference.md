@@ -72,6 +72,21 @@ Mode/access matrix:
 Pass `--hard-timeout-sec <n>` to either command to bound how long Codex may run — see
 [Hard timeout](#hard-timeout).
 
+Both commands (and `review`/`resume`) also accept two optional per-invocation Codex knobs;
+omitting both leaves the codex argv byte-identical to before these flags existed:
+
+- `--model <model>` — forwarded verbatim to Codex as exec-level `-m <model>` (model names are an
+  open set, so ccodex does not validate them; an unknown model fails inside Codex and classifies
+  like any other Codex failure). Omitted → Codex's own configured default model.
+- `--effort <minimal|low|medium|high>` — forwarded as exec-level
+  `-c model_reasoning_effort=<value>` (one bare argv element; the value is intentionally not
+  TOML-quoted — a bare value falls back to a literal string inside Codex, which sidesteps
+  cmd-shim quote layering). Validation is case-sensitive; any other value is a usage error
+  (exit `2`) naming the flag. Omitted → Codex's own configured default effort.
+
+For `submit`, the flags travel to the detached worker on its launch command line (never via
+`status.json`, which carries neither — they are per-invocation knobs, not job lifecycle state).
+
 ### review
 
 `ccodex review` is sugar over the `run` pipeline (always `--mode review`, `--access read-only`):
@@ -108,6 +123,8 @@ Other flags:
   default on hosts where Codex's sandbox cannot spawn processes at all (Codex reports
   `CreateProcessWithLogonW failed: 1385`; the self-diff form cannot work there).
 - `--repo <path>` — as with `run`/`submit`, target a repository other than the current directory.
+- `--model <model>` / `--effort <minimal|low|medium|high>` — the same per-invocation Codex knobs
+  as `run`/`submit` (review is sugar over the `run` pipeline, so they flow straight through).
 
 Findings always come back severity-ordered (Critical, then Important, then Minor) with a
 file:line and a suggested fix per finding, plus a one-line verdict — success prints exactly that
@@ -187,7 +204,10 @@ the same prompt sources as `run` (piped/redirected stdin, `--prompt-file`, or �
 positional slot is taken by the parent job id — no positional task text) and accepts
 `--hard-timeout-sec` like `run`/`submit`. It rejects `--repo`, `--mode`, and `--access` with a
 usage error (exit `2`): the child always inherits the parent's `mode`, `access`, and `repo`
-verbatim. It likewise rejects a second positional argument after the job id (exit `2`) — the
+verbatim. `--model`/`--effort` are accepted, though — they are per-invocation knobs, not
+inherited parent context, so a follow-up may run with a different model or effort than the
+parent did (same placement rules: they land in the exec-level argv segment, before the
+`resume <thread-id>` token). It likewise rejects a second positional argument after the job id (exit `2`) — the
 follow-up text must come from stdin or `--prompt-file`, never a positional.
 
 ```powershell

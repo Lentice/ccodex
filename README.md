@@ -113,6 +113,14 @@ ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 "Now say CONTINUED instead." | ccodex resume <job_id>
 ```
 
+**Pick a model or effort per call** (optional; omit both to use Codex's configured defaults) —
+`run`, `submit`, `review`, and `resume` all take `--model <model>` and
+`--effort <minimal|low|medium|high>`:
+
+```powershell
+"Deep design review of this plan." | ccodex run --mode brainstorm --model gpt-5-codex --effort high
+```
+
 **Cleanup**, periodically or when reclaiming disk:
 
 ```powershell

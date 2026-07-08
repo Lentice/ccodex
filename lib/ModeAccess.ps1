@@ -50,11 +50,34 @@ function ConvertTo-CcodexSandboxFlag {
     }
 }
 
+function Get-CcodexModelEffortArgs {
+    # The optional per-invocation model/effort segment shared by Build-CcodexCodexArgs and
+    # Build-CcodexResumeArgs (lib/Resume.ps1). --model passes through verbatim as `-m <model>`;
+    # --effort becomes `-c model_reasoning_effort=<effort>` as ONE bare argv element — the value
+    # is deliberately NOT quoted TOML (`"high"`): a bare value fails Codex's TOML parse and is
+    # then used as a literal string, which sidesteps the cmd.exe-shim quote-layering entirely.
+    # Effort validation (minimal|low|medium|high, case-sensitive) happens at the dispatcher
+    # (ConvertTo-CcodexEffort); by the time a value reaches here it is passed through verbatim.
+    # Both absent (null/empty) => empty array, leaving callers' argv byte-identical.
+    param(
+        [string]$Model,
+        [string]$Effort
+    )
+    $extra = @()
+    if (-not [string]::IsNullOrEmpty($Model)) { $extra += @('-m', $Model) }
+    if (-not [string]::IsNullOrEmpty($Effort)) { $extra += @('-c', "model_reasoning_effort=$Effort") }
+    return , $extra
+}
+
 function Build-CcodexCodexArgs {
     param(
         [Parameter(Mandatory)][string]$Access,
         [Parameter(Mandatory)][string]$RepoRoot,
-        [Parameter(Mandatory)][string]$ResultPath
+        [Parameter(Mandatory)][string]$ResultPath,
+        # Optional per-invocation knobs; both must sit in the exec-level options segment,
+        # BEFORE the trailing `-` prompt positional (clap resolves them at the exec level).
+        [string]$Model = $null,
+        [string]$Effort = $null
     )
     $sandbox = ConvertTo-CcodexSandboxFlag -Access $Access
     return @(
@@ -64,7 +87,6 @@ function Build-CcodexCodexArgs {
         '--json',
         '--color', 'never',
         '-C', $RepoRoot,
-        '--output-last-message', $ResultPath,
-        '-'
-    )
+        '--output-last-message', $ResultPath
+    ) + (Get-CcodexModelEffortArgs -Model $Model -Effort $Effort) + @('-')
 }

@@ -177,6 +177,33 @@ Assert-Equal $timeoutComplete.status_candidate 'timed_out' 'worker-complete.json
 Assert-Equal $timeoutComplete.wrapper_exit_code 24 'worker-complete.json records wrapper_exit_code 24'
 Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
+Write-Host "run with --model/--effort records -m/-c in the exec-level segment of command.txt (before the trailing prompt positional)"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'model effort ok'
+$resultModelEffort = Invoke-CcodexRunForTest -Overrides @{ Model = 'gpt-5-codex'; Effort = 'high' }
+Assert-Equal $resultModelEffort.WrapperExitCode 0 'run with --model/--effort exits 0'
+$meCommandTxt = Get-Content -LiteralPath (Join-Path $resultModelEffort.JobDir 'command.txt') -Raw
+Assert-True ($meCommandTxt -like '*--output-last-message*-m gpt-5-codex -c model_reasoning_effort=high -*') 'command.txt splices -m/-c after the exec options and before the trailing - prompt positional'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "run with neither --model nor --effort leaves command.txt argv byte-identical (no -m/-c)"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'plain ok'
+$resultPlain = Invoke-CcodexRunForTest
+$plainCommandTxt = Get-Content -LiteralPath (Join-Path $resultPlain.JobDir 'command.txt') -Raw
+Assert-True (-not ($plainCommandTxt -like '*-m *')) 'command.txt has no -m when --model omitted'
+Assert-True (-not ($plainCommandTxt -like '*model_reasoning_effort*')) 'command.txt has no -c model_reasoning_effort when --effort omitted'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "ConvertTo-CcodexEffort: the four valid values pass through verbatim; any other value throws naming the flag"
+foreach ($validEffort in @('minimal', 'low', 'medium', 'high')) {
+    Assert-Equal (ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $validEffort) $validEffort "'$validEffort' is accepted and returned verbatim"
+}
+Assert-Throws { ConvertTo-CcodexEffort -FlagName '--effort' -ValueText 'High' } 'a wrong-case value is rejected (validation is case-sensitive)'
+Assert-True ($script:CcodexLastError -like '*--effort*') 'the wrong-case error names the flag'
+Assert-Throws { ConvertTo-CcodexEffort -FlagName '--effort' -ValueText 'turbo' } 'an unknown value is rejected'
+Assert-True ($script:CcodexLastError -like '*--effort*') 'the unknown-value error names the flag'
+
 Write-Host "ConvertTo-CcodexHardTimeoutSec: 0 and positive integers parse; negative/non-numeric throw naming the flag"
 Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '0') 0 '0 (never) parses as a valid value'
 Assert-Equal (ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText '120') 120 'a positive integer parses through unchanged'
@@ -207,6 +234,10 @@ try {
     $nonNumericOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --hard-timeout-sec abc
     Assert-Equal $LASTEXITCODE 2 '--hard-timeout-sec abc exits 2'
     Assert-True ((($nonNumericOut -join "`n")) -like '*--hard-timeout-sec*') 'usage error names the --hard-timeout-sec flag (non-numeric value)'
+
+    $badEffortRunOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --effort turbo
+    Assert-Equal $LASTEXITCODE 2 'run --effort turbo exits 2'
+    Assert-True ((($badEffortRunOut -join "`n")) -like '*--effort*') 'usage error names the --effort flag (invalid value)'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppDataForHardTimeout
     $env:APPDATA = $savedAppDataForHardTimeout
