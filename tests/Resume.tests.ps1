@@ -75,12 +75,12 @@ Assert-Equal $script:CcodexLastError "ccodex: job 'parent-worktree' ran in workt
 
 Write-Host "Build-CcodexResumeArgs: exact spliced argument shape for read-only access"
 $argsReadOnly = Build-CcodexResumeArgs -ThreadId 'thread-abc' -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md'
-$expectedReadOnly = @('--ask-for-approval', 'never', 'exec', 'resume', 'thread-abc', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-')
+$expectedReadOnly = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', 'resume', 'thread-abc', '-')
 Assert-Equal ($argsReadOnly -join '|') ($expectedReadOnly -join '|') 'read-only access produces the exact spliced resume argument shape'
 
 Write-Host "Build-CcodexResumeArgs: exact spliced argument shape for workspace access"
 $argsWorkspace = Build-CcodexResumeArgs -ThreadId 'thread-xyz' -Access 'workspace' -RepoRoot 'D:\OtherRepo' -ResultPath 'D:\Job2\result.md'
-$expectedWorkspace = @('--ask-for-approval', 'never', 'exec', 'resume', 'thread-xyz', '--sandbox', 'workspace-write', '--json', '--color', 'never', '-C', 'D:\OtherRepo', '--output-last-message', 'D:\Job2\result.md', '-')
+$expectedWorkspace = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'workspace-write', '--json', '--color', 'never', '-C', 'D:\OtherRepo', '--output-last-message', 'D:\Job2\result.md', 'resume', 'thread-xyz', '-')
 Assert-Equal ($argsWorkspace -join '|') ($expectedWorkspace -join '|') 'workspace access produces the exact spliced resume argument shape (sandbox mapped via ConvertTo-CcodexSandboxFlag)'
 
 # --- Invoke-CcodexResume (command level) ---
@@ -126,7 +126,7 @@ $childPrompt = [System.IO.File]::ReadAllText((Join-Path $childDir 'prompt.md'))
 Assert-Equal $childPrompt 'follow up question' 'prompt.md is exactly the follow-up text (no worker-prompt template)'
 
 $childCommand = Get-Content -LiteralPath (Join-Path $childDir 'command.txt') -Raw
-Assert-True ($childCommand -like '*exec resume thread-parent*') 'command.txt invokes exec resume against the parent thread id'
+Assert-True ($childCommand -like '*--output-last-message*resume thread-parent*') 'command.txt splices resume <thread id> after the exec-level options (clap rejects exec options placed after the resume token)'
 
 # Parent job dir is strictly read-only to resume: its status.json is unchanged.
 $parentStatusAfter = Get-Content -LiteralPath (Join-Path (Get-CcodexJobRecord -JobId 'cmd-parent-done' -Root $cmdStateRoot).JobDir 'status.json') -Raw | ConvertFrom-Json

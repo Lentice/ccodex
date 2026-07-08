@@ -53,8 +53,12 @@ function Get-CcodexResumeContext {
 
 function Build-CcodexResumeArgs {
     # Exactly the Phase-1 `codex exec` argument shape (lib/ModeAccess.ps1's
-    # Build-CcodexCodexArgs) with the resume subcommand + thread id spliced in right after
-    # `exec`. Reuses ConvertTo-CcodexSandboxFlag so the access->sandbox mapping never forks.
+    # Build-CcodexCodexArgs) with `resume <thread-id>` spliced in AFTER the exec-level options
+    # and before the trailing `-` prompt positional. clap only resolves `--sandbox`/`-C`/
+    # `--color` at the `exec` level, so they must precede the `resume` subcommand token —
+    # placing them after it fails with "unexpected argument '--sandbox'" (live-verified
+    # 2026-07-08). Reuses ConvertTo-CcodexSandboxFlag so the access->sandbox mapping never
+    # forks.
     param(
         [Parameter(Mandatory)][string]$ThreadId,
         [Parameter(Mandatory)][string]$Access,
@@ -64,12 +68,13 @@ function Build-CcodexResumeArgs {
     $sandbox = ConvertTo-CcodexSandboxFlag -Access $Access
     return @(
         '--ask-for-approval', 'never',
-        'exec', 'resume', $ThreadId,
+        'exec',
         '--sandbox', $sandbox,
         '--json',
         '--color', 'never',
         '-C', $RepoRoot,
         '--output-last-message', $ResultPath,
+        'resume', $ThreadId,
         '-'
     )
 }

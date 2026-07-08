@@ -122,6 +122,33 @@ yours makes one of these tests fail, the test is right and the change is wrong.
   opinion has repeatedly found real issues internal reviewers missed. Triage every finding —
   adopt with action or reject with a stated reason.
 
+## Post-review hardening (2026-07-08)
+
+The deferred Phase 4/5 verification (whole-branch Codex reviews of `a8f93e8..285bfd3` and
+`285bfd3..5e44352`) produced five adopted findings, fixed in `bd1c9c8..6ccfcd3`:
+
+- `ccodex apply` is serialized under a **per-main-repo lock** in the state root (concurrent
+  applies could previously erase each other via the restore path); lock timeout → exit 21.
+- New append-only status field **`worktree_finalize_error`** — set only when worktree snapshot
+  finalization throws. `diff`/`apply` refuse such jobs with exit 12 (uncommitted worker output
+  must not silently become a "no changes" no-op). `worktree_committed=$false` alone does NOT
+  gate — it also covers legitimate zero-change runs.
+- Resumed children fall back to the **parent's thread id** when the resumed run emits no
+  `thread.started` event, keeping chain-off-the-newest-child resumable. Non-resume jobs
+  unchanged.
+- `ccodex resume` **rejects** `--repo`/`--mode`/`--access` and extra positionals (exit 2)
+  instead of silently ignoring them (resume inherits parent context).
+- cleanup's `worktrees_swept` counts only confirmed removals.
+
+`tests/ImplementE2E.tests.ps1` (the deferred composed chain submit → wait → diff → apply →
+cleanup + conflict path) landed at `a4b1cd2`.
+
+The Phase 5 live smoke then caught a bug no fixture-based test could: clap rejects exec-level
+options (`--sandbox`/`-C`/`--color`) placed after the `resume` token, so every real resume
+failed with codex exit 2. `Build-CcodexResumeArgs` now splices `resume <thread-id>` after the
+exec options, before the trailing `-`. Lesson recorded: fake-codex accepts ANY argument order —
+only a live call validates flag placement against the real CLI.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them
