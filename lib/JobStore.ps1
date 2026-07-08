@@ -52,6 +52,12 @@ function New-CcodexStatusObject {
         [string]$WorktreeRepo = $null,
         [string]$BaseCommit = $null,
         [Nullable[bool]]$WorktreeCommitted = $null,
+        # Set (to git's error text) ONLY when worktree snapshot finalization THREW for a worktree
+        # job — distinct from worktree_committed=$false, which also occurs on a clean empty-change
+        # run. Its presence means uncommitted worker changes may still sit in the worktree and were
+        # never captured into a <base>..HEAD commit, so diff/apply must refuse rather than report a
+        # misleading empty range. Null for non-worktree jobs and for successful finalization.
+        [string]$WorktreeFinalizeError = $null,
         # Phase 5 resume lineage (append-only addition; null for non-resume jobs). A resumed
         # job records the id of the parent whose Codex thread it continued.
         [string]$ParentJobId = $null
@@ -82,6 +88,7 @@ function New-CcodexStatusObject {
         worktree_repo     = $WorktreeRepo
         base_commit       = $BaseCommit
         worktree_committed = $WorktreeCommitted
+        worktree_finalize_error = $WorktreeFinalizeError
         parent_job_id     = $ParentJobId
     }
 }

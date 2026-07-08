@@ -303,6 +303,42 @@ Assert-Equal $twicePorcelain.Count 0 'main repo working tree is clean after the 
 $headAfterSecond = (& git -C $gitRepoApplyTwice rev-parse HEAD).Trim()
 Assert-Equal $headAfterSecond $headAfterFirst 'already-applied attempt leaves main repo HEAD at the first-apply commit'
 
+Write-Host "diff/apply: recorded worktree_finalize_error -> exit 12 (uncommitted worker output may be lost)"
+$ffMainRepo = Join-Path $tempRoot 'gitrepo-finalize-fail'
+New-CcodexTestGitRepo -Path $ffMainRepo
+$ffRepoKey = Get-CcodexRepoKey -RepoRoot $ffMainRepo
+$ffReservation = Reserve-CcodexJobDir -RepoKey $ffRepoKey -Mode 'implement' -Root $localAppData
+$ffJobId = $ffReservation.JobId
+$ffJobDir = $ffReservation.JobDir
+$ffIndexPath = Get-CcodexIndexPath -JobId $ffJobId -Root $localAppData
+New-Item -ItemType Directory -Path (Split-Path -Parent $ffIndexPath) -Force | Out-Null
+Write-CcodexJsonFileAtomic -Path $ffIndexPath -Object ([ordered]@{ job_id = $ffJobId; repo_key = $ffRepoKey; job_dir = $ffJobDir })
+# A REAL detached worktree at base (empty base..HEAD range), so that WITHOUT the finalize-error
+# refuse, diff/apply would see an empty range and report the misleading exit-0 no-op the finding
+# describes — the refuse (exit 12) is what this test locks in. worktree_committed=$false here is
+# deliberately identical to a clean empty run; only worktree_finalize_error distinguishes the
+# "worker output may be lost" case.
+$ffWt = New-CcodexJobWorktree -MainRepo $ffMainRepo -JobId $ffJobId -StateRoot $localAppData
+$ffWorktree = $ffWt.WorktreePath
+$ffBaseCommit = $ffWt.BaseCommit
+$ffStatus = New-CcodexStatusObject -JobId $ffJobId -Status 'done' -Mode 'implement' -Access 'worktree' -Repo $ffMainRepo `
+    -CreatedAt (Get-Date).ToString('o') -CodexExitCode 0 -WrapperExitCode 0 `
+    -MainRepo $ffMainRepo -WorktreeRepo $ffWorktree -BaseCommit $ffBaseCommit -WorktreeCommitted $false `
+    -WorktreeFinalizeError 'git commit failed in worktree: simulated finalize failure'
+Write-CcodexJsonFileAtomic -Path (Join-Path $ffJobDir 'status.json') -Object $ffStatus
+
+$ffPreHead = (& git -C $ffMainRepo rev-parse HEAD).Trim()
+$ffDiff = Invoke-CcodexDiffCommand -JobId $ffJobId -StateRoot $localAppData
+Assert-Equal $ffDiff.WrapperExitCode 12 'diff on a job whose worktree finalization failed -> exit 12'
+Assert-True ($ffDiff.Message -like "*$ffWorktree*") 'diff exit-12 message names the worktree path'
+Assert-True ($ffDiff.Message -like '*uncommitted worker changes*') 'diff exit-12 message warns uncommitted worker changes may exist'
+
+$ffApply = Invoke-CcodexApplyCommand -JobId $ffJobId -StateRoot $localAppData
+Assert-Equal $ffApply.WrapperExitCode 12 'apply on a job whose worktree finalization failed -> exit 12'
+Assert-True ($ffApply.Message -like "*$ffWorktree*") 'apply exit-12 message names the worktree path'
+$ffPostHead = (& git -C $ffMainRepo rev-parse HEAD).Trim()
+Assert-Equal $ffPostHead $ffPreHead 'main repo HEAD untouched by the refused apply'
+
 Write-Host "apply: per-main-repo lock held externally -> exit 21, main repo untouched"
 $gitRepoApplyLocked = Join-Path $tempRoot 'gitrepo-apply-locked'
 New-CcodexTestGitRepo -Path $gitRepoApplyLocked

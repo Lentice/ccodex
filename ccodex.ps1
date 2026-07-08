@@ -84,6 +84,9 @@ function Complete-CcodexInternalFailure {
         [string]$MainRepo = $null,
         [string]$WorktreeRepo = $null,
         [string]$BaseCommit = $null,
+        # Preserved onto the terminal failure status when a worktree finalization failure was
+        # already detected before an internal-failure path was taken. Null/absent otherwise.
+        [string]$WorktreeFinalizeError = $null,
         # Phase 5 resume lineage: carried onto the terminal failure status so a resumed job's
         # parentage survives even the internal-failure path. Null/absent for non-resume jobs.
         [string]$ParentJobId = $null
@@ -101,7 +104,7 @@ function Complete-CcodexInternalFailure {
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
 
-    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -ParentJobId $ParentJobId
+    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeFinalizeError $WorktreeFinalizeError -ParentJobId $ParentJobId
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
     return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $hintedMessage`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
 }
@@ -346,11 +349,17 @@ function Invoke-CcodexJobExecution {
     # caught and recorded as "not committed" ($false) rather than propagated. worktree_committed
     # stays $null for non-worktree jobs.
     $worktreeCommitted = $null
+    $worktreeFinalizeError = $null
     if ($WorktreeRepo) {
         try {
             $worktreeCommitted = [bool](Complete-CcodexJobWorktree -WorktreePath $WorktreeRepo -JobId $jobId).Committed
         } catch {
+            # Finalization FAILED (git add/status/commit/rev-parse threw). worktree_committed=$false
+            # here is indistinguishable from a clean empty-change run, so record the error text in a
+            # dedicated field: it is the only reliable signal that uncommitted worker output may
+            # still sit in the worktree and was never snapshot-committed. diff/apply key off it.
             $worktreeCommitted = $false
+            $worktreeFinalizeError = $_.Exception.Message
         }
     }
 
@@ -367,10 +376,10 @@ function Invoke-CcodexJobExecution {
         Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $timeoutComplete
 
         $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
-        $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -ParentJobId $ParentJobId
+        $timeoutStatusObj = New-CcodexStatusObject -JobId $jobId -Status 'timed_out' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $null -WrapperExitCode 24 -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -CodexThreadId $codexThreadId -HardTimeoutSec $HardTimeoutSec -TimeoutReason $timeoutReason -TerminatedAt $terminatedAt -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId
         $timeoutWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $timeoutStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
         if (-not $timeoutWrite.LockAcquired) {
-            return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the timed_out status'
+            return Complete-CcodexInternalFailure @internalFailureParams -WorktreeFinalizeError $worktreeFinalizeError -Message 'could not acquire the job lock to record the timed_out status'
         }
         if (-not $timeoutWrite.Written) {
             # The job moved off `running` under us (e.g. a concurrent cancel) before this
@@ -384,7 +393,7 @@ function Invoke-CcodexJobExecution {
                 return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $preservedTimeout
             }
             if ($null -eq $preservedTimeout) {
-                return Complete-CcodexInternalFailure @internalFailureParams -Message "job $jobId's status.json became unreadable during the timed_out write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
+                return Complete-CcodexInternalFailure @internalFailureParams -WorktreeFinalizeError $worktreeFinalizeError -Message "job $jobId's status.json became unreadable during the timed_out write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
             }
             return New-CcodexUnaccountedStatusResult -JobId $jobId -JobDir $JobDir -Message "job $jobId is unexpectedly '$($preservedTimeout.status)' (backend_id '$($preservedTimeout.backend_id)') during the timed_out write; leaving status.json untouched rather than reporting a fabricated outcome"
         }
@@ -409,10 +418,10 @@ function Invoke-CcodexJobExecution {
     $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
-    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -ParentJobId $ParentJobId
+    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId
     $finalWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
     if (-not $finalWrite.LockAcquired) {
-        return Complete-CcodexInternalFailure @internalFailureParams -Message 'could not acquire the job lock to record the terminal status'
+        return Complete-CcodexInternalFailure @internalFailureParams -WorktreeFinalizeError $worktreeFinalizeError -Message 'could not acquire the job lock to record the terminal status'
     }
     if (-not $finalWrite.Written) {
         # Same race as the timed_out branch above: a concurrent writer (cancel) already
@@ -425,7 +434,7 @@ function Invoke-CcodexJobExecution {
             return New-CcodexPreservedStatusResult -JobId $jobId -JobDir $JobDir -PreservedStatus $preservedFinal
         }
         if ($null -eq $preservedFinal) {
-            return Complete-CcodexInternalFailure @internalFailureParams -Message "job $jobId's status.json became unreadable during the terminal write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
+            return Complete-CcodexInternalFailure @internalFailureParams -WorktreeFinalizeError $worktreeFinalizeError -Message "job $jobId's status.json became unreadable during the terminal write (expected to still be running under this run's backend_id); refusing to report a fabricated outcome"
         }
         return New-CcodexUnaccountedStatusResult -JobId $jobId -JobDir $JobDir -Message "job $jobId is unexpectedly '$($preservedFinal.status)' (backend_id '$($preservedFinal.backend_id)') during the terminal write; leaving status.json untouched rather than reporting a fabricated outcome"
     }
@@ -1094,6 +1103,17 @@ function Resolve-CcodexWorktreeJobContext {
     if (-not (Test-Path -LiteralPath $worktreePath -PathType Container)) {
         $message = "ccodex: worktree removed; artifacts remain at $jobDir"
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $message; JobDir = $jobDir; StatusObject = $statusObj; WorktreePath = $null; BaseCommit = $null; MainRepo = $null }
+    }
+
+    # Worktree snapshot finalization failed for this job: the worker's edits were never captured
+    # into a <base>..HEAD commit, so diff/apply would silently see an empty range and report a
+    # misleading no-op. Refuse (exit 12) instead, naming the worktree so the operator can inspect
+    # the uncommitted output there. (worktree_committed=$false alone does NOT trigger this — that
+    # also happens on a clean empty-change run; only a recorded finalize error does.)
+    $finalizeError = if ($statusObj) { [string]$statusObj.worktree_finalize_error } else { $null }
+    if (-not [string]::IsNullOrEmpty($finalizeError)) {
+        $message = "ccodex: job $JobId's worktree snapshot was never committed (finalization failed: $finalizeError); uncommitted worker changes may still exist in the worktree and were not captured, so this command cannot proceed. Inspect the worktree manually.`n  worktree: $worktreePath`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message; JobDir = $jobDir; StatusObject = $statusObj; WorktreePath = $worktreePath; BaseCommit = $null; MainRepo = $null }
     }
 
     return [pscustomobject]@{
