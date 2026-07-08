@@ -32,6 +32,12 @@ New-Item -ItemType Directory -Path $claudeCommandsDir -Force | Out-Null
 $claudeCommandDest = Join-Path $claudeCommandsDir 'ccodex.md'
 Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -Destination $claudeCommandDest -Force
 
+# Per-function namespaced commands: templates/claude-commands/<name>.md installs to
+# commands/ccodex/<name>.md, which Claude Code exposes as /ccodex:<name>.
+$claudeNamespacedDir = Join-Path $claudeCommandsDir 'ccodex'
+New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
+Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-commands\*.md') -Destination $claudeNamespacedDir -Force
+
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'
 New-Item -ItemType Directory -Path $claudeRulesDir -Force | Out-Null
 $claudeRuleDest = Join-Path $claudeRulesDir 'ccodex-delegation.md'
@@ -46,6 +52,7 @@ Write-Host "ccodex installed to $destScriptDir"
 Write-Host "shim: $shimPath"
 Write-Host "default template: $templateDest"
 Write-Host "claude command: $claudeCommandDest"
+Write-Host "claude namespaced commands (/ccodex:<name>): $claudeNamespacedDir"
 Write-Host "claude delegation rule: $claudeRuleDest"
 Write-Host "claude skill: $claudeSkillDest"
 if (($env:PATH -split ';') -notcontains $InstallDir) {

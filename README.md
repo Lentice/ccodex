@@ -9,6 +9,9 @@ captures its raw output, and hands back only the clean final result, so the call
 treat it like any other command it shells out to.
 
 ```powershell
+# From Claude Code (the main way) — Claude scopes the diff, runs Codex, triages the findings:
+#   /ccodex:review --staged
+# The CLI primitive underneath:
 "Review this diff for correctness issues." | ccodex run --mode review
 ```
 
@@ -61,16 +64,50 @@ D:\Documents\GitHub\ccodex\install.ps1
 (the script warns if it's missing). It also installs:
 
 - the default worker-prompt template to `%APPDATA%\ccodex\templates\worker-prompt.md`
-- the `/ccodex` Claude Code command to `%USERPROFILE%\.claude\commands\ccodex.md`
-- the delegation policy rule to `%USERPROFILE%\.claude\rules\ccodex-delegation.md`
 - the `ccodex` Claude Code agent skill to `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`
+- the `/ccodex` command plus the per-function `/ccodex:<name>` commands to
+  `%USERPROFILE%\.claude\commands\`
+- the delegation policy rule to `%USERPROFILE%\.claude\rules\ccodex-delegation.md`
 
 Pass `-InstallDir`/`-TemplatesDir`/`-ClaudeDir` to override any of these locations.
 
-## Usage
+## Using ccodex from Claude Code (the main way)
 
-The essential flows — full flag reference, exit-code contract, and file formats are in
-[`docs/2026-07-08-ccodex-reference.md`](docs/2026-07-08-ccodex-reference.md).
+You normally never type `ccodex` yourself — Claude Code does. The installer wires three layers
+into Claude, and after a restart of the session they're all active:
+
+- **The `ccodex` skill** — Claude discovers on its own when a task is worth delegating (a big
+  diff review, a second opinion, a long background job) and drives the CLI correctly, including
+  exit-code/failure reactions and triage of Codex's findings.
+- **Slash commands** — you invoke a specific ccodex function on demand:
+
+  | Command | What it does |
+  | --- | --- |
+  | `/ccodex:review [--staged\|--working\|--range a..b] [--background]` | Scoped Codex code review of your current changes; findings come back triaged (adopted vs rejected), not pasted raw. |
+  | `/ccodex:ask [--background] <question>` | Second opinion / brainstorm from a different model — plans, designs, or "I'm stuck" debugging. |
+  | `/ccodex:implement [--background] <task>` | Delegate an edit to Codex in an isolated git worktree; Claude reviews `ccodex diff` with you before anything is applied. |
+  | `/ccodex:resume <job_id> [follow-up]` | Continue the same Codex session — answer its clarifying question or push back on a finding. |
+  | `/ccodex:jobs [job_id] [action]` | Check on / collect / cancel background jobs. |
+  | `/ccodex:doctor` | Health-check Codex + ccodex when failures look environmental (auth, quota, sandbox). |
+  | `/ccodex:cleanup [--older-than 7d]` | Preview-then-delete aged job state; optionally scrub stale Codex session ids. |
+  | `/ccodex <task>` | The general dispatcher when you don't care which function fits. |
+
+  `--background` on `review`/`ask`/`implement` submits the work as a detached background job so
+  Claude keeps working while Codex runs; collect later via `/ccodex:jobs`.
+
+- **The delegation rule** — with a `.ccodex/ccodex.json` in your project (see
+  [Delegation policy](#delegation-policy-ccodexccodexjson)), every Claude session automatically
+  offers (or runs) a scoped Codex review after changes and a second opinion after plans, within
+  the cost guards you set. No per-session prompting needed.
+
+Typical day-to-day: finish a feature → `/ccodex:review --staged` → Claude scopes the diff, runs
+the review, verifies each finding against the code, and reports what it adopted vs rejected.
+
+## Direct CLI usage
+
+Everything the slash commands do is plain CLI underneath — useful for scripts, other agents, or
+poking at it by hand. The essential flows — full flag reference, exit-code contract, and file
+formats are in [`docs/2026-07-08-ccodex-reference.md`](docs/2026-07-08-ccodex-reference.md).
 
 **Scoped review of a diff.** Use `--embed-diff` so the wrapper generates and embeds the diff
 itself; it's the reliable form on hosts where Codex's own sandbox can't spawn `git diff`
@@ -127,9 +164,6 @@ ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 ccodex cleanup --dry-run                             # preview only
 ccodex cleanup --older-than 7d --scrub-thread-ids    # delete aged jobs + blank old session ids
 ```
-
-From Claude Code, `/ccodex <task>` wraps all of the above; a project can also add
-`.ccodex/ccodex.json` (see below) to opt every session into automatic review checkpoints.
 
 ## Other key points
 

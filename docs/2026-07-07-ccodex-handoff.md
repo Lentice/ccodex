@@ -58,6 +58,7 @@ Read in this order for a full picture; consult individually as needed.
 | `CLAUDE.md` | Repo conventions: what this repo is, testing policy (no Pester), encoding, README-per-phase rule, git/commit policy. |
 | `templates/worker-prompt.md` | The worker prompt contract prepended to `run`/`submit` prompts (installed to `%APPDATA%\ccodex\templates\`). |
 | `templates/claude-command-ccodex.md` | Source of the installed `/ccodex` slash command. |
+| `templates/claude-commands/*.md` | Sources of the installed per-function `/ccodex:<name>` commands (`review`, `ask`, `implement`, `resume`, `jobs`, `doctor`, `cleanup`). |
 | `templates/claude-rule-ccodex-delegation.md` | Source of the installed delegation-policy rule (`~/.claude/rules/ccodex-delegation.md`). |
 | Executed plans: `docs/2026-07-03-...phase1-plan.md`, `docs/2026-07-04-...phase2a-plan.md`, `docs/2026-07-05-ccodex-failure-modes-plan.md`, `docs/2026-07-05-ccodex-delegation-plan.md` | Historical record of completed work. Useful as style/granularity reference for how tasks were specified and committed; not work items. |
 | `.superpowers/sdd/progress.md` | Machine-local, git-ignored SDD ledger (task-by-task completion lines, review outcomes, dogfood results). If present, trust it over recollection; if absent (fresh clone), git history + this handoff are sufficient. |

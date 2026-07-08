@@ -520,9 +520,11 @@ ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait
                     #   resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
 install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md,
+                    #   ~\.claude\commands\ccodex\<name>.md (the /ccodex:<name> commands),
                     #   ~\.claude\rules\ccodex-delegation.md, and ~\.claude\skills\ccodex\SKILL.md
-templates/          # worker-prompt contract, the /ccodex Claude command, the delegation rule
-                    #   template, and the ccodex Claude Code agent skill
+templates/          # worker-prompt contract, the /ccodex Claude command, the per-function
+                    #   claude-commands/ set (/ccodex:review, :ask, :implement, :resume, :jobs,
+                    #   :doctor, :cleanup), the delegation rule template, and the agent skill
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
                     #   (includes lib/Worktree.ps1 for --access worktree jobs and
                     #   lib/Resume.ps1 for ccodex resume)
@@ -541,6 +543,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   task; `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
   `--focus`, `--embed-diff`, and `--repo`; `resume <job_id>` accepts the same prompt sources as
   `run` (minus `--repo`, which is always inherited from the parent) plus `--hard-timeout-sec`;
+  `run`/`submit`/`review`/`resume` all additionally accept the optional `--model`/`--effort`
+  Codex knobs (see [run and submit](#run-and-submit));
   `diff`/`apply` take a worktree job id; `cancel`/`tail`/`debug` take a job id (`tail` also
   accepts `--lines`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
@@ -549,8 +553,10 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
 - `install.ps1` — copies `ccodex.ps1` + `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes the
   `ccodex.cmd` shim there, installs the default worker-prompt template to
   `%APPDATA%\ccodex\templates\worker-prompt.md`, installs the `/ccodex` Claude command to
-  `%USERPROFILE%\.claude\commands\ccodex.md`, and installs the delegation policy rule to
-  `%USERPROFILE%\.claude\rules\ccodex-delegation.md`
+  `%USERPROFILE%\.claude\commands\ccodex.md` and the per-function `templates/claude-commands/*.md`
+  set to `%USERPROFILE%\.claude\commands\ccodex\<name>.md` (surfaced as `/ccodex:<name>`),
+  installs the delegation policy rule to `%USERPROFILE%\.claude\rules\ccodex-delegation.md`, and
+  installs the agent skill to `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`
 - `lib/Paths.ps1` — global state-root path helpers and `repo_key` hashing
 - `lib/Repo.ps1` — `--repo` override / `git rev-parse --show-toplevel` resolution
 - `lib/JobId.ps1` — job id generation and atomic job-directory reservation
@@ -602,6 +608,11 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
 - `templates/claude-command-ccodex.md` — the `/ccodex` Claude command template (includes `review`,
   job-management, delegated-implementation `implement` → `diff` → `apply`, and multi-turn
   `resume` guidance)
+- `templates/claude-commands/*.md` — the per-function Claude command set, installed to
+  `~/.claude/commands/ccodex/<name>.md` and surfaced as `/ccodex:<name>`: `review` (scoped
+  post-change review, `--background` submits it), `ask` (brainstorm/second opinion), `implement`
+  (worktree-isolated edit with the diff-before-apply gate), `resume` (multi-turn follow-up),
+  `jobs` (status/wait/read/tail/cancel/debug), `doctor`, and `cleanup`
 - `templates/claude-rule-ccodex-delegation.md` — the always-on delegation policy rule, installed
   to `~/.claude/rules/ccodex-delegation.md` (includes the never-auto-apply `implement`/`diff`/
   `apply` guidance and the resume-on-follow-up pattern)
