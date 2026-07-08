@@ -149,6 +149,28 @@ failed with codex exit 2. `Build-CcodexResumeArgs` now splices `resume <thread-i
 exec options, before the trailing `-`. Lesson recorded: fake-codex accepts ANY argument order —
 only a live call validates flag placement against the real CLI.
 
+## Feature-wave notes (2026-07-08, post-completion)
+
+- **Hidden Codex windows**: the CIM worker launch passes a ClientOnly `Win32_ProcessStartup`
+  with `ShowWindow=[uint16]0` (SW_HIDE); `Invoke-CcodexCodexProcess` and the doctor probe set
+  `ProcessStartInfo.CreateNoWindow=$true`. Live-verified (real CIM submit, no visible window).
+  Don't remove either half: the CIM startup instance hides the WORKER console, CreateNoWindow
+  hides the CODEX child console.
+- **`--model`/`--effort`**: hyphenated flags never bind to the script's `param()` names, so
+  both land in `$args` and are read via the arg helpers — but PUBLIC value flags use
+  `Get-CcodexRequiredArgValue`, which throws (→ exit 2) when the flag is present with no value
+  or a `--`-shaped value. Plain `Get-CcodexArgValue` would silently ignore a trailing `--model`
+  and consume `--effort` as the model's value (`-m --effort` forwarded to Codex) — a Codex
+  review finding, regression-guarded in `tests/RunCommand.tests.ps1`. The effort value is
+  forwarded as ONE bare `-c model_reasoning_effort=<v>` argv element on purpose (bare TOML
+  falls back to a literal string; avoids cmd-shim quote layering). For `submit`, model/effort
+  reach the detached worker ONLY via the launch command line (status.json carries neither —
+  per-invocation knobs, not lifecycle state).
+- **Per-function Claude commands**: `templates/claude-commands/<name>.md` installs to
+  `~/.claude/commands/ccodex/<name>.md` (= `/ccodex:<name>`). `install.ps1` deletes the
+  destination's `*.md` before copying so a renamed/removed template never leaves a ghost
+  command (also a Codex review finding).
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them

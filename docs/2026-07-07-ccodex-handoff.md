@@ -30,7 +30,14 @@ management, isolation, and multi-turn discussion.
   `apply`) and Phase 5 (`resume` multi-turn advisor, `thread_expired`, lineage). Implemented
   token-lean (2026-07-08): per-task TDD + full-suite green per commit, but per-task reviews,
   the composed E2E test, and live smokes are deferred — see § 4's verification backlog.
-- **Test suite:** 32 files, all green (independent full run 2026-07-08 at `5e44352`; see
+- **Post-completion feature wave (2026-07-08, after the verification backlog):** hidden Codex
+  console windows on Windows (`233335a`, live-verified); README split into user-facing +
+  `docs/2026-07-08-ccodex-reference.md` (`a83a5bb`) and CLAUDE.md reoriented to developer docs
+  (`9c72e09`); optional `--model`/`--effort` passthrough on `run`/`submit`/`review`/`resume`
+  (`c043dcf`, valueless-flag guard in `77fb0a8`); per-function `/ccodex:<name>` Claude commands
+  (`templates/claude-commands/`) + Claude-first README (`416cca9`). Whole batch Codex-reviewed
+  (1 Important + 1 Minor finding, both verified and fixed in `77fb0a8`).
+- **Test suite:** 33 files, all green (latest full run 2026-07-08 at `77fb0a8`; see
   dev-notes for the run recipe).
 - **Live evidence:** gold-seal round-trip 2026-07-06 (submit → wait → "FINAL", thread id
   captured); real quota exhaustion 2026-07-07 correctly classified as
@@ -110,4 +117,5 @@ amendment **"Retention, cleanup, and remaining-phase decisions (2026-07-07)"**.
 - Worker prompt template: `%APPDATA%\ccodex\templates\worker-prompt.md`.
 - Job state root: `%LOCALAPPDATA%\ccodex\` (jobs + index; Phase 4 adds `worktrees\`).
 - Planned (2b): user retention config at `%APPDATA%\ccodex\config.json`.
-- Per-project delegation policy: `<repo>/.ccodex/ccodex.json` (this repo has one).
+- Per-project delegation policy: `<repo>/.ccodex/ccodex.json` (optional; this repo currently
+  has none, so the documented defaults apply).
