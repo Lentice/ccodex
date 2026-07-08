@@ -7,37 +7,41 @@ independent git repository, and installed to a user-level `PATH` directory
 (`%USERPROFILE%\.local\bin\ccodex\`) so any project can call it. Do not assume this repo lives
 inside, or is coupled to, any other project.
 
-## Source of truth
+All planned phases (1, 2a, 2a.1, 2b, 2c, 3, 4, 5) are implemented and verified; ongoing work is
+maintenance, hardening, and incremental features.
 
-- `docs/2026-07-07-ccodex-handoff.md` — **start here**: current state, remaining work, and the
-  index of every other document.
-- `docs/2026-07-03-ccodex-adapter-design.md` — the full design spec across all phases; its dated
-  amendment sections are authoritative where they refine earlier text.
-- `docs/2026-07-07-ccodex-dev-notes.md` — conventions, regression-guarded pitfalls, and test
-  recipes; read before changing `ccodex.ps1` or `lib/`.
-- `docs/2026-07-07-ccodex-phase2b-plan.md` — the current (next unimplemented) phase's
-  task-by-task plan. Phases 4 and 5 have their own plan files under `docs/` following the same
-  `YYYY-MM-DD-<name>.md` naming; executed phase plans remain as historical record.
+## Where to read what (developer docs — use these, not README.md)
 
-## README maintenance
+`README.md` is **user-facing only** (purpose, features, install, concise usage). Never use it as
+a technical source when developing; the documents below are the developer-facing truth:
 
-**After completing each phase (Phase 1, Phase 2, Phase 3, Phase 4, ...), update `README.md`
-before considering the phase done.** Specifically:
+| When you need... | Read |
+|---|---|
+| Project state, doc index, verification history — **start here** | `docs/2026-07-07-ccodex-handoff.md` |
+| Binding contracts: exit codes, `status.json` schema, worker prompt, backend, encoding; dated amendments are authoritative where they refine earlier text | `docs/2026-07-03-ccodex-adapter-design.md` |
+| **Before changing `ccodex.ps1` or `lib/`**: regression-guarded pitfalls, test recipes, fixture env vars, host quirks, post-review hardening notes, accepted minors | `docs/2026-07-07-ccodex-dev-notes.md` |
+| Exact current behavior of a command: full per-command/flag reference, exit-code and failure-class tables, `status.json` field notes, repo/module layout | `docs/2026-07-08-ccodex-reference.md` |
+| How past work was specified and committed (style/granularity reference; not work items) | executed phase plans under `docs/` (`YYYY-MM-DD-<name>.md`) |
 
-- Move the phase from "in progress" to done in the Status and Roadmap sections.
-- Update the "Implemented so far" / "Not yet implemented" lists to match reality.
-- Update or remove the "target shape, not current behavior" caveat once the described commands
-  actually work.
-- Add or correct usage examples for anything the phase newly makes callable.
+## Documentation maintenance (after every user-visible change)
 
-Do this as part of the phase's own work, not as a separate deferred task — a phase is not
-finished until README.md reflects what the tool can actually do.
+A change is not done until the docs reflect the new reality, in the same piece of work — never
+as a deferred task:
+
+- **`README.md`** (user-facing): update usage examples, features, and the short cheat sheet for
+  anything a user can now do or must now do differently.
+- **`docs/2026-07-08-ccodex-reference.md`** (developer-facing): update the command/flag
+  reference and contract tables for the same change.
+- Re-run `install.ps1` after user-facing changes and verify the installed copy under
+  `%USERPROFILE%\.local\bin\ccodex\` matches the repo (templates and the Claude skill install
+  from this repo too).
 
 ## Testing
 
 No Pester dependency (see the Phase 1 plan's Global Constraints for why). Tests are plain
 PowerShell assertion scripts under `tests/`, run directly with `pwsh -NoProfile -File <test>.ps1`
-and checked by exit code, not by a test-runner framework.
+and checked by exit code, not by a test-runner framework. Every change must leave the FULL suite
+green (run recipe in dev-notes), not just the new file.
 
 ## Coding conventions
 
@@ -46,11 +50,12 @@ and checked by exit code, not by a test-runner framework.
   UTF-8 **without BOM**.
 - Keep `lib/*.ps1` files single-responsibility and independently testable via dot-sourcing.
 - Follow the exact function signatures, exit codes, and file formats defined in the design spec —
-  they are a stable contract other tooling (e.g. a future Claude slash command) will depend on.
+  they are a stable contract other tooling (the installed Claude skill/command/rule) depends on.
+  Contracts are append-only: never rename or repurpose an existing exit code or status field.
 
 ## Git
 
-This repo is committed to normally: one commit per implementation task, following the plan's TDD
-steps (test, verify red, implement, verify green, commit). There is no external git policy
-restricting this repo — that restriction only applies to the separate project this tool was
-originally designed inside.
+This repo is committed to normally: one commit per implementation task, following TDD steps
+(test, verify red, implement, verify green, commit). No co-author trailers. Never commit
+`.superpowers/`. There is no external git policy restricting this repo — that restriction only
+applies to the separate project this tool was originally designed inside.
