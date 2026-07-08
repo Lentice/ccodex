@@ -61,33 +61,32 @@ Read in this order for a full picture; consult individually as needed.
 | Executed plans: `docs/2026-07-03-...phase1-plan.md`, `docs/2026-07-04-...phase2a-plan.md`, `docs/2026-07-05-ccodex-failure-modes-plan.md`, `docs/2026-07-05-ccodex-delegation-plan.md` | Historical record of completed work. Useful as style/granularity reference for how tasks were specified and committed; not work items. |
 | `.superpowers/sdd/progress.md` | Machine-local, git-ignored SDD ledger (task-by-task completion lines, review outcomes, dogfood results). If present, trust it over recollection; if absent (fresh clone), git history + this handoff are sufficient. |
 
-## 4. Remaining work: deferred verification backlog
+## 4. Remaining work: none — verification backlog completed 2026-07-08
 
-All planned phases (1, 2a, 2a.1, 2b, 2c, 3, 4, 5) are implemented. Phases 4 and 5 were executed
-token-lean on 2026-07-08 (user directive: main features first): every task still ran TDD with a
-full-suite green gate per commit, but the following verification was deliberately deferred and is
-now the remaining work, in recommended order:
+All planned phases (1, 2a, 2a.1, 2b, 2c, 3, 4, 5) are implemented, and the verification that
+was deferred from the token-lean Phase 4/5 execution has since been completed:
 
-1. **Codex whole-branch review of Phases 4+5** (`a8f93e8..5e44352`, paths `lib/ ccodex.ps1
-   tests/ templates/ README.md`, `--embed-diff`). Triage adopt-or-reject per the delegation
-   policy. This substitutes for the skipped per-task reviews (P4 T3–T7, P5 T1–T4).
-2. **`tests/ImplementE2E.tests.ps1`** (P4 T7 Step 1, skipped): shim-level composed chain
-   submit → wait → diff → apply → cleanup, plus the conflict path (exit 25) and
-   JSONL-never-on-stdout assertions. Spec is in the Phase 4 plan, Task 7.
-3. **Phase 4 live smoke** (P4 T7 Step 3, skipped): real-codex implement job against a throwaway
-   temp repo, then diff/apply/verify/cleanup.
-4. **Phase 5 live smoke** (P5 T4 Step 2, skipped): real-codex run → resume continuity
-   (SEED/CONTINUED), plus the negative scrubbed-thread resume (exit 2) against a temp state root.
-5. **Dev-notes accepted-minor**: completion-evidence files not backend-scoped on the unreachable
-   foreign-takeover path — revisit only if job dirs ever become shared (they did not in 4/5;
-   `resume` creates a new job dir).
+1. **Codex whole-branch reviews** of `a8f93e8..285bfd3` (P4) and `285bfd3..5e44352` (P5),
+   substituting for the skipped per-task reviews: 6 findings, 5 adopted and fixed in
+   `bd1c9c8..6ccfcd3` (see dev-notes § "Post-review hardening (2026-07-08)"), 1 Minor rejected
+   (resume exit mapping via pinned message text — behavior correct and test-guarded).
+2. **`tests/ImplementE2E.tests.ps1`** landed at `a4b1cd2` (47 assertions: composed
+   submit → wait → diff → apply → cleanup chain, conflict path → 25, stdout purity).
+3. **Phase 4 live smoke PASSED**: real Codex created `HELLO.md` in an isolated worktree of a
+   throwaway repo; `diff` showed exactly that file; `apply` landed it (content verified);
+   `cleanup --older-than 0d` deleted the job and swept the worktree.
+4. **Phase 5 live smoke PASSED** after catching a real bug (exec-level options must precede the
+   `resume` token — fixed in `900ad37`): `resume` returned exactly `CONTINUED` with
+   `parent_job_id` lineage and the parent's thread id in the child status. The negative
+   scrubbed-thread case is covered at shim level by the Phase 5 task tests.
 
-Deferred-item provenance: `.superpowers/sdd/progress.md` (machine-local) and the task reports
-under `.superpowers/sdd/p4/`, `.superpowers/sdd/p5/`. Governing design decisions live in the
-spec amendment **"Retention, cleanup, and remaining-phase decisions (2026-07-07)"**.
+The only open item is the dev-notes accepted-minor (completion-evidence files not backend-scoped
+on the currently unreachable foreign-takeover path) — revisit only if job dirs ever become
+shared between workers.
 
-Step 0 (Codex second opinion on the three plans) was completed late on 2026-07-07 after quota
-recovery; its findings were triaged into the plans before Phases 4/5 ran.
+Provenance: `.superpowers/sdd/progress.md` (machine-local) and the task reports under
+`.superpowers/sdd/p4/`, `.superpowers/sdd/p5/`. Governing design decisions live in the spec
+amendment **"Retention, cleanup, and remaining-phase decisions (2026-07-07)"**.
 
 ## 5. Non-negotiable working rules (summary — details in dev-notes and CLAUDE.md)
 
