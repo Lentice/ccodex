@@ -1864,13 +1864,17 @@ function Get-CcodexRequiredArgValue {
 
 function ConvertTo-CcodexEffort {
     # --effort passes through to Codex as `-c model_reasoning_effort=<value>`, so only the
-    # values Codex itself accepts are allowed, case-sensitively (Codex's TOML enum match is
-    # case-sensitive; forwarding 'High' would silently degrade to the default effort). An
-    # invalid value is a usage error naming the flag (exit 2), same shape as
-    # ConvertTo-CcodexHardTimeoutSec. --model is deliberately NOT validated: model names are
-    # an open set that changes with Codex releases, so it is forwarded verbatim as `-m <model>`.
+    # values Codex itself accepts are allowed, case-sensitively (Codex accepts arbitrary
+    # strings as a Custom effort since 0.144.x, so a typo like 'High' would be forwarded and
+    # silently degrade server-side instead of failing fast). An invalid value is a usage error
+    # naming the flag (exit 2), same shape as ConvertTo-CcodexHardTimeoutSec. --model is
+    # deliberately NOT validated: model names are an open set that changes with Codex releases,
+    # so it is forwarded verbatim as `-m <model>`. This list mirrors Codex's ReasoningEffort
+    # enum (verified against codex-cli 0.144.1); per-model support varies and is enforced by
+    # Codex/the API, not here. On a Codex upgrade, re-derive the list per the
+    # codex-upgrade-check skill (.claude/skills/codex-upgrade-check/SKILL.md).
     param([Parameter(Mandatory)][string]$FlagName, [Parameter(Mandatory)][string]$ValueText)
-    $valid = @('minimal', 'low', 'medium', 'high')
+    $valid = @('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')
     if ($ValueText -cnotin $valid) {
         throw "ccodex: $FlagName must be one of: $($valid -join ', ') (case-sensitive); got '$ValueText'."
     }

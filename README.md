@@ -152,10 +152,11 @@ ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 
 **Pick a model or effort per call** (optional; omit both to use Codex's configured defaults) —
 `run`, `submit`, `review`, and `resume` all take `--model <model>` and
-`--effort <minimal|low|medium|high>`:
+`--effort <none|minimal|low|medium|high|xhigh|max|ultra>` (not every model supports every
+effort; Codex rejects unsupported combinations):
 
 ```powershell
-"Deep design review of this plan." | ccodex run --mode brainstorm --model gpt-5-codex --effort high
+"Deep design review of this plan." | ccodex run --mode brainstorm --model gpt-5.6-terra --effort xhigh
 ```
 
 **Cleanup**, periodically or when reclaiming disk:

@@ -195,8 +195,8 @@ Assert-True (-not ($plainCommandTxt -like '*-m *')) 'command.txt has no -m when 
 Assert-True (-not ($plainCommandTxt -like '*model_reasoning_effort*')) 'command.txt has no -c model_reasoning_effort when --effort omitted'
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
-Write-Host "ConvertTo-CcodexEffort: the four valid values pass through verbatim; any other value throws naming the flag"
-foreach ($validEffort in @('minimal', 'low', 'medium', 'high')) {
+Write-Host "ConvertTo-CcodexEffort: the eight valid values (codex-cli 0.144.1 ReasoningEffort enum) pass through verbatim; any other value throws naming the flag"
+foreach ($validEffort in @('none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra')) {
     Assert-Equal (ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $validEffort) $validEffort "'$validEffort' is accepted and returned verbatim"
 }
 Assert-Throws { ConvertTo-CcodexEffort -FlagName '--effort' -ValueText 'High' } 'a wrong-case value is rejected (validation is case-sensitive)'

@@ -24,9 +24,9 @@ conversation.
    ```
 
    `run`, `submit`, `review`, and `resume` also take optional `--model <model>` and
-   `--effort <minimal|low|medium|high>` to pick the Codex model/reasoning effort per call — omit
-   both to use Codex's configured defaults (the right choice unless the task clearly needs a
-   heavier or lighter setting).
+   `--effort <none|minimal|low|medium|high|xhigh|max|ultra>` to pick the Codex model/reasoning
+   effort per call (not every model supports every effort) — omit both to use Codex's configured
+   defaults (the right choice unless the task clearly needs a heavier or lighter setting).
 
 3. **For a scoped code review**, prefer `ccodex review` over hand-writing a review prompt.
 

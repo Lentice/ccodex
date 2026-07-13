@@ -78,11 +78,15 @@ omitting both leaves the codex argv byte-identical to before these flags existed
 - `--model <model>` — forwarded verbatim to Codex as exec-level `-m <model>` (model names are an
   open set, so ccodex does not validate them; an unknown model fails inside Codex and classifies
   like any other Codex failure). Omitted → Codex's own configured default model.
-- `--effort <minimal|low|medium|high>` — forwarded as exec-level
+- `--effort <none|minimal|low|medium|high|xhigh|max|ultra>` — forwarded as exec-level
   `-c model_reasoning_effort=<value>` (one bare argv element; the value is intentionally not
   TOML-quoted — a bare value falls back to a literal string inside Codex, which sidesteps
   cmd-shim quote layering). Validation is case-sensitive; any other value is a usage error
-  (exit `2`) naming the flag. Omitted → Codex's own configured default effort.
+  (exit `2`) naming the flag. The allowed list mirrors Codex's `ReasoningEffort` enum
+  (verified against codex-cli 0.144.1); per-model support varies — an effort the chosen model
+  does not support fails inside Codex and classifies like any other Codex failure. Omitted →
+  Codex's own configured default effort. On a Codex upgrade, re-derive the list per the
+  codex-upgrade-check skill.
 
 For `submit`, the flags travel to the detached worker on its launch command line (never via
 `status.json`, which carries neither — they are per-invocation knobs, not job lifecycle state).
@@ -123,8 +127,9 @@ Other flags:
   default on hosts where Codex's sandbox cannot spawn processes at all (Codex reports
   `CreateProcessWithLogonW failed: 1385`; the self-diff form cannot work there).
 - `--repo <path>` — as with `run`/`submit`, target a repository other than the current directory.
-- `--model <model>` / `--effort <minimal|low|medium|high>` — the same per-invocation Codex knobs
-  as `run`/`submit` (review is sugar over the `run` pipeline, so they flow straight through).
+- `--model <model>` / `--effort <none|minimal|low|medium|high|xhigh|max|ultra>` — the same
+  per-invocation Codex knobs as `run`/`submit` (review is sugar over the `run` pipeline, so they
+  flow straight through).
 
 Findings always come back severity-ordered (Critical, then Important, then Minor) with a
 file:line and a suggested fix per finding, plus a one-line verdict — success prints exactly that
@@ -556,7 +561,12 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   `%USERPROFILE%\.claude\commands\ccodex.md` and the per-function `templates/claude-commands/*.md`
   set to `%USERPROFILE%\.claude\commands\ccodex\<name>.md` (surfaced as `/ccodex:<name>`),
   installs the delegation policy rule to `%USERPROFILE%\.claude\rules\ccodex-delegation.md`, and
-  installs the agent skill to `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`
+  installs the agent skill to `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`. Re-running it is
+  the upgrade path: the script-dir copy and the `/ccodex:<name>` command set are **mirrored**,
+  not merged — the destination `ccodex\` dir is removed before copying and the namespaced
+  command dir is emptied of `*.md` first, so files an older version installed but the new one no
+  longer ships (a renamed `lib/` module, a removed command) never survive an upgrade
+  (regression-guarded by `tests/Install.tests.ps1`)
 - `lib/Paths.ps1` — global state-root path helpers and `repo_key` hashing
 - `lib/Repo.ps1` — `--repo` override / `git rev-parse --show-toplevel` resolution
 - `lib/JobId.ps1` — job id generation and atomic job-directory reservation
