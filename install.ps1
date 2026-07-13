@@ -10,9 +10,38 @@ $ErrorActionPreference = 'Stop'
 $sourceRoot = $PSScriptRoot
 $destScriptDir = Join-Path $InstallDir 'ccodex'
 
-New-Item -ItemType Directory -Path $destScriptDir -Force | Out-Null
-Copy-Item -Path (Join-Path $sourceRoot 'ccodex.ps1') -Destination $destScriptDir -Force
-Copy-Item -Path (Join-Path $sourceRoot 'lib') -Destination $destScriptDir -Recurse -Force
+# The script dir is mirrored (replaced, never merged) on upgrade, so refuse destinations the
+# mirror delete must never touch: the job-state root (%LOCALAPPDATA%\ccodex — deleting it would
+# destroy jobs, indexes, and worktrees), and any existing non-empty directory that doesn't look
+# like a previous install (no ccodex.ps1 marker).
+if ($env:LOCALAPPDATA) {
+    $stateRoot = Join-Path $env:LOCALAPPDATA 'ccodex'
+    if ([System.IO.Path]::GetFullPath($destScriptDir).TrimEnd('\') -ieq [System.IO.Path]::GetFullPath($stateRoot).TrimEnd('\')) {
+        throw "install.ps1: refusing to install into '$destScriptDir' - it is the ccodex job-state root. Choose a different -InstallDir."
+    }
+}
+if ((Test-Path -LiteralPath $destScriptDir) -and
+    -not (Test-Path -LiteralPath (Join-Path $destScriptDir 'ccodex.ps1')) -and
+    @(Get-ChildItem -LiteralPath $destScriptDir -Force).Count -gt 0) {
+    throw "install.ps1: refusing to replace '$destScriptDir' - it exists but does not look like a previous ccodex install (no ccodex.ps1). Move its contents or choose a different -InstallDir."
+}
+
+# Stage the new copy next to the destination, then swap. The old install is removed only once
+# the complete new tree exists, so a failed copy never leaves a half-installed CLI; the mirror
+# swap guarantees a lib module (or any other file) renamed or deleted in a newer version never
+# survives from a previous install. Safe while jobs run — pwsh reads scripts fully at startup,
+# so already-running workers are unaffected.
+$stagingDir = $destScriptDir + '.staging'
+if (Test-Path -LiteralPath $stagingDir) {
+    Remove-Item -LiteralPath $stagingDir -Recurse -Force
+}
+New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+Copy-Item -Path (Join-Path $sourceRoot 'ccodex.ps1') -Destination $stagingDir -Force
+Copy-Item -Path (Join-Path $sourceRoot 'lib') -Destination $stagingDir -Recurse -Force
+if (Test-Path -LiteralPath $destScriptDir) {
+    Remove-Item -LiteralPath $destScriptDir -Recurse -Force
+}
+Move-Item -LiteralPath $stagingDir -Destination $destScriptDir
 
 $shimContent = @"
 @echo off
@@ -37,8 +66,9 @@ Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -De
 $claudeNamespacedDir = Join-Path $claudeCommandsDir 'ccodex'
 New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
 # Mirror the source set exactly: a template renamed or deleted in a later version must not
-# leave a ghost /ccodex:<name> command behind from a previous install.
-Remove-Item -Path (Join-Path $claudeNamespacedDir '*.md') -Force -ErrorAction SilentlyContinue
+# leave a ghost /ccodex:<name> command behind from a previous install. A wildcard with no
+# matches is silent; a real deletion failure (lock/ACL) must stop the install, not hide a ghost.
+Remove-Item -Path (Join-Path $claudeNamespacedDir '*.md') -Force
 Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-commands\*.md') -Destination $claudeNamespacedDir -Force
 
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'

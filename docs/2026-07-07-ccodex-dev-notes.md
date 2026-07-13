@@ -98,6 +98,22 @@ yours makes one of these tests fail, the test is right and the change is wrong.
    kills or health-checks a backend must verify BOTH parts before acting
    (`lib/Detach.ps1`, reconciliation in `lib/JobStatus.ps1`).
 
+8. **`install.ps1` mirrors, never merges — and the mirror is guarded** (2026-07-13).
+   `Copy-Item -Recurse -Force` over an existing install merges directories, so a `lib/` module
+   renamed or deleted in a newer version survived upgrades as a stale file. The installer now
+   stages the new script tree at `<dest>.staging` and swaps it in whole (old copy removed only
+   after the complete new one exists — a failed copy never leaves a half-installed CLI), and
+   already emptied the namespaced-command dir first (77fb0a8). Because the mirror deletes its
+   destination, two refusal guards are load-bearing (found by Codex review: without them,
+   `-InstallDir $env:LOCALAPPDATA` made the script dir the job-state root and the mirror deleted
+   all job state): refuse a script dir colliding with `%LOCALAPPDATA%\ccodex`, and refuse
+   replacing an existing non-empty dir without a `ccodex.ps1` marker. Upgrade = `git pull` +
+   re-run `install.ps1`; see README "Upgrading". Guarded by the planted-stale-file, foreign-dir,
+   and state-root-collision assertions in `tests/Install.tests.ps1`. Accepted minor: a `ccodex`
+   invocation launched in the milliseconds between the old copy's removal and the staging
+   rename can fail once — rerunning it succeeds; versioned release dirs were judged
+   disproportionate for a rare, manual operation.
+
 ## Host and environment facts (this development machine)
 
 - **Codex sandbox spawn capability changed with the CLI upgrade.** Under codex-cli 0.142.5 the

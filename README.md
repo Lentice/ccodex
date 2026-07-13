@@ -71,6 +71,36 @@ D:\Documents\GitHub\ccodex\install.ps1
 
 Pass `-InstallDir`/`-TemplatesDir`/`-ClaudeDir` to override any of these locations.
 
+## Upgrading
+
+An existing install is upgraded the same way it was created — pull the new version and re-run the
+installer (with the same `-InstallDir`/`-TemplatesDir`/`-ClaudeDir` overrides, if you used any):
+
+```powershell
+git -C D:\Documents\GitHub\ccodex pull
+D:\Documents\GitHub\ccodex\install.ps1
+```
+
+Re-running `install.ps1` mirrors the new version exactly, so it is always safe and complete:
+
+- The CLI copy (`ccodex.ps1` + `lib/`), the `ccodex.cmd` shim, the worker-prompt template, and
+  the Claude skill, commands, and rule are all replaced with the new version's files.
+- Files an older version installed but the new one no longer ships — a renamed `lib/` module, a
+  removed `/ccodex:<name>` command — are deleted, not left behind to shadow the new set.
+- The new CLI copy is staged next to the old one and swapped in only once it is complete, so a
+  failed upgrade (disk full, permissions) leaves the previous install in place and working.
+- Job state under `%LOCALAPPDATA%\ccodex\` is untouched (the installer refuses an `-InstallDir`
+  that would collide with the job-state root, or any directory that isn't a previous install),
+  and background jobs already running keep running (workers load the script fully at startup).
+
+Two things to know after upgrading:
+
+- **Restart Claude Code sessions.** The skill, commands, and rule are read when a session starts;
+  already-open sessions keep the old behavior until restarted.
+- **The default worker-prompt template is overwritten.** If you customized
+  `%APPDATA%\ccodex\templates\worker-prompt.md`, move your customization to a per-project
+  `.ccodex\worker-prompt.md` — the installer never touches that, and it takes precedence.
+
 ## Using ccodex from Claude Code (the main way)
 
 You normally never type `ccodex` yourself — Claude Code does. The installer wires three layers

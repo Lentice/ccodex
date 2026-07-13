@@ -563,10 +563,14 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   installs the delegation policy rule to `%USERPROFILE%\.claude\rules\ccodex-delegation.md`, and
   installs the agent skill to `%USERPROFILE%\.claude\skills\ccodex\SKILL.md`. Re-running it is
   the upgrade path: the script-dir copy and the `/ccodex:<name>` command set are **mirrored**,
-  not merged — the destination `ccodex\` dir is removed before copying and the namespaced
-  command dir is emptied of `*.md` first, so files an older version installed but the new one no
-  longer ships (a renamed `lib/` module, a removed command) never survive an upgrade
-  (regression-guarded by `tests/Install.tests.ps1`)
+  not merged — the new script tree is staged at `<dest>.staging` and swapped in whole (the old
+  install is only removed once the complete new copy exists), and the namespaced command dir is
+  emptied of `*.md` first — so files an older version installed but the new one no longer ships
+  (a renamed `lib/` module, a removed command) never survive an upgrade, and a failed copy never
+  leaves a half-installed CLI. Because the mirror deletes its destination, the installer refuses
+  a `-InstallDir` whose `ccodex\` script dir would collide with the job-state root
+  (`%LOCALAPPDATA%\ccodex`) or replace an existing non-empty directory lacking a `ccodex.ps1`
+  marker (all regression-guarded by `tests/Install.tests.ps1`)
 - `lib/Paths.ps1` — global state-root path helpers and `repo_key` hashing
 - `lib/Repo.ps1` — `--repo` override / `git rev-parse --show-toplevel` resolution
 - `lib/JobId.ps1` — job id generation and atomic job-directory reservation
