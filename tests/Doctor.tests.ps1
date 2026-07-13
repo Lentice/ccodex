@@ -163,10 +163,14 @@ try {
     # ============================================================
     Reset-CcodexDoctorFakeEnv
     Write-Host "Invoke-CcodexDoctorCommand: a hung 'codex doctor' probe times out -> FAIL line + exit 12"
-    $env:CCODEX_FAKE_DOCTOR_DELAY_MS = '10000'
-    $resultDoctorHang = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo -ProbeTimeoutSec 1
+    # This is the one scenario whose assertions need a probe to SUCCEED within the bound (the
+    # --version probe must finish before ProbeTimeoutSec while the doctor probe hangs). A 1s
+    # bound flaked on a loaded desktop where pwsh cold-start alone took 3-7s (observed
+    # 2026-07-13), so the bound is 15s here — the doctor delay just has to exceed it.
+    $env:CCODEX_FAKE_DOCTOR_DELAY_MS = '30000'
+    $resultDoctorHang = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo -ProbeTimeoutSec 15
     Assert-Equal $resultDoctorHang.WrapperExitCode 12 'a hung doctor probe (bounded by ProbeTimeoutSec) exits 12 rather than hanging'
-    Assert-True ($resultDoctorHang.Message -like '*FAIL codex doctor: timed out after 1s*') 'the hung doctor probe reports a timeout FAIL line'
+    Assert-True ($resultDoctorHang.Message -like '*FAIL codex doctor: timed out after 15s*') 'the hung doctor probe reports a timeout FAIL line'
     Assert-True ($resultDoctorHang.Message -like '*ok codex resolvable:*') 'the fast --version probe still reported ok alongside the doctor timeout'
     Remove-Item Env:\CCODEX_FAKE_DOCTOR_DELAY_MS -ErrorAction SilentlyContinue
 

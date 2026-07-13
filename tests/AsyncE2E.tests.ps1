@@ -151,7 +151,11 @@ try {
     Write-Host "shim: still-sleeping job -> read exits 4, wait --wait-timeout-sec 1 exits 20, final wait exits 0"
     $env:CCODEX_FAKE_EXIT_CODE = '0'
     $env:CCODEX_FAKE_RESULT = 'SLOW E2E RESULT'
-    $env:CCODEX_FAKE_DELAY_MS = '4000'
+    # The job must still be running when the 1s wait-timeout fires, i.e. the fixture sleep has
+    # to outlive TWO intermediate shim spawns (read + wait) plus the timeout itself. pwsh
+    # cold-starts reached 3-7s each on a loaded desktop (2026-07-13) and flaked this at 4000ms,
+    # so the sleep is generous — the final no-timeout wait below absorbs whatever remains of it.
+    $env:CCODEX_FAKE_DELAY_MS = '20000'
 
     $submitSlow = Invoke-CcodexShim -Arguments @('submit', '--mode', 'review', '--repo', $targetRepo, '--state-root', $localAppData, '--detach-mechanism', 'startprocess') -StdinText 'slow task, please wait'
     Assert-Equal $submitSlow.ExitCode 0 'slow-job submit exits 0'

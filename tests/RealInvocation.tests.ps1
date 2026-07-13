@@ -71,7 +71,11 @@ try {
     $sw.Stop()
     Assert-Equal $nulExit 2 'empty redirected stdin exits 2'
     Assert-True (($nulOut -join "`n") -like '*redirected stdin produced no data*') 'empty stdin hits the OS-stream no-data message'
-    Assert-True ($sw.ElapsedMilliseconds -lt 2000) 'empty stdin fails within the 2s first-byte timeout window'
+    # The no-data message above is what proves the immediate-EOF path was taken (the first-byte
+    # TIMEOUT path throws a different message, "neither data nor EOF within ...ms"). This timing
+    # bound therefore only guards against a hang; it must tolerate slow pwsh cold-starts on a
+    # loaded machine (observed 3-7s on 2026-07-13), so it is deliberately loose.
+    Assert-True ($sw.ElapsedMilliseconds -lt 15000) 'empty stdin fails fast (bounded well below a stdin-probe hang)'
 
     Write-Host "explicit positional task wins over redirected stdin and does not hang"
     $sw2 = [System.Diagnostics.Stopwatch]::StartNew()

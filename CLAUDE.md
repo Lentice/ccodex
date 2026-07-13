@@ -47,8 +47,10 @@ as a deferred task:
 
 No Pester dependency (see the Phase 1 plan's Global Constraints for why). Tests are plain
 PowerShell assertion scripts under `tests/`, run directly with `pwsh -NoProfile -File <test>.ps1`
-and checked by exit code, not by a test-runner framework. Every change must leave the FULL suite
-green (run recipe in dev-notes), not just the new file.
+and checked by exit code, not by a test-runner framework. During iteration run the quick suite
+(`pwsh -NoProfile -File tests/run-tests.ps1` — skips the slow shell-level/E2E files and says
+which); every piece of work must still leave the FULL suite green before it is declared done or
+committed (`tests/run-tests.ps1 -Suite full`; details in dev-notes), not just the new file.
 
 ## Coding conventions
 
