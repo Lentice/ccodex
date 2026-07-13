@@ -1167,6 +1167,37 @@ ccodex cleanup [--older-than <Nd|Nh>] [--repo <path>] [--dry-run] [--include-sta
 - Thread-ttl interplay: `cleanup --scrub-thread-ids` (2b) is what retires resume-ability;
   `resume` never guesses (`--last` is deliberately NOT exposed — job-addressed sessions only).
 
+### Codex CLI 0.144.1 re-verification amendment (2026-07-13)
+
+The installed codex-cli was upgraded 0.142.5 → 0.144.1. The binding invocation contract was
+re-verified live on 2026-07-13 (a real `run --mode brainstorm --effort max` followed by a real
+`ccodex resume` of that job, both exit 0) and is **unchanged**:
+
+- The exec shape (`--ask-for-approval never` top-level, then `exec --sandbox <sandbox> --json
+  --color never -C <repo> --output-last-message <result.md> [-m <model>]
+  [-c model_reasoning_effort=<effort>] [resume <thread_id>] -`) parses and runs as before.
+  Top-level `--ask-for-approval` currently accepts `untrusted|on-request|never`.
+- The `-c` bare-value literal fallback the `--effort` forwarding relies on is now *documented*
+  in codex help ("If it fails to parse as TOML, the raw string is used as a literal").
+- The `{"type":"thread.started","thread_id":"<uuid>"}` JSONL event is unchanged; thread capture
+  and `exec resume <thread_id>` round-trip live-verified. `exec resume`'s positional is now
+  documented as "Conversation/session id (UUID) or thread name" — the wrapper keeps passing the
+  captured UUID.
+- **Effort enum expanded (contract refinement):** Codex's `ReasoningEffort` is now
+  `none|minimal|low|medium|high|xhigh|max|ultra`, plus arbitrary custom strings accepted at the
+  config layer (`Custom(String)`). `ConvertTo-CcodexEffort`'s allowlist now mirrors the
+  eight-value enum; it stays a fail-fast typo guard precisely *because* Codex itself no longer
+  rejects unknown strings. Per-model support varies and is enforced by Codex/the API. The
+  allowlist is a mirror, not an independent contract — re-derive it on every Codex upgrade (see
+  the `codex-upgrade-check` skill, `.claude/skills/codex-upgrade-check/SKILL.md`).
+- Host fact change (recorded authoritatively in the dev notes): the Codex sandbox on the
+  development machine can now spawn child processes — the `CreateProcessWithLogonW failed: 1385`
+  limitation no longer reproduces, so `ccodex review`'s self-diff form works there again and
+  `--embed-diff` is a robustness option rather than a host requirement.
+- New upstream surface (unused by the wrapper, noted for awareness): `codex review` /
+  `codex exec review`, `codex update`, `codex fork`, `codex sandbox`, plugin/marketplace
+  subcommands.
+
 ### Phase 2: Background Jobs
 
 Implement:

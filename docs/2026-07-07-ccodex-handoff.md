@@ -37,8 +37,18 @@ management, isolation, and multi-turn discussion.
   (`c043dcf`, valueless-flag guard in `77fb0a8`); per-function `/ccodex:<name>` Claude commands
   (`templates/claude-commands/`) + Claude-first README (`416cca9`). Whole batch Codex-reviewed
   (1 Important + 1 Minor finding, both verified and fixed in `77fb0a8`).
-- **Test suite:** 33 files, all green (latest full run 2026-07-08 at `77fb0a8`; see
-  dev-notes for the run recipe).
+- **Codex CLI upgrade maintenance (2026-07-13):** the installed codex-cli moved
+  0.142.5 → 0.144.1. Invocation contract re-verified live (real `run --effort max` +
+  real `resume`, thread id captured, both exit 0 — see the design spec's "Codex CLI 0.144.1
+  re-verification amendment (2026-07-13)"). `--effort` allowlist expanded to the current
+  eight-value enum (`none|minimal|low|medium|high|xhigh|max|ultra`). Host fact change: the
+  Codex sandbox spawns child processes again on this machine (the `CreateProcessWithLogonW
+  failed: 1385` restriction no longer reproduces), so review's self-diff form works;
+  `--embed-diff` stays the robust recommendation. Future upgrades follow the
+  `codex-upgrade-check` skill (`.claude/skills/codex-upgrade-check/SKILL.md`).
+- **Test suite:** 34 files, all green (latest full run 2026-07-13). Run via
+  `tests/run-tests.ps1` — quick suite by default for the inner loop, `-Suite full` as the
+  completion gate (see dev-notes for details).
 - **Live evidence:** gold-seal round-trip 2026-07-06 (submit → wait → "FINAL", thread id
   captured); real quota exhaustion 2026-07-07 correctly classified as
   `failure_reason=quota_or_rate_limit` (exit 10, do-not-retry hint honored).
@@ -56,7 +66,8 @@ Read in this order for a full picture; consult individually as needed.
 |---|---|
 | `docs/2026-07-07-ccodex-handoff.md` | This file — entry point and index. |
 | `docs/2026-07-03-ccodex-adapter-design.md` | **Master design spec.** Contracts (exit codes, status schema, worker prompt, backend, encoding), phase rationale, and dated amendments. The amendments are authoritative where they refine earlier sections: "Phase 2 scope amendment (2026-07-04)", "Failure-mode handling amendment (2026-07-05)", "Scoped review and delegation policy (2026-07-05)", "Retention, cleanup, and remaining-phase decisions (2026-07-07)" — the last one governs everything still to build. |
-| `docs/2026-07-07-ccodex-dev-notes.md` | **Read before writing code.** Test recipes, fixtures, six regression-guarded pitfalls, host quirks (Codex sandbox 1385 → `--embed-diff`), process conventions, accepted minors. |
+| `docs/2026-07-07-ccodex-dev-notes.md` | **Read before writing code.** Test recipes, fixtures, six regression-guarded pitfalls, host quirks (Codex sandbox spawn history and `--embed-diff` guidance), process conventions, accepted minors. |
+| `.claude/skills/codex-upgrade-check/SKILL.md` | Project-local skill: the checklist to run whenever the installed Codex CLI is upgraded (what to probe, what to fix, what to re-verify live). |
 | `docs/2026-07-07-ccodex-phase2b-plan.md` | Executed (all 9 tasks, reviews clean). Historical record. |
 | `docs/2026-07-07-ccodex-phase4-plan.md` | Executed (all 7 tasks; T3–T7 reviews deferred, T7's E2E + live smoke deferred — see § 4). |
 | `docs/2026-07-07-ccodex-phase5-plan.md` | Executed (all 4 tasks; reviews deferred, T4's live smoke deferred — see § 4). |

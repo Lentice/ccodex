@@ -14,17 +14,30 @@ deliberate; see the Phase 1 plan's Global Constraints). Success is exit code `0`
 # One file
 pwsh -NoProfile -File tests/Paths.tests.ps1
 
-# Full suite (run from repo root; prints a failure count at the end)
-$failed = 0
-Get-ChildItem tests -Filter *.tests.ps1 | ForEach-Object {
-    pwsh -NoProfile -File $_.FullName
-    if ($LASTEXITCODE -ne 0) { $failed++; Write-Host "FAILED: $($_.Name)" }
-}
-Write-Host "$failed test file(s) failed"
+# Quick suite — the inner dev loop (skips the slow shell-level/E2E files, and prints which)
+pwsh -NoProfile -File tests/run-tests.ps1
+
+# Full suite — must be green before a piece of work is declared done / committed
+pwsh -NoProfile -File tests/run-tests.ps1 -Suite full
 ```
 
-As of commit `f8e2fe2`: 23 test files, 601 assertions, all green. Every task must leave the FULL
-suite green, not just the new file.
+`tests/run-tests.ps1` (added 2026-07-13; guarded by `tests/RunTests.tests.ps1`) prints per-file
+PASS/FAIL with seconds and exits with the failed-file count. The quick suite exists because the
+shell-level/E2E files each spawn many child `pwsh` processes and dominate wall-clock time
+(minutes each on a loaded machine); the skip list is the `$SlowFiles` param default inside the
+runner — re-derive it from a `-Suite full` run's per-file timings when the suite's shape
+changes. Quick is for iteration only: every task must still leave the FULL suite green before
+it is declared done, not just the new file.
+
+As of 2026-07-13: 34 test files, all green.
+
+**Timing bounds in tests must tolerate slow process cold-starts.** On 2026-07-13 a loaded
+desktop pushed `pwsh` cold-start to 3–7s, flaking every assertion that raced a small absolute
+bound against child-process spawns (`Doctor.tests.ps1` scenario (i), 1s probe;
+`RealInvocation.tests.ps1` empty-stdin, 2s; `AsyncE2E.tests.ps1` wait-timeout vs a 4s fixture
+sleep). All were loosened: assert the *path taken* via messages/exit codes where possible, make
+fixture sleeps outlive worst-case spawn chains, and keep wall-clock bounds only as generous
+anti-hang guards — never as tight performance assertions.
 
 ### Test harness
 
@@ -87,12 +100,20 @@ yours makes one of these tests fail, the test is right and the change is wrong.
 
 ## Host and environment facts (this development machine)
 
-- **Codex sandbox cannot spawn child processes here.** Observed signature:
-  `CreateProcessWithLogonW failed: 1385`. Consequence: `ccodex review` must be used with
-  `--embed-diff` (the wrapper runs `git diff` and embeds it); the self-diff form, where Codex
-  runs git itself, fails on this host. This is environmental, not a ccodex bug.
-- codex-cli version verified 0.142.5: `codex exec resume <SESSION_ID>` exists (Phase 5
-  foundation), and a built-in `codex doctor` exists (Phase 2b's `doctor` delegates to it).
+- **Codex sandbox spawn capability changed with the CLI upgrade.** Under codex-cli 0.142.5 the
+  sandbox could not spawn child processes here (observed signature:
+  `CreateProcessWithLogonW failed: 1385`), which made `--embed-diff` mandatory for
+  `ccodex review`. Re-verified 2026-07-13 on codex-cli 0.144.1: Codex ran `git log` inside a
+  read-only-sandbox job on this machine, so the self-diff review form works again.
+  `--embed-diff` remains the robust default recommendation (unusual git states, other hosts),
+  but it is no longer a hard host requirement here. If the signature reappears after a future
+  upgrade, restore the hard requirement and re-check with a live spawn probe.
+- codex-cli version verified 0.144.1 (2026-07-13; previously 0.142.5): `codex exec resume
+  <SESSION_ID>` still exists and live-round-trips (Phase 5 foundation), the
+  `{"type":"thread.started","thread_id":"..."}` event is unchanged, a built-in `codex doctor`
+  still exists (Phase 2b's `doctor` delegates to it), and the effort enum is now
+  `none|minimal|low|medium|high|xhigh|max|ultra` (wrapper allowlist mirrors it — re-derive on
+  every upgrade via the `codex-upgrade-check` skill, `.claude/skills/codex-upgrade-check/`).
 - **Quota exhaustion is a real, observed event** (2026-07-07): wrapper exit `10` with
   `status.json.failure_reason = "quota_or_rate_limit"` and a do-not-retry hint. Honor the hint —
   report and continue without the review; never retry-loop. This classification path is
