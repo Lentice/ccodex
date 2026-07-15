@@ -442,7 +442,7 @@ Callers can rely on these wrapper exit codes:
 | `11` | `codex exec` exited zero but `result.md` is missing or empty. |
 | `12` | Wrapper-internal error (unexpected I/O/serialization failure). |
 | `20` | `wait` timed out (`--wait-timeout-sec`) before the job reached a terminal status; the job's lifecycle is unaffected — re-run `wait` to keep waiting. |
-| `21` | Could not acquire the per-job lock (e.g. `cancel`, or an internal status write) within its timeout. Retry the command. |
+| `21` | `cancel` or `apply` could not acquire the per-job lock within its timeout. Retry the command. (An internal status-write lock failure surfaces as `12`, not `21`.) |
 | `22` | `wait` returned because the job's terminal status is `cancelled` (someone ran `ccodex cancel` on it). |
 | `23` | The background worker failed to launch, or never stamped a startup sentinel, during `submit`. |
 | `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
@@ -470,7 +470,7 @@ treat `failure_reason` as a shortcut to the right reaction, not a guarantee:
 | ---- | ------- | ------- |
 | `quota_or_rate_limit` | Codex usage/rate limit reached (signature: `usage limit`, `rate limit`, `quota`, `429`). | Report to the user; do not auto-retry. |
 | `auth` | Codex auth/credential problem (signature: `login`, `auth`, `401`, `unauthorized`, `credential`). | Suggest running `codex login`. |
-| `permission_or_sandbox` | Sandbox or approval denial (signature: `sandbox`, `denied`, `approval`, `permission`). | Consider `--access workspace` or narrow the task. |
+| `permission_or_sandbox` | Sandbox or approval denial (signature: `sandbox`, `denied`, `approval`, `permission`). | Narrow the scope. Only `test`/`implement` may use `--access workspace`; keep `review`/`brainstorm` read-only. |
 | `network` | Transient network failure (signature: `network`, `connection`, `dns`, `502`, `503`). | One retry is safe. |
 | `thread_expired` | Codex itself no longer recognizes the resumed thread id (signature: "session not found", "thread not found", "no session", "conversation not found"). Only ever seen on `ccodex resume`. | Start a fresh `ccodex run` — the session is gone, not retryable. |
 | *(absent)* | No recognized signature, or the run succeeded. | Fall back to the exit code and `error` message. |
@@ -501,8 +501,9 @@ dead.
 ## Job artifacts and status fields
 
 Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
-`worker-complete.json`, `codex-events.jsonl`, `stderr.log`, `exit_code.txt`, and (on success)
-`result.md` under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`, plus an index entry at
+`worker-complete.json`, `codex-events.jsonl`, `stderr.log`, and (on success) `result.md` under
+`%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`. `exit_code.txt` is written whenever Codex exits
+on its own; a hard-timeout kill (exit `24`) leaves none. There is also an index entry at
 `%LOCALAPPDATA%\ccodex\index\<job_id>.json` that lets `status`/`wait`/`read` find the job from any
 directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
 `submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,

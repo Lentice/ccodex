@@ -5,7 +5,11 @@ $script:CcodexLastError = $null
 function Assert-Equal {
     param($Actual, $Expected, [string]$Because = '')
     $script:CcodexTestCount++
-    if ($Actual -ceq $Expected) {
+    # A collection on the left of -ceq becomes a membership FILTER, not an equality test: a
+    # non-empty filtered result is truthy, so @('expected','unexpected') -ceq 'expected' would
+    # "pass" despite the extra element. Reject collection actuals so such false-greens fail loudly.
+    $actualIsCollection = ($Actual -is [System.Collections.IEnumerable]) -and ($Actual -isnot [string])
+    if ((-not $actualIsCollection) -and ($Actual -ceq $Expected)) {
         Write-Host "  PASS: expected '$Expected'$(if ($Because) { " ($Because)" })"
     } else {
         $script:CcodexTestFailures++

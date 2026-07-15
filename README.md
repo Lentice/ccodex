@@ -218,8 +218,9 @@ The full contract (including `12`/`21`/`22`/`23`) is in the
 ### Failure reasons
 
 On a failed job, `status.json.failure_reason` hints the reaction: `quota_or_rate_limit` → report
-it, never retry · `auth` → run `codex login` · `permission_or_sandbox` → try `--access workspace`
-or narrow the task · `network` → one retry is safe · `thread_expired` (`resume` only) → start a
+it, never retry · `auth` → run `codex login` · `permission_or_sandbox` → narrow the scope (only
+`test`/`implement` may use `--access workspace`; a review stays read-only) · `network` → one retry
+is safe · `thread_expired` (`resume` only) → start a
 fresh `run`. When it's unclear, run `ccodex doctor` before retrying anything.
 
 ### Delegation policy (`.ccodex/ccodex.json`)

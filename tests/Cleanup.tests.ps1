@@ -218,8 +218,16 @@ Assert-Equal $LASTEXITCODE 2 'bad --older-than syntax exits 2'
 Write-Host "Dispatcher: valid cleanup runs and exits 0"
 $s8b = New-CleanupStateRoot
 $app8b = New-CleanupAppData
-& pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 14d --state-root $s8b | Out-Null
-Assert-Equal $LASTEXITCODE 0 'valid cleanup exits 0'
+# Point the child at the isolated app-data root so a malformed real %APPDATA%\ccodex\config.json
+# on the developer's machine cannot make this dispatcher test fail spuriously.
+$savedAppData8b = $env:APPDATA
+$env:APPDATA = $app8b
+try {
+    & pwsh -NoLogo -NoProfile -File $ccodexPs cleanup --older-than 14d --state-root $s8b | Out-Null
+    Assert-Equal $LASTEXITCODE 0 'valid cleanup exits 0'
+} finally {
+    $env:APPDATA = $savedAppData8b
+}
 
 # --- (9) summary line fields ---
 

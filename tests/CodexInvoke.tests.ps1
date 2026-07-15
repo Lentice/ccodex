@@ -185,9 +185,19 @@ while (-not $streamHandle.IsCompleted -and (Get-Date) -lt $streamPollDeadline) {
     if ($n -ge 1 -and $n -lt 6) { $sawPartial = $true }
     Start-Sleep -Milliseconds 100
 }
-$streamOutput = $streamPs.EndInvoke($streamHandle)
-$streamPs.Dispose()
-$streamExitCode = @($streamOutput)[-1]
+if (-not $streamHandle.IsCompleted) {
+    # The poll deadline elapsed with the runspace still running. A blocking EndInvoke here would
+    # hang the whole suite on a stdout-reader/process regression instead of surfacing it. Stop the
+    # runspace and record a failure, then continue so the remaining assertions report too.
+    try { [void]$streamPs.Stop() } catch { }
+    $streamPs.Dispose()
+    Assert-True $false 'streaming run completed within the 20s poll deadline (did not hang)'
+    $streamExitCode = $null
+} else {
+    $streamOutput = $streamPs.EndInvoke($streamHandle)
+    $streamPs.Dispose()
+    $streamExitCode = @($streamOutput)[-1]
+}
 Remove-Item Env:\CCODEX_FAKE_STREAM_LINES, Env:\CCODEX_FAKE_STREAM_DELAY_MS -ErrorAction SilentlyContinue
 
 Assert-Equal $streamExitCode 0 'streaming run returns the fake exit code'
