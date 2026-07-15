@@ -251,13 +251,31 @@ function Invoke-CcodexCleanup {
                 $status = Read-CcodexStatusFile -JobDir $jobDir
 
                 if ($null -eq $status) {
-                    # Unreadable status: evidence is gone. Delete only if the dir itself is
-                    # older than the threshold; a young one is left for a later pass.
+                    # An unreadable status can be a transient atomic-write/IO race. Never treat
+                    # it as disposable on directory age alone: for an old candidate, acquire the
+                    # writer lock and re-read before acting. If terminality cannot be confirmed,
+                    # retain it for a later pass.
                     $dirTimeUtc = [DateTime]::MinValue
                     try { $dirTimeUtc = (Get-Item -LiteralPath $jobDir -Force).LastWriteTimeUtc } catch { }
                     $dirAgeDays = ($nowUtc - $dirTimeUtc).TotalDays
                     if ($dirAgeDays -gt $jobsDays) {
-                        Remove-CleanupJob -JobId $jobId -JobDir $jobDir -StatusText 'unreadable' -AgeDays $dirAgeDays
+                        $lockAcquired = $false
+                        $confirmedStatus = $null
+                        try {
+                            Lock-CcodexJob -JobDir $jobDir -TimeoutSec 10 -CommandName 'cleanup' | Out-Null
+                            $lockAcquired = $true
+                            $confirmedStatus = Read-CcodexStatusFile -JobDir $jobDir
+                        } catch {
+                            $confirmedStatus = $null
+                        } finally {
+                            if ($lockAcquired) { Unlock-CcodexJob -JobDir $jobDir }
+                        }
+                        if ($confirmedStatus -and ($confirmedStatus.status -in $terminalStatuses)) {
+                            Resolve-CleanupTerminal -JobId $jobId -JobDir $jobDir -Status $confirmedStatus
+                        } else {
+                            $script:__ccxSkipped++
+                            $script:__ccxLines += "$jobId unreadable -> skip (terminal status could not be confirmed)"
+                        }
                     } else {
                         $script:__ccxSkipped++
                         $script:__ccxLines += "$jobId unreadable -> skip (younger than threshold)"

@@ -246,6 +246,32 @@ Assert-Equal $postHeadConflict $preHeadConflict 'main repo HEAD unchanged after 
 Assert-True ($applyConflict.Message -like '*seed.txt*') 'exit-25 message names the conflicting file'
 Assert-True ($applyConflict.Message -like "*ccodex diff $($statusApplyConflict.job_id)*") 'exit-25 message points at ccodex diff'
 
+Write-Host "apply: hooks are disabled transactionally and failed multi-patch recovery leaves no hook output"
+$gitRepoApplyHookConflict = Join-Path $tempRoot 'gitrepo-apply-hook-conflict'
+New-CcodexTestGitRepo -Path $gitRepoApplyHookConflict
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'first-patch.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'first patch'
+$runApplyHookConflict = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyHookConflict }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyHookConflict.WrapperExitCode 0 'setup: first patch worktree commit succeeds'
+$statusApplyHookConflict = Get-Content -LiteralPath (Join-Path $runApplyHookConflict.JobDir 'status.json') -Raw | ConvertFrom-Json
+# Add a second worker-side patch that will conflict after the first email applies.
+[System.IO.File]::WriteAllText((Join-Path $statusApplyHookConflict.worktree_repo 'seed.txt'), "worker conflict`n", $utf8NoBomTest)
+& git -C $statusApplyHookConflict.worktree_repo add seed.txt | Out-Null
+& git -C $statusApplyHookConflict.worktree_repo commit -q -m 'worker conflict patch' | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyHookConflict 'seed.txt'), "main conflict`n", $utf8NoBomTest)
+& git -C $gitRepoApplyHookConflict add seed.txt | Out-Null
+& git -C $gitRepoApplyHookConflict commit -q -m 'main conflict patch' | Out-Null
+$hookPath = Join-Path $gitRepoApplyHookConflict '.git\hooks\pre-applypatch'
+[System.IO.File]::WriteAllText($hookPath, "#!/bin/sh`necho hook > hook-output.txt`n", $utf8NoBomTest)
+$hookConflict = Invoke-CcodexApplyCommand -JobId $statusApplyHookConflict.job_id -StateRoot $localAppData
+Assert-Equal $hookConflict.WrapperExitCode 25 'multi-patch apply with a later conflict exits 25'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyHookConflict 'hook-output.txt'))) 'transactional apply disables repository hooks, so no hook-created untracked output remains'
+$hookConflictPorcelain = @(& git -C $gitRepoApplyHookConflict status --porcelain | Where-Object { $_ -and $_.Trim() -ne '' })
+Assert-Equal $hookConflictPorcelain.Count 0 'failed hook-conflict apply restores a clean main repo'
+
 Write-Host "apply: failed-status job -> exit 2 (only done jobs can be applied)"
 $gitRepoApplyFailed = Join-Path $tempRoot 'gitrepo-apply-failed'
 New-CcodexTestGitRepo -Path $gitRepoApplyFailed

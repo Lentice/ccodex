@@ -25,18 +25,19 @@ try {
     Set-Content -LiteralPath $staleLibModule -Value '# stale lib module from an older install'
     $staleTopLevel = Join-Path $installDir 'ccodex\stale-helper.ps1'
     Set-Content -LiteralPath $staleTopLevel -Value '# stale top-level file from an older install'
-    $staleNamespacedCommand = Join-Path $claudeDir 'commands\ccodex\removed-command.md'
-    Set-Content -LiteralPath $staleNamespacedCommand -Value '# ghost /ccodex:removed-command'
+    $userNamespacedCommand = Join-Path $claudeDir 'commands\ccodex\local.md'
+    Set-Content -LiteralPath $userNamespacedCommand -Value '# hand-written /ccodex:local'
     Invoke-Install | Out-Null
 
     Assert-True (-not (Test-Path -LiteralPath $staleLibModule)) "upgrade removes a lib module the newer version no longer ships"
     Assert-True (-not (Test-Path -LiteralPath $staleTopLevel)) "upgrade removes a stale top-level file in the install dir"
-    Assert-True (-not (Test-Path -LiteralPath $staleNamespacedCommand)) "upgrade removes a ghost /ccodex:<name> command"
+    Assert-True (Test-Path -LiteralPath $userNamespacedCommand) "upgrade preserves a user-authored /ccodex:<name> command"
 
     $namespacedDir = Join-Path $claudeDir 'commands\ccodex'
     $sourceCommandNames = (Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates\claude-commands') -Filter *.md | Sort-Object Name).Name -join ','
     $installedCommandNames = (Get-ChildItem -LiteralPath $namespacedDir -Filter *.md | Sort-Object Name).Name -join ','
-    Assert-Equal $installedCommandNames $sourceCommandNames "installed /ccodex:<name> commands mirror templates/claude-commands exactly"
+    Assert-True (($sourceCommandNames -split ',' | Where-Object { $installedCommandNames -split ',' -contains $_ }).Count -eq ($sourceCommandNames -split ',').Count) "every managed /ccodex:<name> command is installed from its template"
+    Assert-True (($installedCommandNames -split ',') -contains 'local.md') "the installed command namespace retains the user-authored local.md file"
 
     $sourceLibNames = (Get-ChildItem -LiteralPath (Join-Path $repoRoot 'lib') -Filter *.ps1 | Sort-Object Name).Name -join ','
     $installedLibNames = (Get-ChildItem -LiteralPath (Join-Path $installDir 'ccodex\lib') -Filter *.ps1 | Sort-Object Name).Name -join ','

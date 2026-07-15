@@ -198,6 +198,7 @@ try {
     $probeElapsed = (Get-Date) - $probeStart
     Assert-True $probeResult.TimedOut 'the probe reports TimedOut when the wait exceeds TimeoutSec'
     Assert-Equal $probeResult.ExitCode $null 'a timed-out probe has no exit code'
+    Assert-Equal $probeResult.TerminationFailed $false 'a timed-out probe reports that the fallback did terminate it'
     Assert-True ($probeElapsed.TotalSeconds -lt 8) "the probe returns within its own bounded fallback window (~6s), well before the fixture's full 10s delay -- proving Process.Kill(`$true) (not the fixture exiting on its own) ended it"
     Remove-Item Env:\CCODEX_FAKE_VERSION_DELAY_MS -ErrorAction SilentlyContinue
 

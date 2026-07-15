@@ -179,12 +179,10 @@ function Write-CcodexStatusUnderLock {
         Lock-CcodexJob -JobDir $JobDir -TimeoutSec $TimeoutSec -CommandName $CommandName | Out-Null
         $acquired = $true
     } catch {
-        try {
-            Lock-CcodexJob -JobDir $JobDir -TimeoutSec $TimeoutSec -CommandName $CommandName | Out-Null
-            $acquired = $true
-        } catch {
-            $acquired = $false
-        }
+        # This write is used by cancel. Retrying with the same timeout would turn a
+        # caller's advertised bound into two full waits; a failed acquisition already
+        # means no status write occurred, so report that result immediately.
+        $acquired = $false
     }
     if (-not $acquired) {
         return [pscustomobject]@{ LockAcquired = $false; Written = $false; CurrentStatus = $null }
@@ -737,18 +735,39 @@ function Invoke-CcodexResume {
     $jobId = $reservation.JobId
     $jobDir = $reservation.JobDir
     $indexPath = Get-CcodexIndexPath -JobId $jobId -Root $LocalAppDataRoot
-    New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
-    Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
 
-    # prompt.md is the follow-up text only (no worker-prompt template on resume).
-    Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $followUp
+    try {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
+        Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
 
-    $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
-    # Initial status carries parent_job_id + the parent-inherited mode/access/repo, and the
-    # parent's thread id (a resume continues the SAME thread) so the child is resumable from the
-    # moment it is created, even before its own events log is written.
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -HardTimeoutSec $hardTimeoutSecOrNull -CodexThreadId $ctx.ThreadId -ParentJobId $ParentJobId)
+        # prompt.md is the follow-up text only (no worker-prompt template on resume).
+        Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $followUp
+
+        $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
+        # Initial status carries parent_job_id + the parent-inherited mode/access/repo, and the
+        # parent's thread id (a resume continues the SAME thread) so the child is resumable from the
+        # moment it is created, even before its own events log is written.
+        Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -HardTimeoutSec $hardTimeoutSecOrNull -CodexThreadId $ctx.ThreadId -ParentJobId $ParentJobId)
+    } catch {
+        $initializationError = $_.Exception.Message
+        $failureRecorded = $false
+        try {
+            $failureStatus = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $ctx.Mode -Access $ctx.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'sync' -CodexExitCode $null -WrapperExitCode 12 -CodexThreadId $ctx.ThreadId -ParentJobId $ParentJobId
+            $failureStatus.finished_at = (Get-Date).ToString('o')
+            $failureStatus.error = "resume initialization failed: $initializationError"
+            Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $failureStatus
+            Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'worker-complete.json') -Object ([ordered]@{ job_id = $jobId; status = 'failed'; wrapper_exit_code = 12; completed_at = (Get-Date).ToString('o'); error = $failureStatus.error })
+            $failureRecorded = $true
+        } catch { $failureRecorded = $false }
+        if (-not $failureRecorded) {
+            # Do not leave a reservation that index-based commands can resolve but whose
+            # lifecycle has no terminal evidence.
+            try { if (Test-Path -LiteralPath $indexPath) { Remove-Item -LiteralPath $indexPath -Force -ErrorAction Stop } } catch { }
+            try { if (Test-Path -LiteralPath $jobDir) { Remove-Item -LiteralPath $jobDir -Recurse -Force -ErrorAction Stop } } catch { }
+        }
+        return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $(if ($failureRecorded) { $jobDir } else { $null }); JobId = $jobId; Message = "ccodex: resume initialization failed: $initializationError" }
+    }
 
     $resumeArgs = Build-CcodexResumeArgs -ThreadId $ctx.ThreadId -Access $ctx.Access -RepoRoot $repoRoot -ResultPath (Join-Path $jobDir 'result.md') -Model $Model -Effort $Effort
 
@@ -929,7 +948,22 @@ function Invoke-CcodexWaitCommand {
     $deadline = if ($WaitTimeoutSec -gt 0) { (Get-Date).AddSeconds($WaitTimeoutSec) } else { $null }
 
     while ($true) {
-        $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+        $reconciliation = $null
+        if ($deadline) {
+            $remainingSec = ($deadline - (Get-Date)).TotalSeconds
+            if ($remainingSec -gt 0) {
+                # Reconciliation is a writer and can wait on the job lock. Give it no
+                # more than this wait invocation has left, rather than its 10s default.
+                $reconciliationTimeoutSec = [Math]::Max(0, [int][Math]::Floor($remainingSec))
+                $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir -LockTimeoutSec $reconciliationTimeoutSec
+            } else {
+                # At the deadline, do one ordinary status read below but never begin a
+                # lock wait that would make `--wait-timeout-sec` overrun.
+                $reconciliation = [pscustomobject]@{ Status = $null; PossiblyStale = $false }
+            }
+        } else {
+            $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+        }
         $statusObj = Read-CcodexStatusFile -JobDir $jobDir
         $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
         if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
@@ -1335,6 +1369,17 @@ function Invoke-CcodexApplyCommand {
             return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
         }
 
+        # Keep an explicit pre-apply inventory so recovery can remove only untracked files this
+        # transaction introduced. (The clean-tree precondition normally makes this empty, but the
+        # inventory preserves that safety if Git's ignore rules or status behavior change.)
+        $preUntracked = @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            $message = "ccodex: internal error: could not inventory untracked files in main repo '$mainRepo': $($preUntracked -join "`n")"
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        $emptyHooksDir = Join-Path $applyLockDir 'empty-hooks'
+        New-Item -ItemType Directory -Path $emptyHooksDir -Force | Out-Null
+
         $range = "$baseCommit..HEAD"
 
         # Empty change set (worker committed nothing) -> nothing to apply; exit 0 no-op.
@@ -1358,7 +1403,7 @@ function Invoke-CcodexApplyCommand {
         # stderr, which must NOT be merged into the pipe or it would corrupt the patch). The 2>&1 on
         # `am` captures its progress/conflict lines for parsing. A native-to-native pipe in
         # PowerShell 7 is byte-preserving, so patch content survives intact.
-        $amOutput = (& git -C $worktreePath format-patch $range --stdout | & git -C $mainRepo am --3way 2>&1 | Out-String)
+        $amOutput = (& git -C $worktreePath format-patch $range --stdout | & git -c "core.hooksPath=$emptyHooksDir" -C $mainRepo am --3way 2>&1 | Out-String)
         $amExit = $LASTEXITCODE
 
         $postHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
@@ -1375,6 +1420,21 @@ function Invoke-CcodexApplyCommand {
         # abort any in-progress am (best-effort), then force the main repo back to its pre-apply HEAD.
         & git -C $mainRepo am --abort 2>&1 | Out-Null
         & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
+
+        $postUntracked = @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
+        $newUntracked = @()
+        if ($LASTEXITCODE -eq 0) {
+            $newUntracked = @(
+                Compare-Object -ReferenceObject $preUntracked -DifferenceObject $postUntracked |
+                    Where-Object { $_.SideIndicator -eq '=>' } |
+                    ForEach-Object { [string]$_.InputObject }
+            )
+            if ($newUntracked.Count -gt 0) {
+                # Let Git remove only the paths it reports as untracked and newly created by this
+                # apply. It will not follow this into tracked or pre-existing user files.
+                & git -C $mainRepo clean -f -d -- $newUntracked 2>&1 | Out-Null
+            }
+        }
 
         $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
         $restorePorcelain = @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
@@ -1622,54 +1682,54 @@ function Invoke-CcodexDoctorProbe {
     # Same no-console-window rule as Invoke-CcodexCodexProcess: never flash a window.
     $psi.CreateNoWindow = $true
 
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $psi
-    [void]$process.Start()
-    $process.StandardInput.Close()
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        [void]$process.Start()
+        $process.StandardInput.Close()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
 
-    # Bounded wait: WaitForExit(ms) returns $false on timeout. On timeout, kill the whole
-    # tree (Stop-CcodexProcessTree — the same kill-tree primitive Invoke-CcodexCodexProcess
-    # uses on a hard timeout), reap it, drain any partial output, and report TimedOut so the
-    # caller renders the probe as an environment FAIL instead of blocking indefinitely.
-    $timeoutMs = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { [int]::MaxValue }
-    if (-not $process.WaitForExit($timeoutMs)) {
-        Stop-CcodexProcessTree -ProcessId $process.Id
-        # Stop-CcodexProcessTree is best-effort (it swallows taskkill failures); a
-        # parameterless WaitForExit() right after it would block forever if the kill did
-        # not actually land. Bound the second wait, and if the process is STILL alive after
-        # it, fall back to .NET's own Kill($true) (kills the whole tree directly, no
-        # external taskkill dependency) before waiting again -- so this probe always
-        # terminates instead of hanging `doctor` indefinitely.
-        $secondWaitMs = 5000
-        $exited = $false
-        try { $exited = $process.WaitForExit($secondWaitMs) } catch { $exited = $false }
-        if (-not $exited) {
-            try { $process.Kill($true) } catch { }
+        # Bounded wait: WaitForExit(ms) returns $false on timeout. On timeout, kill the whole
+        # tree (Stop-CcodexProcessTree — the same kill-tree primitive Invoke-CcodexCodexProcess
+        # uses on a hard timeout), then bound the reaping attempts as well.
+        $timeoutMs = if ($TimeoutSec -gt 0) { $TimeoutSec * 1000 } else { [int]::MaxValue }
+        if (-not $process.WaitForExit($timeoutMs)) {
+            Stop-CcodexProcessTree -ProcessId $process.Id
+            $secondWaitMs = 5000
+            $exited = $false
             try { $exited = $process.WaitForExit($secondWaitMs) } catch { $exited = $false }
+            if (-not $exited) {
+                try { $process.Kill($true) } catch { }
+                try { $exited = $process.WaitForExit($secondWaitMs) } catch { $exited = $false }
+            }
+            $partialStdout = ''
+            $partialStderr = ''
+            if ($exited) {
+                try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
+                try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+            }
+            # A process that survived both tree-kill attempts must be visible to doctor as a
+            # distinct failure. The finally block still disposes our Process/stream handles.
+            return [pscustomobject]@{ ExitCode = $null; Stdout = $partialStdout; Stderr = $partialStderr; TimedOut = $true; TerminationFailed = (-not $exited) }
         }
-        $partialStdout = ''
-        $partialStderr = ''
-        if ($exited) {
-            # Only read the async output tasks once the process has definitely exited --
-            # otherwise GetResult() blocks until EOF, which a still-alive process will never
-            # produce. Abandon the reads (report empty/partial output) rather than risk that.
-            try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
-            try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
+
+        # Parameterless WaitForExit after a bounded one that returned true guarantees the async
+        # readers have fully flushed before we read.
+        $process.WaitForExit()
+        $stdout = $stdoutTask.GetAwaiter().GetResult()
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr; TimedOut = $false; TerminationFailed = $false }
+    } finally {
+        if ($process) {
+            try { $process.StandardInput.Close() } catch { }
+            try { $process.StandardOutput.Close() } catch { }
+            try { $process.StandardError.Close() } catch { }
+            try { $process.Dispose() } catch { }
         }
-        try { $process.StandardOutput.Close() } catch { }
-        try { $process.StandardError.Close() } catch { }
-        return [pscustomobject]@{ ExitCode = $null; Stdout = $partialStdout; Stderr = $partialStderr; TimedOut = $true }
     }
-
-    # Parameterless WaitForExit after a bounded one that returned true guarantees the async
-    # readers have fully flushed before we read.
-    $process.WaitForExit()
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
-
-    return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr; TimedOut = $false }
 }
 
 function Invoke-CcodexDoctorCommand {
@@ -1715,7 +1775,10 @@ function Invoke-CcodexDoctorCommand {
     if ($resolvedCodexPath) {
         try {
             $versionProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('--version') -TimeoutSec $ProbeTimeoutSec
-            if ($versionProbe.TimedOut) {
+            if ($versionProbe.TerminationFailed) {
+                $envFailed = $true
+                $lines.Add("FAIL codex resolvable: unable to terminate timed-out 'codex --version' probe after ${ProbeTimeoutSec}s")
+            } elseif ($versionProbe.TimedOut) {
                 $envFailed = $true
                 $lines.Add("FAIL codex resolvable: 'codex --version' timed out after ${ProbeTimeoutSec}s")
             } elseif ($versionProbe.ExitCode -eq 0) {
@@ -1737,7 +1800,10 @@ function Invoke-CcodexDoctorCommand {
             $doctorProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('doctor') -TimeoutSec $ProbeTimeoutSec
             $doctorOutputLines = @($doctorProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' })
             $doctorLastLine = if ($doctorOutputLines.Count -gt 0) { $doctorOutputLines[$doctorOutputLines.Count - 1] } else { '(no output)' }
-            if ($doctorProbe.TimedOut) {
+            if ($doctorProbe.TerminationFailed) {
+                $envFailed = $true
+                $lines.Add("FAIL codex doctor: unable to terminate timed-out probe after ${ProbeTimeoutSec}s")
+            } elseif ($doctorProbe.TimedOut) {
                 $envFailed = $true
                 $lines.Add("FAIL codex doctor: timed out after ${ProbeTimeoutSec}s")
             } elseif ($doctorProbe.ExitCode -eq 0) {
@@ -1948,7 +2014,10 @@ function Get-CcodexArgValues {
     $values = @()
     if (-not $ArgumentList) { return , $values }
     for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
-        if ($ArgumentList[$i] -eq $FlagName -and ($i + 1) -lt $ArgumentList.Count) {
+        if ($ArgumentList[$i] -eq $FlagName) {
+            if (($i + 1) -ge $ArgumentList.Count -or ([string]$ArgumentList[$i + 1]).StartsWith('--')) {
+                throw "ccodex: $FlagName requires a value."
+            }
             $values += $ArgumentList[$i + 1]
         }
     }
@@ -2340,12 +2409,12 @@ try {
             $reviewEmbedDiff = ($args -contains '--embed-diff')
             $reviewIntent = Get-CcodexArgValue -ArgumentList $args -FlagName '--intent'
             $reviewFocus = Get-CcodexArgValue -ArgumentList $args -FlagName '--focus'
-            $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
             $reviewStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $reviewCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $reviewModel = $null
             $reviewEffortText = $null
             try {
+                $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
                 $reviewModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
                 $reviewEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
             } catch {

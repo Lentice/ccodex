@@ -164,6 +164,14 @@ try {
     $badOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --repo $targetRepo
     Assert-Equal $LASTEXITCODE 2 'missing selector exits 2'
     Assert-True (($badOut -join "`n") -like '*--range*') 'usage error names the --range option'
+
+    Write-Host "review --path requires a non-flag value for every occurrence"
+    $missingPathOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --working --path --embed-diff --repo $targetRepo 2>&1
+    Assert-Equal $LASTEXITCODE 2 'review --path followed by another flag exits 2'
+    Assert-True (($missingPathOut -join "`n") -like '*--path requires a value*') 'flag-shaped --path value names --path in the usage error'
+    $trailingPathOut = & pwsh -NoLogo -NoProfile -File $ccodexPs review --working --path --repo $targetRepo 2>&1
+    Assert-Equal $LASTEXITCODE 2 'review with a trailing --path exits 2'
+    Assert-True (($trailingPathOut -join "`n") -like '*--path requires a value*') 'trailing --path usage error names --path'
 } finally {
     $env:PATH = $savedPath
     $env:LOCALAPPDATA = $savedLocal

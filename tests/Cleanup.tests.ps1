@@ -236,9 +236,9 @@ Assert-True ($r9.Stdout -match 'scrubbed=\d+') 'summary has scrubbed'
 Assert-True ($r9.Stdout -match 'skipped=1') 'summary has skipped=1'
 Assert-True ($r9.Stdout -match 'failed=0') 'summary has failed=0'
 
-# --- (10) unreadable status + old dir -> deleted; young -> kept ---
+# --- (10) unreadable status is retained until terminality can be confirmed under the lock ---
 
-Write-Host "Invoke-CcodexCleanup: an unreadable status with an old dir is treated as failed-stale and deleted"
+Write-Host "Invoke-CcodexCleanup: an unreadable old status is retained when terminality cannot be confirmed"
 $s10 = New-CleanupStateRoot
 $app10 = New-CleanupAppData
 $badDir = Join-Path (Get-CcodexJobsDir -RepoKey $repoKeyA -Root $s10) 'corrupt'
@@ -246,8 +246,8 @@ New-Item -ItemType Directory -Path $badDir -Force | Out-Null
 Write-CcodexTextFile -Path (Join-Path $badDir 'status.json') -Content '{ this is not json'
 (Get-Item -LiteralPath $badDir).LastWriteTimeUtc = (Get-Date).ToUniversalTime().AddDays(-40)
 $r10 = Invoke-CcodexCleanup -OlderThanDays 14 -DryRun $false -IncludeStalled $false -ScrubThreadIds $false -StateRoot $s10 -AppDataRoot $app10
-Assert-True (-not (Test-Path -LiteralPath $badDir)) 'old unreadable-status job dir deleted'
-Assert-True ($r10.Deleted -contains 'corrupt') 'old unreadable-status job reported deleted'
+Assert-True (Test-Path -LiteralPath $badDir) 'old unreadable-status job dir is retained without terminal confirmation'
+Assert-True (-not ($r10.Deleted -contains 'corrupt')) 'old unreadable-status job is not reported deleted'
 
 Write-Host "Invoke-CcodexCleanup: an unreadable status with a young dir is kept"
 $s10b = New-CleanupStateRoot

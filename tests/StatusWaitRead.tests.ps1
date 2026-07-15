@@ -224,6 +224,19 @@ $resultWaitEmpty = Invoke-CcodexWaitCommand -JobId $jobWaitEmpty.JobId -StateRoo
 Assert-Equal $resultWaitEmpty.WrapperExitCode 11 'done job with missing result.md -> exit 11'
 Assert-True (-not [string]::IsNullOrEmpty($resultWaitEmpty.Message)) 'empty-result job returns a diagnostic message'
 
+Write-Host "Invoke-CcodexWaitCommand: a contended orphan-reconciliation lock is bounded by the wait budget"
+$jobWaitLockBudget = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId
+Lock-CcodexJob -JobDir $jobWaitLockBudget.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+try {
+    $waitLockBudgetStart = Get-Date
+    $waitLockBudgetResult = Invoke-CcodexWaitCommand -JobId $jobWaitLockBudget.JobId -WaitTimeoutSec 1 -PollIntervalMs 50 -StateRoot $localAppData
+    $waitLockBudgetElapsed = ((Get-Date) - $waitLockBudgetStart).TotalSeconds
+} finally {
+    Unlock-CcodexJob -JobDir $jobWaitLockBudget.JobDir
+}
+Assert-Equal $waitLockBudgetResult.WrapperExitCode 20 'wait returns its timeout when reconciliation cannot acquire the lock'
+Assert-True ($waitLockBudgetElapsed -lt 1.75) 'wait does not let orphan reconciliation exceed its remaining timeout budget'
+
 # --- (d) slow job: submit via startprocess against a delayed fake-codex, timeout then completion ---
 
 Write-Host "Invoke-CcodexWaitCommand: slow job -> --wait-timeout-sec 1 times out with 20 while sleeping, lifecycle unchanged"

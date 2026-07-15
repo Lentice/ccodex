@@ -104,17 +104,13 @@ Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -De
 # commands/ccodex/<name>.md, which Claude Code exposes as /ccodex:<name>.
 $claudeNamespacedDir = Join-Path $claudeCommandsDir 'ccodex'
 New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
-# Mirror the source set exactly: a template renamed or deleted in a later version must not
-# leave a ghost /ccodex:<name> command behind from a previous install. A wildcard with no
-# matches is silent; a real deletion failure (lock/ACL) must stop the install, not hide a ghost.
-# Enumerate + delete via -LiteralPath rather than a `*.md` -Path pattern: a wildcard char in
-# $ClaudeDir (e.g. `[ab]`) would otherwise make the joined pattern match and delete files outside
-# this dir. Get-ChildItem swallows an empty/absent dir; a real Remove-Item failure (lock/ACL)
-# still throws under $ErrorActionPreference='Stop' so a ghost command can't be silently left.
-foreach ($existing in @(Get-ChildItem -LiteralPath $claudeNamespacedDir -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
-    Remove-Item -LiteralPath $existing.FullName -Force
+# Only files that correspond to an installed source template are managed. This preserves local
+# /ccodex:<name> commands while still updating every command the installer owns; the source set is
+# enumerated so adding a template requires no hardcoded managed-file list.
+$claudeCommandTemplates = @(Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'templates\claude-commands') -Filter '*.md' -File -ErrorAction Stop)
+foreach ($template in $claudeCommandTemplates) {
+    Copy-Item -LiteralPath $template.FullName -Destination (Join-Path $claudeNamespacedDir $template.Name) -Force
 }
-Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-commands\*.md') -Destination $claudeNamespacedDir -Force
 
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'
 New-Item -ItemType Directory -Path $claudeRulesDir -Force | Out-Null

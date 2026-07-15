@@ -188,6 +188,30 @@ $multiResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-done' -PositionalTas
 Assert-Equal $multiResume.WrapperExitCode 2 'multiple prompt sources on resume exits 2'
 Assert-True ($multiResume.Message -like '*multiple prompt sources*') 'usage error names the multiple-prompt-source conflict'
 
+Write-Host "Invoke-CcodexResume: an initialization write failure leaves terminal failure evidence rather than a dangling indexed job"
+New-CcodexTestParentJob -JobId 'cmd-parent-init-failure' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-init-failure' -Root $cmdStateRoot | Out-Null
+$originalWriteTextFile = ${function:Write-CcodexTextFile}
+${function:Write-CcodexTextFile} = {
+    param([string]$Path, [string]$Content)
+    if ($Path -like '*prompt.md') { throw 'simulated prompt write failure' }
+    & $originalWriteTextFile @PSBoundParameters
+}
+try {
+    $initFailureResume = Invoke-CcodexResume -ParentJobId 'cmd-parent-init-failure' -PositionalTask 'follow up' `
+        -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+} finally {
+    ${function:Write-CcodexTextFile} = $originalWriteTextFile
+}
+Assert-Equal $initFailureResume.WrapperExitCode 12 'resume initialization write failure is reported as an internal failure'
+Assert-True ($initFailureResume.JobId -ne $null) 'resume initialization failure identifies the reserved child job'
+if ($initFailureResume.JobDir -and (Test-Path -LiteralPath $initFailureResume.JobDir)) {
+    $initFailureStatus = Read-CcodexStatusFile -JobDir $initFailureResume.JobDir
+    Assert-Equal $initFailureStatus.status 'failed' 'retained child job has terminal failed status evidence'
+    Assert-True (Test-Path -LiteralPath (Join-Path $initFailureResume.JobDir 'worker-complete.json')) 'retained child job has completion evidence'
+} else {
+    Assert-True (-not (Test-Path -LiteralPath (Get-CcodexIndexPath -JobId $initFailureResume.JobId -Root $cmdStateRoot))) 'removed incomplete child job has no dangling index entry'
+}
+
 Write-Host "shell-level: piped follow-up through the dispatcher resumes a done parent -> exit 0"
 New-CcodexTestParentJob -JobId 'cmd-parent-shell' -Status 'done' -Mode 'review' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-shell' -Root $cmdStateRoot | Out-Null
 $env:CCODEX_FAKE_EXIT_CODE = '0'

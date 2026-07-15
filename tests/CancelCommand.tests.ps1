@@ -132,6 +132,20 @@ Assert-True ($null -ne $statusCreatedAfter.cancelled_at -and $statusCreatedAfter
 Assert-Equal $statusCreatedAfter.job_id $jobCreated.JobId 'cancelled status.json preserves job_id (append-only fields)'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $jobCreated.JobDir '.lock'))) 'the per-job lock is released after marking cancelled'
 
+Write-Host "Write-CcodexStatusUnderLock: contended lock respects one absolute timeout budget"
+$jobLockBudget = New-CcodexTestJobWithStatus -Status 'created'
+Lock-CcodexJob -JobDir $jobLockBudget.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+try {
+    $lockBudgetStart = Get-Date
+    $lockBudgetResult = Write-CcodexStatusUnderLock -JobDir $jobLockBudget.JobDir -StatusPath (Join-Path $jobLockBudget.JobDir 'status.json') `
+        -StatusObject (Read-CcodexStatusFile -JobDir $jobLockBudget.JobDir) -CommandName 'cancel' -TimeoutSec 1
+    $lockBudgetElapsed = ((Get-Date) - $lockBudgetStart).TotalSeconds
+} finally {
+    Unlock-CcodexJob -JobDir $jobLockBudget.JobDir
+}
+Assert-True (-not $lockBudgetResult.LockAcquired) 'contended cancellation status write does not acquire the lock'
+Assert-True ($lockBudgetElapsed -lt 1.75) 'contended cancellation status write does not retry for a second full timeout'
+
 # ============================================================
 # (d) running + worker dead + completion evidence -> reconciled (done/failed), NOT cancelled
 # ============================================================
