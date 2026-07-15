@@ -73,6 +73,13 @@ Assert-Equal $statusJson.status 'done' 'final status.json status is done'
 Assert-Equal $statusJson.codex_exit_code 0 'status.json records codex_exit_code separately'
 Assert-Equal $statusJson.wrapper_exit_code 0 'status.json records wrapper_exit_code separately'
 
+# Diagnostic timing: a sync run must populate started_at (stamped just before the codex launch)
+# so codex runtime (started_at -> finished_at) can be told apart from wrapper setup after the
+# fact; it was previously left empty for every sync job.
+Assert-True (-not [string]::IsNullOrEmpty($statusJson.started_at)) 'sync run populates started_at'
+Assert-True (([datetime]$statusJson.created_at) -le ([datetime]$statusJson.started_at)) 'started_at is at/after created_at'
+Assert-True (([datetime]$statusJson.started_at) -le ([datetime]$statusJson.finished_at)) 'started_at is at/before finished_at'
+
 Write-Host "jobs are written under the global state root, not under the repo"
 Assert-True ($jobDir -like "$localAppData*") 'job dir lives under the fake LOCALAPPDATA root'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $repoRoot '.ccodex\jobs'))) 'no .ccodex/jobs is created inside the repo'
@@ -186,6 +193,18 @@ $meCommandTxt = Get-Content -LiteralPath (Join-Path $resultModelEffort.JobDir 'c
 Assert-True ($meCommandTxt -like '*--output-last-message*-m gpt-5-codex -c model_reasoning_effort=high -*') 'command.txt splices -m/-c after the exec options and before the trailing - prompt positional'
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
+Write-Host "run -SkipGitRepoCheck forwards --skip-git-repo-check to the codex argv (command.txt); default omits it"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'skip git ok'
+$resultSkipGit = Invoke-CcodexRunForTest -Overrides @{ SkipGitRepoCheck = $true }
+Assert-Equal $resultSkipGit.WrapperExitCode 0 'run with -SkipGitRepoCheck exits 0 against the fixture'
+$skipGitCommandTxt = Get-Content -LiteralPath (Join-Path $resultSkipGit.JobDir 'command.txt') -Raw
+Assert-True ($skipGitCommandTxt -like '*--skip-git-repo-check*') 'command.txt forwards --skip-git-repo-check when the switch is set'
+$resultNoSkipGit = Invoke-CcodexRunForTest
+$noSkipGitCommandTxt = Get-Content -LiteralPath (Join-Path $resultNoSkipGit.JobDir 'command.txt') -Raw
+Assert-True (-not ($noSkipGitCommandTxt -like '*--skip-git-repo-check*')) 'command.txt omits --skip-git-repo-check by default (trusted-directory guard intact)'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 Write-Host "run with neither --model nor --effort leaves command.txt argv byte-identical (no -m/-c)"
 $env:CCODEX_FAKE_EXIT_CODE = '0'
 $env:CCODEX_FAKE_RESULT = 'plain ok'
@@ -254,6 +273,16 @@ try {
     $flagValueModelOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --model --effort high
     Assert-Equal $LASTEXITCODE 2 'run --model --effort high exits 2 (never forwards -m --effort to codex)'
     Assert-True ((($flagValueModelOut -join "`n")) -like '*--model*') 'usage error names the --model flag (flag-shaped value)'
+
+    # Regression: --prompt-file has an internal hyphen, so PowerShell's -File binder cannot map it
+    # onto the -PromptFile script parameter; it must be parsed out of $args instead. A non-existent
+    # --prompt-file therefore has to reach the PromptFile-not-found usage error (exit 2 naming the
+    # flag). Before the fix the flag was silently dropped and control fell through to the stdin
+    # reader, so this never surfaced.
+    $missingPromptFile = Join-Path $tempRoot 'no-such-prompt.md'
+    $promptFileOut = "ignored stdin" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --prompt-file $missingPromptFile
+    Assert-Equal $LASTEXITCODE 2 'run --prompt-file <missing> exits 2 (flag parsed, not silently dropped to stdin)'
+    Assert-True ((($promptFileOut -join "`n")) -like '*--prompt-file*') 'the usage error names the --prompt-file flag (proves it was parsed from argv)'
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppDataForHardTimeout
     $env:APPDATA = $savedAppDataForHardTimeout

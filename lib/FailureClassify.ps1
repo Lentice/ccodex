@@ -85,6 +85,51 @@ function Get-CcodexFailureReason {
     return $null
 }
 
+function Get-CcodexStderrTail {
+    # Best-effort: the last few non-empty lines of stderr.log, indented for inclusion in a
+    # failure Message. Used ONLY when Get-CcodexFailureReason returned no recognized signature
+    # (so there is no Get-CcodexFailureHintLine to show) — it surfaces the actual cause (e.g.
+    # "Not inside a trusted directory and --skip-git-repo-check was not specified.") in the CLI
+    # output instead of leaving it buried in stderr.log for a manual dive. Returns $null on a
+    # missing/unreadable/empty stderr so the caller adds nothing. Never throws.
+    param(
+        [string]$StderrPath,
+        [int]$MaxLines = 8,
+        [int]$MaxChars = 1200
+    )
+    if ([string]::IsNullOrEmpty($StderrPath) -or -not (Test-Path -LiteralPath $StderrPath -PathType Leaf)) {
+        return $null
+    }
+    # Clamp to non-negative so a hostile/typo'd caller value can never make the selection or
+    # truncation below throw (honours the module's "never throws" contract).
+    if ($MaxLines -lt 0) { $MaxLines = 0 }
+    if ($MaxChars -lt 0) { $MaxChars = 0 }
+    try {
+        # Read only a bounded trailing window (same pattern as Get-CcodexFailureReason) instead of
+        # loading the whole log: a large failed-job stderr must not make diagnostic reporting
+        # memory- or latency-heavy. The window is sized generously above MaxChars so line
+        # selection still has enough material after decoding.
+        $maxBytes = [Math]::Max(8192, $MaxChars * 4)
+        $bytes = [System.IO.File]::ReadAllBytes($StderrPath)
+        if ($bytes.Length -gt $maxBytes) {
+            $tailBytes = New-Object byte[] $maxBytes
+            [Array]::Copy($bytes, $bytes.Length - $maxBytes, $tailBytes, 0, $maxBytes)
+            $bytes = $tailBytes
+        }
+        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+    } catch {
+        return $null
+    }
+    $lines = @($text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($lines.Count -eq 0) { return $null }
+    $tail = @($lines | Select-Object -Last $MaxLines)
+    $joined = ($tail | ForEach-Object { "    $($_.TrimEnd())" }) -join "`n"
+    if ($joined.Length -gt $MaxChars) {
+        $joined = '    ...' + "`n" + $joined.Substring($joined.Length - $MaxChars)
+    }
+    return $joined
+}
+
 function Get-CcodexFailureHintLine {
     # One short, actionable hint line per failure_reason, appended to a
     # failure Message so Claude can react without reading logs. $null for an

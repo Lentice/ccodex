@@ -126,5 +126,34 @@ Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrTailMa
 Write-Host "Get-CcodexFailureHintLine: thread_expired hint"
 Assert-Equal (Get-CcodexFailureHintLine -FailureReason 'thread_expired') 'Codex session expired or was pruned - start a fresh ccodex run.' 'thread_expired hint line is exact'
 
+# --- Get-CcodexStderrTail ---
+
+Write-Host "Get-CcodexStderrTail: missing/empty path -> null"
+Assert-Equal (Get-CcodexStderrTail -StderrPath $null) $null 'null path -> null'
+Assert-Equal (Get-CcodexStderrTail -StderrPath '') $null 'empty path -> null'
+Assert-Equal (Get-CcodexStderrTail -StderrPath (Join-Path $tempRoot 'no-such-stderr.log')) $null 'missing file -> null'
+
+Write-Host "Get-CcodexStderrTail: whitespace-only stderr -> null"
+$stderrBlank = New-TestFile 'stderr-blank.log' "`n   `n`t`n"
+Assert-Equal (Get-CcodexStderrTail -StderrPath $stderrBlank) $null 'a file of only blank lines -> null'
+
+Write-Host "Get-CcodexStderrTail: surfaces a single non-empty line indented four spaces"
+$stderrTrusted = New-TestFile 'stderr-trusted.log' 'Not inside a trusted directory and --skip-git-repo-check was not specified.'
+Assert-Equal (Get-CcodexStderrTail -StderrPath $stderrTrusted) '    Not inside a trusted directory and --skip-git-repo-check was not specified.' 'single line is indented four spaces'
+
+Write-Host "Get-CcodexStderrTail: keeps only the last MaxLines non-empty lines and drops blanks"
+$stderrMulti = New-TestFile 'stderr-multi.log' "line1`n`nline2`nline3"
+Assert-Equal (Get-CcodexStderrTail -StderrPath $stderrMulti -MaxLines 2) "    line2`n    line3" 'returns the last two non-empty lines, blank lines dropped'
+
+Write-Host "Get-CcodexStderrTail: reads only a bounded trailing window (early content is not read)"
+$stderrHuge = New-TestFile 'stderr-huge.log' ("EARLY_MARKER`n" + ('x' * 9000) + "`nLATE_MARKER")
+$hugeTail = Get-CcodexStderrTail -StderrPath $stderrHuge
+Assert-True ($hugeTail -like '*LATE_MARKER*') 'a line at the very end is included'
+Assert-True (-not ($hugeTail -like '*EARLY_MARKER*')) 'a line before the bounded trailing window is not read'
+
+Write-Host "Get-CcodexStderrTail: negative MaxLines/MaxChars are clamped and never throw"
+$stderrClamp = New-TestFile 'stderr-clamp.log' "a`nb`nc"
+Assert-Equal (Get-CcodexStderrTail -StderrPath $stderrClamp -MaxLines -5 -MaxChars -10) '' 'negative bounds clamp to 0 -> empty string (no throw)'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

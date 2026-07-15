@@ -77,9 +77,17 @@ function Build-CcodexCodexArgs {
         # Optional per-invocation knobs; both must sit in the exec-level options segment,
         # BEFORE the trailing `-` prompt positional (clap resolves them at the exec level).
         [string]$Model = $null,
-        [string]$Effort = $null
+        [string]$Effort = $null,
+        # When set, add codex exec's `--skip-git-repo-check` so a target that is not a git
+        # repository (or a git dir codex does not consider "trusted") is accepted instead of
+        # failing with "Not inside a trusted directory and --skip-git-repo-check was not
+        # specified." Opt-in per invocation (ccodex run --skip-git-repo-check); off by default
+        # => argv byte-identical to before this switch existed, so the trusted-directory guard
+        # still applies to every normal run.
+        [switch]$SkipGitRepoCheck
     )
     $sandbox = ConvertTo-CcodexSandboxFlag -Access $Access
+    $skipGitArgs = if ($SkipGitRepoCheck) { @('--skip-git-repo-check') } else { @() }
     return @(
         '--ask-for-approval', 'never',
         'exec',
@@ -88,5 +96,5 @@ function Build-CcodexCodexArgs {
         '--color', 'never',
         '-C', $RepoRoot,
         '--output-last-message', $ResultPath
-    ) + (Get-CcodexModelEffortArgs -Model $Model -Effort $Effort) + @('-')
+    ) + $skipGitArgs + (Get-CcodexModelEffortArgs -Model $Model -Effort $Effort) + @('-')
 }

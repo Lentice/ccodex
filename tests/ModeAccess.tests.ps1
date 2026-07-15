@@ -55,4 +55,18 @@ Write-Host "Build-CcodexCodexArgs: neither flag -> argv byte-identical to the pr
 $argsNeither = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model $null -Effort ''
 Assert-Equal ($argsNeither -join '|') (@('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '-') -join '|') 'omitting both flags (null/empty) leaves the argv byte-identical'
 
+Write-Host "Build-CcodexCodexArgs: --skip-git-repo-check splices the flag after the exec options, before the trailing prompt positional"
+$argsSkipGit = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -SkipGitRepoCheck
+$expectedSkipGit = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '--skip-git-repo-check', '-')
+Assert-Equal ($argsSkipGit -join '|') ($expectedSkipGit -join '|') '--skip-git-repo-check is inserted after --output-last-message and before the trailing -'
+
+Write-Host "Build-CcodexCodexArgs: --skip-git-repo-check composes with --model/--effort (skip-git before the -m/-c segment)"
+$argsSkipGitME = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md' -Model 'gpt-5-codex' -Effort 'high' -SkipGitRepoCheck
+$expectedSkipGitME = @('--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--color', 'never', '-C', 'D:\Repo', '--output-last-message', 'D:\Job\result.md', '--skip-git-repo-check', '-m', 'gpt-5-codex', '-c', 'model_reasoning_effort=high', '-')
+Assert-Equal ($argsSkipGitME -join '|') ($expectedSkipGitME -join '|') '--skip-git-repo-check precedes the -m/-c model/effort segment'
+
+Write-Host "Build-CcodexCodexArgs: omitting --skip-git-repo-check leaves it out (trusted-directory guard applies by default)"
+$argsNoSkipGit = Build-CcodexCodexArgs -Access 'read-only' -RepoRoot 'D:\Repo' -ResultPath 'D:\Job\result.md'
+Assert-True (-not (($argsNoSkipGit -join '|') -like '*--skip-git-repo-check*')) 'no --skip-git-repo-check in argv when the switch is omitted'
+
 Complete-CcodexTests

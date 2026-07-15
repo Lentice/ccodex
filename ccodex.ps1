@@ -312,7 +312,10 @@ function Invoke-CcodexJobExecution {
         # a prebuilt $CodexArgs is supplied (the resume path bakes them into its own argv). Both
         # absent => argv byte-identical to before these parameters existed.
         [string]$Model = $null,
-        [string]$Effort = $null
+        [string]$Effort = $null,
+        # Opt-in: forward codex exec's `--skip-git-repo-check` (see Build-CcodexCodexArgs). Ignored
+        # when a prebuilt $CodexArgs is supplied. Off by default => argv byte-identical to before.
+        [switch]$SkipGitRepoCheck
     )
 
     $jobId = Split-Path -Leaf $JobDir
@@ -340,10 +343,25 @@ function Invoke-CcodexJobExecution {
     } catch {
         return Complete-CcodexInternalFailure @internalFailureParams -Message $_.Exception.Message
     }
-    $codexArgs = if ($CodexArgs) { $CodexArgs } else { Build-CcodexCodexArgs -Access $Access -RepoRoot $codexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort }
+    $codexArgs = if ($CodexArgs) { $CodexArgs } else { Build-CcodexCodexArgs -Access $Access -RepoRoot $codexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort -SkipGitRepoCheck:$SkipGitRepoCheck }
 
     Write-CcodexTextFile -Path (Join-Path $JobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
     Write-CcodexJsonFile -Path (Join-Path $JobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $RepoRoot -JobDir $JobDir -Mode $Mode -Access $Access -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend $Backend -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit)
+
+    # Diagnostic timing: the sync `run`/`resume` callers arrive with StartedAt empty (only the
+    # native worker stamps its own, in Invoke-CcodexWorker, covering its detached-startup gap).
+    # Left blank, status.json's started_at stays empty for every sync job, so codex runtime can
+    # never be told apart from wrapper overhead after the fact. Stamp it HERE — after codex
+    # path/args are resolved and immediately before the `running` write and process launch — so
+    # a pre-launch internal failure (e.g. codex-path resolution) correctly leaves it empty, and
+    # started_at -> finished_at tracks codex runtime (+ the fast finalize tail) rather than
+    # wrapper setup. Guarded on empty so the native worker's own stamp is preserved unchanged
+    # (native semantics byte-identical); internalFailureParams is refreshed in lockstep so a
+    # post-launch internal failure reports the same started_at the terminal write would.
+    if ([string]::IsNullOrEmpty($StartedAt)) {
+        $StartedAt = (Get-Date).ToString('o')
+        $internalFailureParams['StartedAt'] = $StartedAt
+    }
     if (-not $SkipRunningWrite) {
         $runningWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend `
             -StatusPath (Join-Path $JobDir 'status.json') `
@@ -464,7 +482,14 @@ function Invoke-CcodexJobExecution {
 
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $failureMessage = "ccodex: job $jobId $($validation.Status) (codex_exit_code=$codexExitCode, wrapper_exit_code=$($validation.WrapperExitCode))`n  job dir: $JobDir`n  result:  $resultPath"
-    if ($hintLine) { $failureMessage += "`n  $hintLine" }
+    if ($hintLine) {
+        $failureMessage += "`n  $hintLine"
+    } else {
+        # No recognized failure signature => no actionable hint. Surface the tail of stderr so
+        # the real cause is visible in the CLI output instead of only in stderr.log.
+        $stderrTail = Get-CcodexStderrTail -StderrPath $stderrPath
+        if ($stderrTail) { $failureMessage += "`n  stderr (tail):`n$stderrTail" }
+    }
     return [pscustomobject]@{ WrapperExitCode = $validation.WrapperExitCode; Stdout = $null; Message = $failureMessage; CodexExitCode = $codexExitCode; Status = $validation.Status }
 }
 
@@ -599,7 +624,10 @@ function Invoke-CcodexRun {
         [int]$HardTimeoutSec = 0,
         # Optional --model/--effort passthrough (effort already validated at the dispatcher).
         [string]$Model = $null,
-        [string]$Effort = $null
+        [string]$Effort = $null,
+        # Opt-in `ccodex run --skip-git-repo-check`: forwarded to the execution core so a non-git
+        # (or untrusted) target repo is accepted instead of failing codex's trusted-directory check.
+        [switch]$SkipGitRepoCheck
     )
 
     $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
@@ -610,7 +638,7 @@ function Invoke-CcodexRun {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; Message = $init.Message }
     }
 
-    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit -Model $Model -Effort $Effort
+    $coreResult = Invoke-CcodexJobExecution -JobDir $init.JobDir -RepoRoot $init.RepoRoot -Mode $Mode -Access $init.ResolvedAccess -WorkerPrompt $init.WorkerPrompt -CodexPath $CodexPath -CreatedAt $init.CreatedAt -HardTimeoutSec $HardTimeoutSec -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit -Model $Model -Effort $Effort -SkipGitRepoCheck:$SkipGitRepoCheck
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
 }
@@ -1909,6 +1937,17 @@ try {
             # See the header comment for why. The PipelineExpected/PipelineObjects
             # parameters remain on Invoke-CcodexRun for direct/test callers.
             $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            # `--prompt-file` carries an internal hyphen, so PowerShell's -File binder cannot map
+            # it onto the -PromptFile script parameter (it lands in $args instead, leaving
+            # $PromptFile empty and silently falling through to the stdin reader — a 2s stall then
+            # a confusing "redirected stdin produced no data" error). Parse it from $args here,
+            # exactly like the other hyphenated flags; keep $PromptFile as the fallback so a direct
+            # `-PromptFile` caller still works.
+            $runPromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
+            if (-not $runPromptFile) { $runPromptFile = $PromptFile }
+            # Opt-in bypass of codex's trusted-directory check for a non-git (or untrusted) target.
+            # Presence-only switch (no value), so a plain membership test in $args is enough.
+            $runSkipGitRepoCheck = ($args -contains '--skip-git-repo-check')
             try {
                 $runModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
                 $runEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
@@ -1921,7 +1960,7 @@ try {
                 Mode             = $Mode
                 Access           = $Access
                 RepoOverride     = $Repo
-                PromptFile       = $PromptFile
+                PromptFile       = $runPromptFile
                 PositionalTask   = $PositionalTask
                 PipelineExpected = $false
                 PipelineObjects  = $null
@@ -1935,6 +1974,7 @@ try {
                     break
                 }
             }
+            if ($runSkipGitRepoCheck) { $runParams['SkipGitRepoCheck'] = $true }
             if ($runModel) { $runParams['Model'] = $runModel }
             if ($runEffortText) {
                 try {
@@ -1963,6 +2003,10 @@ try {
             $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
             $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
             $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
+            # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
+            # binder (internal hyphen), so parse it from $args with $PromptFile as the fallback.
+            $submitPromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
+            if (-not $submitPromptFile) { $submitPromptFile = $PromptFile }
             $submitModel = $null
             $submitEffortText = $null
             try {
@@ -1978,7 +2022,7 @@ try {
                 Mode             = $Mode
                 Access           = $Access
                 RepoOverride     = $Repo
-                PromptFile       = $PromptFile
+                PromptFile       = $submitPromptFile
                 PositionalTask   = $PositionalTask
                 PipelineExpected = $false
                 PipelineObjects  = $null
@@ -2056,9 +2100,14 @@ try {
                 $exitCode = 2
                 break
             }
+            # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
+            # binder (internal hyphen). Parse it from $args (with $PromptFile as fallback) so the
+            # documented "follow-up from stdin or --prompt-file" actually works.
+            $resumePromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
+            if (-not $resumePromptFile) { $resumePromptFile = $PromptFile }
             $resumeParams = @{
                 ParentJobId      = $resumeParentJobId
-                PromptFile       = $PromptFile
+                PromptFile       = $resumePromptFile
                 PositionalTask   = $null
                 PipelineExpected = $false
                 PipelineObjects  = $null
