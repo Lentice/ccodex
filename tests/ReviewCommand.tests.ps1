@@ -49,9 +49,9 @@ Write-Host "self-diff form quotes only the paths that contain whitespace, leavin
 $mixedPaths = Build-CcodexReviewPrompt -Range 'abc..def' -Staged $false -Working $false -Paths @('lib/', 'lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $false -RepoRoot 'C:\repo'
 Assert-True ($mixedPaths -like '*git diff abc..def -- lib/ "lib/My File.ps1"*') 'normal paths stay unquoted while the whitespace-bearing path is quoted'
 
-Write-Host "embed form quotes a whitespace-bearing path in the 'produced by' line too"
-$embedSpace = Build-CcodexReviewPrompt -Range $null -Staged $false -Working $true -Paths @('lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $true -RepoRoot 'C:\repo'
-Assert-True ($embedSpace -like '*produced by: git diff -- "lib/My File.ps1"*') 'embed form quotes the whitespace-bearing path in the produced-by line'
+# (The embed form's produced-by-line whitespace quoting is asserted in the real-repo block
+# below: the embed form now actually runs `git diff` and fails on a non-repo path, so it needs a
+# real repo rather than the throwaway 'C:\repo' the self-diff unit tests above can use.)
 
 # --- Unit tests: validation --------------------------------------------------
 
@@ -86,6 +86,16 @@ try {
     Assert-True ($embed -like '*line2-added*') 'embed form contains the actual added diff content'
     Assert-True ($embed -like '*capped at 100 KB total*') 'embed form carries the whole-diff 100 KB cap note'
     Assert-True (-not ($embed -like '*per-file*')) 'cap note does not claim per-file truncation (the implementation caps the whole diff, not per file)'
+
+    # Produced-by line quotes a whitespace-bearing path (real repo so the git diff the embed form
+    # now runs actually succeeds; a pathspec that matches nothing is an empty diff, exit 0).
+    $embedSpace = Build-CcodexReviewPrompt -Range $null -Staged $false -Working $true -Paths @('lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $true -RepoRoot $gitRepo
+    Assert-True ($embedSpace -like '*produced by: git diff -- "lib/My File.ps1"*') 'embed form quotes the whitespace-bearing path in the produced-by line'
+
+    # New contract: the embed form checks git's exit code and throws (usage error) instead of
+    # embedding an empty diff when the range/pathspec is invalid — a nonexistent ref that still
+    # passed the <a>..<b> shape check must not look like "no changes to review".
+    Assert-Throws { Build-CcodexReviewPrompt -Range 'nope-nonexistent-ref..HEAD' -Staged $false -Working $false -Paths @() -Intent $null -Focus $null -EmbedDiff $true -RepoRoot $gitRepo } 'embed form throws when the git diff range is invalid'
 } finally {
     Set-Location ([System.IO.Path]::GetTempPath())
     Remove-Item -Recurse -Force -LiteralPath $gitRepo -ErrorAction SilentlyContinue

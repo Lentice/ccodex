@@ -19,6 +19,16 @@
 # treats the launch as successful. Callers map both launch failures (Start-CcodexDetachedWorker
 # throwing) and sentinel timeouts (Wait-CcodexWorkerLaunch throwing) to wrapper exit code 23.
 
+function ConvertTo-CcodexQuotedLaunchArg {
+    # Wrap a launch-line argument in double quotes, doubling any TRAILING run of backslashes so
+    # the closing quote is not escaped by it (the MSVCRT/pwsh argv rule: `"C:\"` otherwise makes
+    # the parser treat `\"` as a literal quote and swallow the following text). Embedded
+    # double-quotes are rejected upstream in Start-CcodexDetachedWorker, so only the
+    # trailing-backslash case needs handling here; interior backslashes are literal already.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    return '"' + ($Value -replace '(\\+)$', '$1$1') + '"'
+}
+
 function Get-CcodexWorkerArgumentLine {
     # Shared quoting builder for the worker launch command line: `worker --job-id <id>`
     # plus the optional `--state-root`/`--codex-path` overrides, hand-quoted exactly once
@@ -37,14 +47,14 @@ function Get-CcodexWorkerArgumentLine {
         [string]$Model,
         [string]$Effort
     )
-    $line = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" worker --job-id $JobId"
-    if ($StateRoot) { $line += " --state-root `"$StateRoot`"" }
-    if ($CodexPath) { $line += " --codex-path `"$CodexPath`"" }
+    $line = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File $(ConvertTo-CcodexQuotedLaunchArg $ScriptPath) worker --job-id $JobId"
+    if ($StateRoot) { $line += " --state-root $(ConvertTo-CcodexQuotedLaunchArg $StateRoot)" }
+    if ($CodexPath) { $line += " --codex-path $(ConvertTo-CcodexQuotedLaunchArg $CodexPath)" }
     # --model/--effort are per-invocation knobs that status.json deliberately never carries,
     # so the launch command line is their ONLY route into the detached worker. Model is quoted
     # like the path arguments (model names are an open set); effort is validated upstream to
     # minimal|low|medium|high and never needs quoting.
-    if ($Model) { $line += " --model `"$Model`"" }
+    if ($Model) { $line += " --model $(ConvertTo-CcodexQuotedLaunchArg $Model)" }
     if ($Effort) { $line += " --effort $Effort" }
     return $line
 }
@@ -74,8 +84,14 @@ function Start-CcodexDetachedWorker {
 
     $argumentLine = Get-CcodexWorkerArgumentLine -ScriptPath $ScriptPath -JobId $JobId -StateRoot $StateRoot -CodexPath $CodexPath -Model $Model -Effort $Effort
 
+    # Launch the CURRENTLY-RUNNING pwsh by absolute path, never a bare `pwsh`. Both backends
+    # below set CurrentDirectory to the target repo, and Windows process resolution searches the
+    # current directory, so a bare name could execute a `pwsh.exe` planted in an untrusted repo
+    # instead of the real shell. $PSHOME is the running interpreter's own directory.
+    $pwshExe = Join-Path $PSHOME 'pwsh.exe'
+
     if ($Mechanism -eq 'cim') {
-        $commandLine = "pwsh $argumentLine"
+        $commandLine = "$(ConvertTo-CcodexQuotedLaunchArg $pwshExe) $argumentLine"
 
         # ShowWindow = 0 (SW_HIDE): without an explicit Win32_ProcessStartup the created
         # console worker gets a visible console window that flashes up at the user. The
@@ -105,7 +121,7 @@ function Start-CcodexDetachedWorker {
     # nothing, so a StateRoot/CodexPath containing a space would otherwise be re-split into
     # extra argv entries by the child process. Passing the whole already-quoted line as one
     # element sidesteps that re-join entirely, matching the `cim` command line exactly.
-    $proc = Start-Process -FilePath 'pwsh' -ArgumentList $argumentLine -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
+    $proc = Start-Process -FilePath $pwshExe -ArgumentList $argumentLine -WorkingDirectory $WorkingDirectory -WindowStyle Hidden -PassThru
     return $proc.Id
 }
 

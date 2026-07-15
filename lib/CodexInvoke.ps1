@@ -49,6 +49,17 @@ function Resolve-CcodexCodexPath {
 
 function ConvertTo-CcodexCmdInnerArgument {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Argument)
+    # A literal double-quote cannot be carried safely through the `cmd /d /s /c "<inner>"`
+    # double-parse: the Win32/MSVCRT `\"` escaping ConvertTo-CcodexWin32QuotedArgument emits is
+    # NOT honored by cmd.exe's own tokenizer, so an embedded quote lets cmd.exe close the quoted
+    # region early and treat a following `&`/`|`/`<`/`>` as a command separator/redirection
+    # (CVE-2024-24576 class). Windows paths can never contain a quote, but an
+    # attacker-influenced value routed through here on the SYNC `run` path (e.g. `--model`) could,
+    # and unlike the detached-worker launch it has no earlier guard. Reject it loudly rather than
+    # emit a command line cmd.exe would mis-split. Mirrors lib/Detach.ps1's identical guard.
+    if ($Argument.Contains('"')) {
+        throw "ccodex: refusing to pass an argument containing a double-quote through cmd.exe (unsafe under the cmd.exe/MSVCRT double-parse): $Argument"
+    }
     # Quoting for a single element of the `cmd /d /s /c "<inner>"` command line.
     # The inner line is parsed twice: first by cmd.exe, then by the target's
     # MSVCRT argv parser. ConvertTo-CcodexWin32QuotedArgument only handles the
@@ -153,57 +164,119 @@ function Invoke-CcodexCodexProcess {
     $process.StartInfo = $psi
     [void]$process.Start()
 
-    $process.StandardInput.Write($PromptContent)
-    $process.StandardInput.Close()
+    # Everything below runs with the codex child ALREADY launched. If any post-launch setup
+    # (the stdin write, opening the events log, arming the async readers) or the wait loop
+    # throws, the catch kills the whole process tree so a half-started codex can never keep
+    # running — and, under workspace/worktree access, keep mutating files — after the wrapper
+    # has bailed out. The events writer is created inside the try (a failure opening it must
+    # still trigger the kill), so it starts $null and the finally only disposes it once it exists.
+    $eventsWriter = $null
+    try {
+        $process.StandardInput.Write($PromptContent)
+        $process.StandardInput.Close()
 
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
+        # codex `exec --json` streams JSONL events line-by-line in real time, so stdout is
+        # consumed with a line reader that appends each event to codex-events.jsonl AS IT
+        # ARRIVES (single writer, this thread) instead of buffering the whole stream until
+        # exit. That is what makes `ccodex tail` show live progress during a multi-minute run.
+        # The writer is opened up-front (FileShare.ReadWrite so a concurrent Get-CcodexTailLines
+        # reader is never blocked) which also creates the (possibly empty) events file
+        # immediately — a hard-timeout kill that lands before Codex emits a line still leaves
+        # the artifact on disk. NewLine is forced to LF and the file is UTF-8 without BOM to
+        # match the raw codex JSONL every downstream parser (Get-CcodexCodexThreadId, tail)
+        # expects; AutoFlush guarantees each line hits disk for the tail reader immediately.
+        # stderr is NOT line-streamed: it stays a concurrent ReadToEndAsync drain (prevents a
+        # pipe-buffer deadlock) written once at the end, exactly as before.
+        $utf8NoBom2 = New-Object System.Text.UTF8Encoding($false)
+        $eventsStream = [System.IO.File]::Open($EventsLogPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+        $eventsWriter = New-Object System.IO.StreamWriter($eventsStream, $utf8NoBom2)
+        $eventsWriter.NewLine = "`n"
+        $eventsWriter.AutoFlush = $true
 
-    # Single 1s-granularity poll loop that carries BOTH responsibilities:
-    #   * the job-level hard timeout ($HardTimeoutMs): once the deadline passes and
-    #     Codex still has not exited, kill the tree and return the $null sentinel
-    #     (behavior-identical to the previous single WaitForExit($HardTimeoutMs)).
-    #   * the periodic worker heartbeat: every $HeartbeatEveryPasses passes, invoke
-    #     $OnHeartbeat best-effort (swallow any exception).
-    # WaitForExit(1000) blocks up to a second, so the loop wakes ~once per second
-    # regardless of whether a heartbeat or timeout is configured.
-    $hardDeadline = if ($HardTimeoutMs -gt 0) { [DateTime]::UtcNow.AddMilliseconds($HardTimeoutMs) } else { $null }
-    $passCount = 0
-    while (-not $process.WaitForExit(1000)) {
-        $passCount++
-        if ($null -ne $OnHeartbeat -and $HeartbeatEveryPasses -gt 0 -and ($passCount % $HeartbeatEveryPasses) -eq 0) {
-            try { & $OnHeartbeat } catch { }
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stdoutEof = $false
+        $pendingLine = $process.StandardOutput.ReadLineAsync()
+
+        # Single 1s-granularity poll loop that carries THREE responsibilities:
+        #   * drain every stdout line that has arrived so far (append + flush), always
+        #     re-arming the next ReadLineAsync immediately so stdout back-pressure can
+        #     never build up and stall Codex.
+        #   * the job-level hard timeout ($HardTimeoutMs): once the deadline passes and
+        #     Codex still has not exited, kill the tree and return the $null sentinel.
+        #   * the periodic worker heartbeat: every $HeartbeatEveryPasses passes, invoke
+        #     $OnHeartbeat best-effort (swallow any exception).
+        # WaitForExit(1000) blocks up to a second, so the loop wakes ~once per second
+        # regardless of whether a heartbeat or timeout is configured. IsCompleted is a
+        # non-blocking check ($null result == EOF; '' is a legitimate empty line).
+        $hardDeadline = if ($HardTimeoutMs -gt 0) { [DateTime]::UtcNow.AddMilliseconds($HardTimeoutMs) } else { $null }
+        $passCount = 0
+        while (-not $process.WaitForExit(1000)) {
+            while (-not $stdoutEof -and $pendingLine.IsCompleted) {
+                $line = $pendingLine.GetAwaiter().GetResult()
+                if ($null -eq $line) { $stdoutEof = $true; break }
+                $eventsWriter.WriteLine($line)
+                $pendingLine = $process.StandardOutput.ReadLineAsync()
+            }
+            $passCount++
+            if ($null -ne $OnHeartbeat -and $HeartbeatEveryPasses -gt 0 -and ($passCount % $HeartbeatEveryPasses) -eq 0) {
+                try { & $OnHeartbeat } catch { }
+            }
+            if ($null -ne $hardDeadline -and [DateTime]::UtcNow -ge $hardDeadline) {
+                # Budget exceeded and Codex has not exited: kill the whole tree, then
+                # drain whatever stdout/stderr is already buffered — but only for a short
+                # grace window. A surviving grandchild can keep the pipe open past the
+                # kill, so an unbounded await could hang; each drain is bounded and the
+                # streams are force-disposed so the timeout can never be masked.
+                Stop-CcodexProcessTree -ProcessId $process.Id
+                try { $process.WaitForExit() } catch { }
+                $graceDeadline = [DateTime]::UtcNow.AddSeconds(2)
+                while (-not $stdoutEof -and [DateTime]::UtcNow -lt $graceDeadline) {
+                    try {
+                        if ($pendingLine.Wait(100)) {
+                            $line = $pendingLine.GetAwaiter().GetResult()
+                            if ($null -eq $line) { $stdoutEof = $true; break }
+                            $eventsWriter.WriteLine($line)
+                            $pendingLine = $process.StandardOutput.ReadLineAsync()
+                        } else { break }
+                    } catch { break }
+                }
+                $partialStderr = ''
+                try { if ($stderrTask.Wait(2000)) { $partialStderr = $stderrTask.GetAwaiter().GetResult() } } catch { $partialStderr = '' }
+                try { $process.StandardOutput.Close() } catch { }
+                try { $process.StandardError.Close() } catch { }
+                Write-CcodexTextFile -Path $StderrLogPath -Content $partialStderr
+                # NOTE: no exit_code.txt on a hard-timeout kill (Codex never exited);
+                # the events already streamed to disk are preserved (writer closed below).
+                return $null
+            }
         }
-        if ($null -ne $hardDeadline -and [DateTime]::UtcNow -ge $hardDeadline) {
-            # Budget exceeded and Codex has not exited: kill the whole tree, then
-            # wait (parameterless) for the killed process object to reap so the
-            # async stdout/stderr readers can drain the now-closed pipes. Each
-            # await/close is guarded so a partial read never masks the timeout.
-            Stop-CcodexProcessTree -ProcessId $process.Id
-            try { $process.WaitForExit() } catch { }
-            $partialStdout = ''
-            $partialStderr = ''
-            try { $partialStdout = $stdoutTask.GetAwaiter().GetResult() } catch { $partialStdout = '' }
-            try { $partialStderr = $stderrTask.GetAwaiter().GetResult() } catch { $partialStderr = '' }
-            try { $process.StandardOutput.Close() } catch { }
-            try { $process.StandardError.Close() } catch { }
-            Write-CcodexTextFile -Path $EventsLogPath -Content $partialStdout
-            Write-CcodexTextFile -Path $StderrLogPath -Content $partialStderr
-            # NOTE: no exit_code.txt on a hard-timeout kill (Codex never exited).
-            return $null
+
+        # WaitForExit() (parameterless) after a WaitForExit(timeout) that returned true
+        # guarantees the process is fully reaped and its pipes closed, so the remaining
+        # ReadLineAsync calls resolve promptly (trailing lines, then $null at EOF).
+        $process.WaitForExit()
+        while (-not $stdoutEof) {
+            $line = $pendingLine.GetAwaiter().GetResult()
+            if ($null -eq $line) { $stdoutEof = $true; break }
+            $eventsWriter.WriteLine($line)
+            $pendingLine = $process.StandardOutput.ReadLineAsync()
         }
+
+        $stderr = $stderrTask.GetAwaiter().GetResult()
+        Write-CcodexTextFile -Path $StderrLogPath -Content $stderr
+        Write-CcodexTextFile -Path $ExitCodeFilePath -Content "$($process.ExitCode)"
+
+        return $process.ExitCode
+    } catch {
+        # Post-launch setup or the wait loop threw: kill the whole codex process tree so a
+        # child launched at $process.Start() above cannot outlive the wrapper's failure (and,
+        # under workspace/worktree access, keep mutating files). Best-effort, then rethrow the
+        # original error for the caller to record as a wrapper-internal failure.
+        try { Stop-CcodexProcessTree -ProcessId $process.Id } catch { }
+        throw
+    } finally {
+        # Always dispose the events writer (and its underlying stream) so no partial run
+        # ever leaks a file handle — normal exit, hard timeout, or an unexpected throw.
+        if ($null -ne $eventsWriter) { try { $eventsWriter.Dispose() } catch { } }
     }
-
-    # WaitForExit() (parameterless) after a WaitForExit(timeout) that returned
-    # true guarantees the async output handlers have fully flushed before we read.
-    $process.WaitForExit()
-
-    $stdout = $stdoutTask.GetAwaiter().GetResult()
-    $stderr = $stderrTask.GetAwaiter().GetResult()
-
-    Write-CcodexTextFile -Path $EventsLogPath -Content $stdout
-    Write-CcodexTextFile -Path $StderrLogPath -Content $stderr
-    Write-CcodexTextFile -Path $ExitCodeFilePath -Content "$($process.ExitCode)"
-
-    return $process.ExitCode
 }

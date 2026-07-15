@@ -37,7 +37,15 @@ function Invoke-CcodexWorker {
         $message = "ccodex: internal error: job '$JobId' has no prompt.md to execute.`n  job dir: $jobDir"
         return [pscustomobject]@{ WrapperExitCode = 12; Message = $message }
     }
-    $workerPrompt = Get-Content -LiteralPath $promptPath -Raw -Encoding UTF8
+    # Read under try/catch: prompt.md passed the existence check above, but a delete/lock racing
+    # in between (or any IO error) must fail as a clean internal error (exit 12) rather than let
+    # the exception escape and leave the job stuck at 'created' with a dead worker.
+    try {
+        $workerPrompt = Get-Content -LiteralPath $promptPath -Raw -Encoding UTF8
+    } catch {
+        $message = "ccodex: internal error: job '$JobId' prompt.md could not be read: $($_.Exception.Message)`n  job dir: $jobDir"
+        return [pscustomobject]@{ WrapperExitCode = 12; Message = $message }
+    }
 
     $currentProcess = Get-Process -Id $PID
     $backendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime $currentProcess.StartTime

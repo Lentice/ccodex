@@ -35,6 +35,23 @@ function Build-CcodexReviewPrompt {
         throw "ccodex: --range must be of the form <base>..<head> (e.g. abc123..HEAD); got '$Range'."
     }
 
+    # The default (self-diff) prompt asks Codex to RUN `git diff <range> -- <paths>` verbatim, so
+    # any shell metacharacter in a caller-supplied range/path would be reconstructed into an
+    # executable command line — a command-injection vector even though the review sandbox is
+    # read-only. A legitimate git ref or pathspec never needs these characters, so reject them
+    # here (this also keeps the embed form's "produced by" line honest).
+    $shellMeta = '[;&|`$(){}<>\n\r''"]'
+    if ($Range -and $Range -match $shellMeta) {
+        throw "ccodex: --range contains an unsupported shell metacharacter: '$Range'."
+    }
+    if ($Paths) {
+        foreach ($p in $Paths) {
+            if ($p -match $shellMeta) {
+                throw "ccodex: --path contains an unsupported shell metacharacter: '$p'."
+            }
+        }
+    }
+
     # Git selector tokens shared by the display string and the embed invocation.
     $selectorArgs = @()
     if ($Range) { $selectorArgs = @($Range) }
@@ -84,9 +101,18 @@ $metaBlock$instructions
 "@
     }
 
-    # Embed form: the wrapper runs the diff itself from the repo root and embeds it.
-    $diffOut = (& git -C $RepoRoot diff @selectorArgs @pathArgs 2>$null | Out-String)
-    $statOut = (& git -C $RepoRoot diff --stat @selectorArgs @pathArgs 2>$null | Out-String)
+    # Embed form: the wrapper runs the diff itself from the repo root and embeds it. Check git's
+    # exit code (merging stderr into the captured text via 2>&1): a bad range/pathspec — e.g. a
+    # nonexistent ref that still passed the <a>..<b> shape check above — must surface as a usage
+    # error, not get embedded as an empty diff that Codex then "reviews" as if nothing changed.
+    $diffOut = (& git -C $RepoRoot diff @selectorArgs @pathArgs 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "ccodex: git diff failed for the review selection (exit $LASTEXITCODE): $($diffOut.Trim())"
+    }
+    $statOut = (& git -C $RepoRoot diff --stat @selectorArgs @pathArgs 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw "ccodex: git diff --stat failed for the review selection (exit $LASTEXITCODE): $($statOut.Trim())"
+    }
     if ($null -eq $diffOut) { $diffOut = '' }
     if ($null -eq $statOut) { $statOut = '' }
 

@@ -32,15 +32,19 @@ function Get-CcodexUserConfig {
             $value = $retentionRaw.$key
         }
 
-        try {
-            $value = [int]$value
-        } catch {
-            throw "ccodex: invalid config.json: retention.$key must be an integer: $($_.Exception.Message)"
+        $asDouble = 0.0
+        if (-not [double]::TryParse([string]$value, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$asDouble)) {
+            throw "ccodex: invalid config.json: retention.$key must be an integer (got '$value')"
         }
-
-        if ($value -lt 0) {
-            throw "ccodex: invalid config.json: retention.$key must not be negative (got '$value')"
+        # Reject fractional values: [int]0.5 silently rounds to 0, and jobs_days=0 would make
+        # cleanup treat every terminal job as aged-out and delete them all. Require a whole number.
+        if ($asDouble -ne [Math]::Truncate($asDouble)) {
+            throw "ccodex: invalid config.json: retention.$key must be a whole number of days, not fractional (got '$value')"
         }
+        if ($asDouble -lt 0 -or $asDouble -gt [int]::MaxValue) {
+            throw "ccodex: invalid config.json: retention.$key must be between 0 and $([int]::MaxValue) (got '$value')"
+        }
+        $value = [int]$asDouble
 
         $retention[$key] = $value
     }

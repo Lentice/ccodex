@@ -64,6 +64,20 @@ if ($env:CCODEX_FAKE_WRITE_FILE -and $workDir) {
 if ($env:CCODEX_FAKE_THREAD_ID) {
     Write-Output "{`"type`":`"thread.started`",`"thread_id`":`"$($env:CCODEX_FAKE_THREAD_ID)`"}"
 }
+# Progress-streaming support: emit N JSONL lines over time so a test can observe
+# codex-events.jsonl growing WHILE the process is still running (real codex
+# `exec --json` streams events line-by-line). Written straight to the redirected
+# stdout with an explicit flush after each line so nothing is buffered until exit;
+# CCODEX_FAKE_STREAM_DELAY_MS spaces the lines out. Additive: absent env var = no-op.
+if ($env:CCODEX_FAKE_STREAM_LINES) {
+    $streamCount = [int]$env:CCODEX_FAKE_STREAM_LINES
+    $streamDelay = if ($env:CCODEX_FAKE_STREAM_DELAY_MS) { [int]$env:CCODEX_FAKE_STREAM_DELAY_MS } else { 0 }
+    for ($s = 0; $s -lt $streamCount; $s++) {
+        [Console]::Out.WriteLine("{`"type`":`"item.completed`",`"seq`":$s}")
+        [Console]::Out.Flush()
+        if ($streamDelay -gt 0) { Start-Sleep -Milliseconds $streamDelay }
+    }
+}
 Write-Output '{"type":"event","msg":"fake-codex ran"}'
 if ($env:CCODEX_FAKE_STDERR) {
     [Console]::Error.WriteLine($env:CCODEX_FAKE_STDERR)

@@ -125,7 +125,12 @@ function Update-CcodexOrphanStatus {
     # per-job lock before giving up. Reconciliation is triggered from read-only commands
     # (status/wait/read), so a lock it cannot acquire must never block or throw: it skips
     # the rewrite this pass and reports the job as possibly-stale instead.
-    param([Parameter(Mandatory)][string]$JobDir, [int]$LockTimeoutSec = 10)
+    #
+    # $DryRun: compute the terminal verdict from completion evidence exactly as normal, but do
+    # NOT acquire the lock or write status.json. Returns Reconciled=$true with the computed
+    # status object in ReconciledStatus so a caller (cleanup --dry-run) can preview the outcome
+    # without mutating on-disk state — a dry run must never change anything.
+    param([Parameter(Mandatory)][string]$JobDir, [int]$LockTimeoutSec = 10, [switch]$DryRun)
 
     $status = Read-CcodexStatusFile -JobDir $JobDir
     if ($null -eq $status) {
@@ -185,6 +190,11 @@ function Update-CcodexOrphanStatus {
     # classification); the indexer assignment below adds them either way.
     $updated['failure_reason'] = $failureReason
     $updated['codex_thread_id'] = $codexThreadId
+
+    if ($DryRun) {
+        # Preview only: report the computed terminal verdict WITHOUT taking the lock or writing.
+        return [pscustomobject]@{ Status = $verdict.Status; Reconciled = $true; PossiblyStale = $false; ReconciledStatus = [pscustomobject]$updated }
+    }
 
     # The reconciliation rewrite is a status.json WRITE, so it goes through the per-job
     # lock like every other writer. Because the caller is a reader, a lock we cannot

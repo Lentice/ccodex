@@ -140,5 +140,65 @@ Assert-Equal (Get-Content -LiteralPath $hbtResult -Raw) 'hb throw ok' 'the run c
 Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $hbThrowRoot -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host "Invoke-CcodexCodexProcess streams stdout to codex-events.jsonl line-by-line while the process is still running"
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
+$streamRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-codexinvoke-stream-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $streamRoot -Force | Out-Null
+$streamEvents = Join-Path $streamRoot 'codex-events.jsonl'
+$streamStderr = Join-Path $streamRoot 'stderr.log'
+$streamExit = Join-Path $streamRoot 'exit_code.txt'
+$streamResult = Join-Path $streamRoot 'result.md'
+$libStore = (Resolve-Path (Join-Path $PSScriptRoot '..\lib\JobStore.ps1')).Path
+$libInvoke = (Resolve-Path (Join-Path $PSScriptRoot '..\lib\CodexInvoke.ps1')).Path
+
+# A file-share-tolerant line counter: opens FileShare.ReadWrite exactly like
+# Get-CcodexTailLines does, so it can read the events file WHILE the writer holds it.
+$countLines = {
+    param($path)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 0 }
+    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $sr = New-Object System.IO.StreamReader($fs, (New-Object System.Text.UTF8Encoding($false)))
+        $text = $sr.ReadToEnd()
+        $sr.Dispose()
+    } finally { $fs.Dispose() }
+    return (@($text -split "`n" | Where-Object { $_ -ne '' })).Count
+}
+
+# 5 streamed lines, 400ms apart (~2s) so a 100ms poll from this thread reliably
+# catches an intermediate state. Run the (blocking) function in a background
+# runspace and poll the events file for growth from here.
+$env:CCODEX_FAKE_STREAM_LINES = '5'
+$env:CCODEX_FAKE_STREAM_DELAY_MS = '400'
+$streamPs = [powershell]::Create()
+[void]$streamPs.AddScript({
+    param($ls, $li, $codex, $fixture, $events, $stderr, $exit, $result)
+    . $ls
+    . $li
+    Invoke-CcodexCodexProcess -CodexPath $codex -Arguments @('-NoProfile', '-File', $fixture, '--output-last-message', $result) -PromptContent 'stream prompt' -EventsLogPath $events -StderrLogPath $stderr -ExitCodeFilePath $exit
+}).AddParameters(@{ ls = $libStore; li = $libInvoke; codex = $pwshPath; fixture = $fixturePs1; events = $streamEvents; stderr = $streamStderr; exit = $streamExit; result = $streamResult }) | Out-Null
+$streamHandle = $streamPs.BeginInvoke()
+$sawPartial = $false
+$streamPollDeadline = (Get-Date).AddSeconds(20)
+while (-not $streamHandle.IsCompleted -and (Get-Date) -lt $streamPollDeadline) {
+    $n = & $countLines $streamEvents
+    if ($n -ge 1 -and $n -lt 6) { $sawPartial = $true }
+    Start-Sleep -Milliseconds 100
+}
+$streamOutput = $streamPs.EndInvoke($streamHandle)
+$streamPs.Dispose()
+$streamExitCode = @($streamOutput)[-1]
+Remove-Item Env:\CCODEX_FAKE_STREAM_LINES, Env:\CCODEX_FAKE_STREAM_DELAY_MS -ErrorAction SilentlyContinue
+
+Assert-Equal $streamExitCode 0 'streaming run returns the fake exit code'
+Assert-True $sawPartial 'codex-events.jsonl grew incrementally while codex was still running (>=1 and <all lines observed mid-run)'
+$streamFinal = Get-Content -LiteralPath $streamEvents -Raw
+Assert-True ($streamFinal -like '*"seq":0*') 'the first streamed event line was captured'
+Assert-True ($streamFinal -like '*"seq":4*') 'the last streamed event line was captured'
+Assert-True ($streamFinal -like '*fake-codex ran*') 'the trailing (post-stream) event line was captured'
+Assert-Equal (& $countLines $streamEvents) 6 'all 5 streamed lines plus the trailing event line are present at the end'
+Assert-Equal (Get-Content -LiteralPath $streamExit -Raw) '0' 'exit_code.txt is written on normal completion of a streaming run'
+Remove-Item -LiteralPath $streamRoot -Recurse -Force -ErrorAction SilentlyContinue
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force
 Complete-CcodexTests

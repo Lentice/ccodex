@@ -62,9 +62,12 @@ function Complete-CcodexInternalFailure {
     # and a terminal failed status.json, both stamped wrapper_exit_code=12.
     # codex_exit_code stays null because Codex never produced one. A job must
     # never remain at a non-terminal status (e.g. `created`) after this runs.
-    # Shared by the execution core and `submit`; each caller is the sole
-    # active writer for JobDir at the point it calls this, so writing
-    # status.json/worker-complete.json here is single-writer-safe.
+    # Shared by the execution core and `submit`. It takes the per-job lock and
+    # re-reads status before writing, so a concurrent cancel that already moved
+    # the job to a terminal status (e.g. `cancelled`) is preserved rather than
+    # clobbered with `failed`; only when the lock is contended (the paths reached
+    # after a prior lock-acquisition already failed) does it fall through to an
+    # unguarded write, since leaving the job non-terminal is the worse outcome.
     param(
         [Parameter(Mandatory)][string]$JobDir,
         [Parameter(Mandatory)][string]$JobId,
@@ -100,8 +103,6 @@ function Complete-CcodexInternalFailure {
     if ($ResultPath) {
         try { $resultPresent = Test-Path -LiteralPath $ResultPath -PathType Leaf } catch { $resultPresent = $false }
     }
-    $completeObj = New-CcodexWorkerCompleteObject -JobId $JobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $completeObj
 
     $failureReason = Get-CcodexFailureReason -CodexExitCode $null -StderrPath $StderrPath -EventsPath $EventsPath
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $EventsPath
@@ -109,8 +110,32 @@ function Complete-CcodexInternalFailure {
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
 
+    $completeObj = New-CcodexWorkerCompleteObject -JobId $JobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
     $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeFinalizeError $WorktreeFinalizeError -ParentJobId $ParentJobId
-    Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
+
+    # Guard the terminal write behind the per-job lock, re-reading status first so a concurrent
+    # cancel that already reached a terminal status is preserved instead of clobbered with
+    # 'failed'. ONE short attempt (no retry): in the common internal-failure paths (codex-path
+    # resolution / launch throw) no lock is held and this acquires instantly; in the rare paths
+    # reached only after a prior lock-acquisition already failed, the lock is contended and we
+    # must not stall, so we fall through to the unguarded write (a non-terminal job is worse than
+    # a rare cancelled->failed relabel).
+    $acquired = $false
+    try { Lock-CcodexJob -JobDir $JobDir -TimeoutSec 5 -CommandName 'internal-failure' | Out-Null; $acquired = $true } catch { $acquired = $false }
+    try {
+        if ($acquired) {
+            $current = Read-CcodexStatusFile -JobDir $JobDir
+            if (Test-CcodexTerminalStatus -StatusObject $current) {
+                # A concurrent writer (in practice cancel) already decided this job's fate: leave
+                # status.json exactly as-is and report the on-disk terminal outcome.
+                return New-CcodexPreservedStatusResult -JobId $JobId -JobDir $JobDir -PreservedStatus $current
+            }
+        }
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $completeObj
+        Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'status.json') -Object $statusObj
+    } finally {
+        if ($acquired) { Unlock-CcodexJob -JobDir $JobDir }
+    }
     return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = "ccodex: internal error: $hintedMessage`n  job dir: $JobDir"; CodexExitCode = $null; Status = 'failed' }
 }
 
@@ -1879,14 +1904,19 @@ function Get-CcodexRequiredArgValue {
     # Get-CcodexArgValue. Legitimate values never start with `--` for the flags routed here.
     param([object[]]$ArgumentList, [Parameter(Mandatory)][string]$FlagName)
     if (-not $ArgumentList) { return $null }
+    $found = $null
+    $seen = $false
     for ($i = 0; $i -lt $ArgumentList.Count; $i++) {
         if ($ArgumentList[$i] -eq $FlagName) {
             if (($i + 1) -ge $ArgumentList.Count -or ([string]$ArgumentList[$i + 1]).StartsWith('--')) {
                 throw "ccodex: $FlagName requires a value."
             }
-            return $ArgumentList[$i + 1]
+            # Validate EVERY occurrence: a valueless repeat like `--older-than 14d --older-than`
+            # must still be rejected, not masked by the first occurrence's value. Return the first.
+            if (-not $seen) { $found = $ArgumentList[$i + 1]; $seen = $true }
         }
     }
+    if ($seen) { return $found }
     return $null
 }
 
@@ -2433,8 +2463,18 @@ try {
             # error (exit 2). Otherwise the engine is best-effort: exit 0, or 12 if any
             # individual delete/scrub failed.
             $cleanupStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $cleanupOlderThan = Get-CcodexArgValue -ArgumentList $args -FlagName '--older-than'
-            $cleanupThreadTtl = Get-CcodexArgValue -ArgumentList $args -FlagName '--thread-ttl'
+            # Require a real value when the flag is present: a bare `--older-than` (or one followed
+            # by another `--flag`) must be a usage error, NOT silently fall back to the configured
+            # default retention and delete jobs the caller never asked to delete. Absent flag ->
+            # $null (unchanged).
+            try {
+                $cleanupOlderThan = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--older-than'
+                $cleanupThreadTtl = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--thread-ttl'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
 
             $cleanupParams = @{
                 RepoFilter     = $Repo
@@ -2450,9 +2490,19 @@ try {
                     $exitCode = 2
                     break
                 }
-                $olderNum = [int]($cleanupOlderThan -replace '[dh]$', '')
-                # h -> fractional days; d -> whole days.
-                $cleanupParams['OlderThanDays'] = if ($cleanupOlderThan.EndsWith('h')) { $olderNum / 24.0 } else { $olderNum }
+                $olderNum = 0
+                # TryParse (not a bare [int] cast): a regex-valid but oversized value like
+                # 99999999999d must be a usage error (exit 2), not an [int] OverflowException that
+                # surfaces as an internal error (exit 12).
+                if (-not [int]::TryParse(($cleanupOlderThan -replace '(?i)[dh]$', ''), [ref]$olderNum)) {
+                    Write-Host "ccodex: --older-than numeric value is out of range; got '$cleanupOlderThan'."
+                    $exitCode = 2
+                    break
+                }
+                # h -> fractional days; d -> whole days. Match the suffix case-INSENSITIVELY: the
+                # validation regex above accepts `12H`, and String.EndsWith('h') is case-sensitive,
+                # so `.EndsWith('h')` would misread `12H` as 12 DAYS instead of 12 hours.
+                $cleanupParams['OlderThanDays'] = if ($cleanupOlderThan -match '(?i)h$') { $olderNum / 24.0 } else { $olderNum }
             }
             if ($cleanupThreadTtl) {
                 if ($cleanupThreadTtl -notmatch '^\d+d?$') {
@@ -2460,7 +2510,13 @@ try {
                     $exitCode = 2
                     break
                 }
-                $cleanupParams['ThreadTtlDays'] = [int]($cleanupThreadTtl -replace 'd$', '')
+                $ttlNum = 0
+                if (-not [int]::TryParse(($cleanupThreadTtl -replace 'd$', ''), [ref]$ttlNum)) {
+                    Write-Host "ccodex: --thread-ttl numeric value is out of range; got '$cleanupThreadTtl'."
+                    $exitCode = 2
+                    break
+                }
+                $cleanupParams['ThreadTtlDays'] = $ttlNum
             }
 
             $cleanupResult = Invoke-CcodexCleanup @cleanupParams

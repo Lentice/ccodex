@@ -128,7 +128,7 @@ Follow these steps literally after finishing a feature or fix:
 ## Job management (if `cleanup`/`cancel`/`tail`/`debug` are supported)
 
 ```powershell
-ccodex cancel <job_id>          # stop a running job (cancel exits 0; later wait/read exits 22)
+ccodex cancel <job_id>          # stop a running job (cancel exits 0; later wait exits 22; read exits 11 unless a result.md was already produced)
 ccodex tail <job_id> [--lines <n>]   # last log lines of a running/finished job
 ccodex debug <job_id>           # compact diagnostic bundle + suggested next command
 ccodex cleanup --dry-run        # preview retention sweep (default: terminal jobs older than 14d)
@@ -185,7 +185,7 @@ Trust the exit code plus `status.json.failure_reason`; never parse stderr prose.
 | `3` / `4` | Job not found / not terminal yet. |
 | `10` + `quota_or_rate_limit` | Codex quota/rate limit. Report to the user; **never retry-loop**. |
 | `10` + `auth` | Codex needs `codex login`. Report; continue without the result. |
-| `10` + `permission_or_sandbox` | Sandbox denial. Consider `--access workspace` or narrower scope on a future attempt; don't auto-retry. |
+| `10` + `permission_or_sandbox` | Sandbox denial. For a **test** job, `--access workspace` may help; for a review/brainstorm, NEVER escalate to workspace (see the read-only rule above) — use `--embed-diff` and/or a narrower `--path`, or report the review as skipped. Don't auto-retry. |
 | `10` + `network` | One retry is safe; then report and continue. |
 | `10` (no reason) / `11` | Codex failed / produced no usable result. Note it; use judgment. |
 | `12` | Wrapper internal error. Note it; continue without the review. |

@@ -35,5 +35,13 @@ function Get-CcodexJobDir {
 
 function Get-CcodexIndexPath {
     param([Parameter(Mandatory)][string]$JobId, [string]$Root = $env:LOCALAPPDATA)
+    # Guard against path traversal: a job id arrives from the CLI (status/wait/read/cancel/...)
+    # and is joined straight into the index-file path, so an id like `..\..\evil` would resolve
+    # the lookup outside the index directory. Real ids (New-CcodexJobId) are only [A-Za-z0-9-],
+    # so reject empty ids and anything containing a path separator or a `..` segment. Callers
+    # that resolve a job (Get-CcodexJobRecord) already map this throw to "not found" (exit 3).
+    if ([string]::IsNullOrWhiteSpace($JobId) -or $JobId -match '[\\/]' -or $JobId -match '\.\.') {
+        throw "ccodex: invalid job id '$JobId'."
+    }
     return Join-Path (Join-Path (Get-CcodexLocalAppDataRoot -Root $Root) 'index') "$JobId.json"
 }

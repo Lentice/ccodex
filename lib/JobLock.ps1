@@ -83,12 +83,23 @@ function Test-CcodexLockStale {
     }
 
     $owner = $null
+    $ownerReadable = $false
     try {
         $owner = Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
+        $ownerReadable = ($null -ne $owner)
     } catch {
-        return $false
+        $ownerReadable = $false
     }
-    if ($null -eq $owner) { return $false }
+    if (-not $ownerReadable) {
+        # owner.json is present but unreadable/corrupt — e.g. a crash mid-write left invalid or
+        # empty JSON. Returning $false ("not stale") here would make the lock permanently
+        # un-breakable and every future contender time out forever. Fall back to the same age
+        # signal the ownerless branch above uses: breakable once the lock directory is older than
+        # the stale window.
+        $dirTimeUtc = [DateTime]::MinValue
+        try { $dirTimeUtc = (Get-Item -LiteralPath $LockPath -Force).LastWriteTimeUtc } catch { return $false }
+        return ($dirTimeUtc -lt $nowUtc.AddMinutes(-$script:CcodexLockStaleAfterMinutes))
+    }
 
     if (Test-CcodexLockOwnerAlive -OwnerPidText $owner.pid -StartTimeValue $owner.process_start_time) {
         return $false
@@ -153,9 +164,21 @@ function Lock-CcodexJob {
             return [pscustomobject]@{ LockPath = $lockPath }
         }
 
-        # Contended. Break it if stale, then retry immediately.
+        # Contended. Break it if stale — but ATOMICALLY. Two contenders can both observe the same
+        # stale lock; a plain Remove-Item then lets the slower one delete the FRESH lock the faster
+        # one already re-created, so both would believe they hold it (concurrent status writers).
+        # Instead rename the stale directory to a unique quarantine name first: only the racer
+        # whose rename succeeds owns the teardown; a rename that throws (someone else already moved
+        # or re-took it) just falls through to a normal retry. NTFS directory rename is atomic, so
+        # exactly one breaker wins.
         if (Test-CcodexLockStale -LockPath $lockPath) {
-            try { Remove-Item -LiteralPath $lockPath -Recurse -Force -ErrorAction Stop } catch { }
+            $quarantine = "$lockPath.stale-$PID-$([Guid]::NewGuid().ToString('N'))"
+            try {
+                Move-Item -LiteralPath $lockPath -Destination $quarantine -ErrorAction Stop
+                Remove-Item -LiteralPath $quarantine -Recurse -Force -ErrorAction SilentlyContinue
+            } catch {
+                # Lost the race to break it (already moved/broken/re-taken); just retry.
+            }
             continue
         }
 

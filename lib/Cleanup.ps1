@@ -14,6 +14,19 @@
 # --include-stalled reconciles to terminal is judged by created_at (its true age), because
 # reconciliation freshly stamps finished_at = now.
 
+function Test-CcodexWorktreePathUnderRoot {
+    # True only when $WorktreePath resolves to a location strictly UNDER $WorktreesRoot. Used to
+    # refuse deleting a worktree recorded in a corrupt/tampered status.json that points outside the
+    # ccodex worktrees root. Full-path, case-insensitive; a non-existent path is tolerated (this is
+    # pure string normalization, no IO).
+    param([string]$WorktreePath, [Parameter(Mandatory)][string]$WorktreesRoot)
+    if ([string]::IsNullOrEmpty($WorktreePath)) { return $false }
+    $rootFull = [System.IO.Path]::GetFullPath($WorktreesRoot).TrimEnd('\', '/')
+    $childFull = $null
+    try { $childFull = [System.IO.Path]::GetFullPath($WorktreePath).TrimEnd('\', '/') } catch { return $false }
+    return $childFull.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function ConvertTo-CcodexCleanupUtcDateTime {
     # ConvertFrom-Json auto-deserializes ISO-8601 strings into [DateTime]; a naive [string]
     # cast would re-render such a value in the current culture without the zone designator
@@ -107,28 +120,44 @@ function Invoke-CcodexCleanup {
         # Remove-CcodexJobWorktree (best-effort; never blocks the job dir/index delete).
         param([string]$JobId, [string]$JobDir, [string]$StatusText, [double]$AgeDays, [string]$MainRepo, [string]$WorktreePath)
         $size = Get-CcodexDirSizeBytes -Path $JobDir
+        # SAFETY: only ever act on a worktree that lives under the ccodex worktrees root. The path
+        # comes from status.json (worktree_repo); a corrupt or tampered record could point it at an
+        # arbitrary directory (e.g. a user's Documents), and Remove-CcodexJobWorktree falls back to
+        # a recursive Remove-Item when `git worktree remove` can't run. Refuse anything outside the
+        # root. Compute once so the dry-run PREVIEW reports the same refusal a real run performs.
+        $wtUnderRoot = $WorktreePath -and (Test-CcodexWorktreePathUnderRoot -WorktreePath $WorktreePath -WorktreesRoot (Join-Path $localRoot 'worktrees'))
         if ($DryRun) {
             $script:__ccxLines += ('{0} {1} age={2}d size={3}KB -> delete' -f $JobId, $StatusText, [int][math]::Floor($AgeDays), [int][math]::Round($size / 1024))
             if ($WorktreePath) {
-                $script:__ccxLines += "$JobId worktree $WorktreePath -> delete"
-                $script:__ccxWtSwept++
+                if ($wtUnderRoot) {
+                    $script:__ccxLines += "$JobId worktree $WorktreePath -> delete"
+                    $script:__ccxWtSwept++
+                } else {
+                    $script:__ccxFailed++
+                    $script:__ccxLines += "$JobId worktree $WorktreePath -> refused (outside worktrees root)"
+                }
             }
             $script:__ccxDeleted += $JobId
             $script:__ccxReclaimed += $size
             return
         }
         if ($WorktreePath) {
-            # Count worktrees_swept only when the removal actually succeeded (function returned
-            # $true) or the path is gone regardless. A stubborn failure (returned $false with the
-            # dir still present) must NOT inflate the swept count — record it as a failure so the
-            # summary doesn't over-report.
-            $wtRemoved = $false
-            try { $wtRemoved = [bool](Remove-CcodexJobWorktree -MainRepo $MainRepo -WorktreePath $WorktreePath) } catch { $wtRemoved = $false }
-            if ($wtRemoved -or -not (Test-Path -LiteralPath $WorktreePath)) {
-                $script:__ccxWtSwept++
-            } else {
+            if (-not $wtUnderRoot) {
                 $script:__ccxFailed++
-                $script:__ccxLines += "$JobId worktree $WorktreePath -> remove FAILED"
+                $script:__ccxLines += "$JobId worktree $WorktreePath -> refused (outside worktrees root)"
+            } else {
+                # Count worktrees_swept only when the removal actually succeeded (function returned
+                # $true) or the path is gone regardless. A stubborn failure (returned $false with the
+                # dir still present) must NOT inflate the swept count — record it as a failure so the
+                # summary doesn't over-report.
+                $wtRemoved = $false
+                try { $wtRemoved = [bool](Remove-CcodexJobWorktree -MainRepo $MainRepo -WorktreePath $WorktreePath) } catch { $wtRemoved = $false }
+                if ($wtRemoved -or -not (Test-Path -LiteralPath $WorktreePath)) {
+                    $script:__ccxWtSwept++
+                } else {
+                    $script:__ccxFailed++
+                    $script:__ccxLines += "$JobId worktree $WorktreePath -> remove FAILED"
+                }
             }
         }
         try {
@@ -250,9 +279,11 @@ function Invoke-CcodexCleanup {
                     continue
                 }
 
-                $recon = Update-CcodexOrphanStatus -JobDir $jobDir
+                $recon = Update-CcodexOrphanStatus -JobDir $jobDir -DryRun:$DryRun
                 if ($recon.Reconciled) {
-                    $reconStatus = Read-CcodexStatusFile -JobDir $jobDir
+                    # In dry-run the reconcile did NOT write, so read the computed status from the
+                    # probe result rather than re-reading disk (which still says 'running').
+                    $reconStatus = if ($DryRun) { $recon.ReconciledStatus } else { Read-CcodexStatusFile -JobDir $jobDir }
                     if ($reconStatus -and ($reconStatus.status -in $terminalStatuses)) {
                         Resolve-CleanupTerminal -JobId $jobId -JobDir $jobDir -Status $reconStatus -PreferCreatedAt
                     } else {

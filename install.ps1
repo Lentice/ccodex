@@ -15,9 +15,13 @@ $destScriptDir = Join-Path $InstallDir 'ccodex'
 # destroy jobs, indexes, and worktrees), and any existing non-empty directory that doesn't look
 # like a previous install (no ccodex.ps1 marker).
 if ($env:LOCALAPPDATA) {
-    $stateRoot = Join-Path $env:LOCALAPPDATA 'ccodex'
-    if ([System.IO.Path]::GetFullPath($destScriptDir).TrimEnd('\') -ieq [System.IO.Path]::GetFullPath($stateRoot).TrimEnd('\')) {
-        throw "install.ps1: refusing to install into '$destScriptDir' - it is the ccodex job-state root. Choose a different -InstallDir."
+    $stateRootFull = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'ccodex')).TrimEnd('\')
+    $destFull = [System.IO.Path]::GetFullPath($destScriptDir).TrimEnd('\')
+    # Refuse the job-state root itself OR any directory inside it (equal-or-descendant, compared
+    # case-insensitively on full paths): the mirror delete on upgrade would otherwise destroy
+    # jobs/indexes/worktrees, and a later job cleanup could delete the install out from under itself.
+    if ($destFull -ieq $stateRootFull -or $destFull.StartsWith($stateRootFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "install.ps1: refusing to install into '$destScriptDir' - it is inside the ccodex job-state root ('$stateRootFull'). Choose a different -InstallDir."
     }
 }
 if ((Test-Path -LiteralPath $destScriptDir) -and
@@ -31,17 +35,48 @@ if ((Test-Path -LiteralPath $destScriptDir) -and
 # swap guarantees a lib module (or any other file) renamed or deleted in a newer version never
 # survives from a previous install. Safe while jobs run — pwsh reads scripts fully at startup,
 # so already-running workers are unaffected.
-$stagingDir = $destScriptDir + '.staging'
-if (Test-Path -LiteralPath $stagingDir) {
-    Remove-Item -LiteralPath $stagingDir -Recurse -Force
+$stagingDir = $destScriptDir + '.staging-' + [Guid]::NewGuid().ToString('N')
+$backupDir = $destScriptDir + '.old-' + [Guid]::NewGuid().ToString('N')
+$installLive = $false
+try {
+    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+    Copy-Item -Path (Join-Path $sourceRoot 'ccodex.ps1') -Destination $stagingDir -Force
+    Copy-Item -Path (Join-Path $sourceRoot 'lib') -Destination $stagingDir -Recurse -Force
+
+    # Swap by RENAME, never delete-then-move: move the live install aside to a backup first, then
+    # move staging into place, and only drop the backup once the new tree is in place. If the
+    # second move fails (AV lock, ACL, disk), restore the backup so the previous install keeps
+    # working instead of being left absent (a plain `Remove-Item $dest; Move-Item` would strand
+    # the CLI with no ccodex.ps1 if the move failed). A per-run GUID staging name also avoids
+    # clobbering an unrelated `ccodex.staging` directory a user might already have under -InstallDir.
+    if (Test-Path -LiteralPath $destScriptDir) {
+        Move-Item -LiteralPath $destScriptDir -Destination $backupDir
+    }
+    try {
+        Move-Item -LiteralPath $stagingDir -Destination $destScriptDir
+        $installLive = $true
+    } catch {
+        # The new-install move failed: restore the previous copy so the CLI keeps working. Only
+        # mark the install live again if the restore actually succeeds.
+        if ((Test-Path -LiteralPath $backupDir) -and -not (Test-Path -LiteralPath $destScriptDir)) {
+            Move-Item -LiteralPath $backupDir -Destination $destScriptDir
+            $installLive = $true
+        }
+        throw
+    }
+} finally {
+    if (Test-Path -LiteralPath $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue }
+    # Delete the backup ONLY when a live install is confirmed in place. If BOTH the swap and the
+    # restore failed, the backup is the only working copy — never delete it; preserve it and tell
+    # the user where it is so the install can be recovered by hand.
+    if (Test-Path -LiteralPath $backupDir) {
+        if ($installLive) {
+            Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Warning "install.ps1: upgrade failed and the previous install could not be restored automatically. Your previous working copy is preserved at: $backupDir"
+        }
+    }
 }
-New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
-Copy-Item -Path (Join-Path $sourceRoot 'ccodex.ps1') -Destination $stagingDir -Force
-Copy-Item -Path (Join-Path $sourceRoot 'lib') -Destination $stagingDir -Recurse -Force
-if (Test-Path -LiteralPath $destScriptDir) {
-    Remove-Item -LiteralPath $destScriptDir -Recurse -Force
-}
-Move-Item -LiteralPath $stagingDir -Destination $destScriptDir
 
 $shimContent = @"
 @echo off
@@ -50,7 +85,11 @@ pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$destScriptDir\ccodex.ps1
 exit /b %ERRORLEVEL%
 "@
 $shimPath = Join-Path $InstallDir 'ccodex.cmd'
-[System.IO.File]::WriteAllText($shimPath, $shimContent, (New-Object System.Text.UTF8Encoding($false)))
+# Write to a sibling temp file then move it into place, so an interrupted or failed write can't
+# truncate the live shim and leave the CLI unusable mid-upgrade.
+$shimTmp = $shimPath + '.tmp-' + [Guid]::NewGuid().ToString('N')
+[System.IO.File]::WriteAllText($shimTmp, $shimContent, (New-Object System.Text.UTF8Encoding($false)))
+Move-Item -LiteralPath $shimTmp -Destination $shimPath -Force
 
 New-Item -ItemType Directory -Path $TemplatesDir -Force | Out-Null
 $templateDest = Join-Path $TemplatesDir 'worker-prompt.md'
@@ -68,7 +107,13 @@ New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
 # Mirror the source set exactly: a template renamed or deleted in a later version must not
 # leave a ghost /ccodex:<name> command behind from a previous install. A wildcard with no
 # matches is silent; a real deletion failure (lock/ACL) must stop the install, not hide a ghost.
-Remove-Item -Path (Join-Path $claudeNamespacedDir '*.md') -Force
+# Enumerate + delete via -LiteralPath rather than a `*.md` -Path pattern: a wildcard char in
+# $ClaudeDir (e.g. `[ab]`) would otherwise make the joined pattern match and delete files outside
+# this dir. Get-ChildItem swallows an empty/absent dir; a real Remove-Item failure (lock/ACL)
+# still throws under $ErrorActionPreference='Stop' so a ghost command can't be silently left.
+foreach ($existing in @(Get-ChildItem -LiteralPath $claudeNamespacedDir -Filter '*.md' -File -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $existing.FullName -Force
+}
 Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-commands\*.md') -Destination $claudeNamespacedDir -Force
 
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'
