@@ -28,6 +28,9 @@ function Resolve-CcodexAccess {
     if ($Access -notin $script:CcodexValidAccess) {
         throw "ccodex: unknown access '$Access'. Valid access modes: $($script:CcodexValidAccess -join ', ')."
     }
+    if ($Mode -in @('review', 'brainstorm') -and $Access -ne 'read-only') {
+        throw "ccodex: mode '$Mode' only supports --access read-only; its read-only isolation must not be escalated to write access."
+    }
     if ($Access -eq 'worktree' -and $Mode -notin @('implement', 'test')) {
         throw "ccodex: --access worktree is only valid for modes 'implement' and 'test'."
     }

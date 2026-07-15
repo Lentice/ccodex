@@ -27,11 +27,17 @@ try {
     Set-Content -LiteralPath $staleTopLevel -Value '# stale top-level file from an older install'
     $userNamespacedCommand = Join-Path $claudeDir 'commands\ccodex\local.md'
     Set-Content -LiteralPath $userNamespacedCommand -Value '# hand-written /ccodex:local'
+    # Simulate a ghost: a command a PREVIOUS install managed (recorded in .ccodex-managed) whose
+    # template was later renamed/removed. The upgrade must delete it, but never the user's local.md.
+    $ghostNamespacedCommand = Join-Path $claudeDir 'commands\ccodex\removed-command.md'
+    Set-Content -LiteralPath $ghostNamespacedCommand -Value '# ghost /ccodex:removed-command from an older install'
+    Add-Content -LiteralPath (Join-Path $claudeDir 'commands\ccodex\.ccodex-managed') -Value 'removed-command.md'
     Invoke-Install | Out-Null
 
     Assert-True (-not (Test-Path -LiteralPath $staleLibModule)) "upgrade removes a lib module the newer version no longer ships"
     Assert-True (-not (Test-Path -LiteralPath $staleTopLevel)) "upgrade removes a stale top-level file in the install dir"
     Assert-True (Test-Path -LiteralPath $userNamespacedCommand) "upgrade preserves a user-authored /ccodex:<name> command"
+    Assert-True (-not (Test-Path -LiteralPath $ghostNamespacedCommand)) "upgrade removes a ghost /ccodex:<name> command a previous install managed but no longer ships"
 
     $namespacedDir = Join-Path $claudeDir 'commands\ccodex'
     $sourceCommandNames = (Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates\claude-commands') -Filter *.md | Sort-Object Name).Name -join ','

@@ -23,6 +23,12 @@ Write-Host "worktree access is still invalid for read-only modes"
 Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'worktree' } 'review mode rejects worktree access'
 Assert-Throws { Resolve-CcodexAccess -Mode 'brainstorm' -Access 'worktree' } 'brainstorm mode rejects worktree access'
 
+Write-Host "review/brainstorm read-only isolation cannot be escalated to workspace write"
+Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'workspace' } 'review mode rejects workspace access (read-only isolation enforced)'
+Assert-Throws { Resolve-CcodexAccess -Mode 'brainstorm' -Access 'workspace' } 'brainstorm mode rejects workspace access (read-only isolation enforced)'
+Assert-Equal (Resolve-CcodexAccess -Mode 'review' -Access 'read-only') 'read-only' 'review mode still accepts explicit read-only'
+Assert-Equal (Resolve-CcodexAccess -Mode 'brainstorm' -Access 'read-only') 'read-only' 'brainstorm mode still accepts explicit read-only'
+
 Write-Host "unknown mode/access"
 Assert-Throws { Resolve-CcodexAccess -Mode 'bogus' -Access $null } 'throws on an unknown mode'
 Assert-Throws { Resolve-CcodexAccess -Mode 'review' -Access 'bogus' } 'throws on an unknown access'

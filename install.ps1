@@ -104,13 +104,26 @@ Copy-Item -Path (Join-Path $sourceRoot 'templates\claude-command-ccodex.md') -De
 # commands/ccodex/<name>.md, which Claude Code exposes as /ccodex:<name>.
 $claudeNamespacedDir = Join-Path $claudeCommandsDir 'ccodex'
 New-Item -ItemType Directory -Path $claudeNamespacedDir -Force | Out-Null
-# Only files that correspond to an installed source template are managed. This preserves local
-# /ccodex:<name> commands while still updating every command the installer owns; the source set is
-# enumerated so adding a template requires no hardcoded managed-file list.
+# Mirror the source template set while preserving user-authored commands. A `.ccodex-managed`
+# manifest records exactly the files this installer wrote, so a later run can delete a ghost (a
+# command whose template was renamed/removed) WITHOUT touching any /ccodex:<name>.md a user created
+# by hand. The source set is enumerated, so adding a template needs no hardcoded list.
 $claudeCommandTemplates = @(Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'templates\claude-commands') -Filter '*.md' -File -ErrorAction Stop)
+$currentManagedCommands = @($claudeCommandTemplates | ForEach-Object { $_.Name })
+$managedManifestPath = Join-Path $claudeNamespacedDir '.ccodex-managed'
+# Remove ghosts: files a previous install managed that are no longer shipped. Anything absent from
+# the previous manifest (i.e. a user's own command) is left untouched.
+if (Test-Path -LiteralPath $managedManifestPath) {
+    $previousManagedCommands = @(Get-Content -LiteralPath $managedManifestPath -ErrorAction Stop | Where-Object { $_ -and $_.Trim() -ne '' })
+    foreach ($ghost in ($previousManagedCommands | Where-Object { $currentManagedCommands -notcontains $_ })) {
+        $ghostPath = Join-Path $claudeNamespacedDir $ghost
+        if (Test-Path -LiteralPath $ghostPath) { Remove-Item -LiteralPath $ghostPath -Force }
+    }
+}
 foreach ($template in $claudeCommandTemplates) {
     Copy-Item -LiteralPath $template.FullName -Destination (Join-Path $claudeNamespacedDir $template.Name) -Force
 }
+Set-Content -LiteralPath $managedManifestPath -Value $currentManagedCommands -Encoding utf8
 
 $claudeRulesDir = Join-Path $ClaudeDir 'rules'
 New-Item -ItemType Directory -Path $claudeRulesDir -Force | Out-Null
