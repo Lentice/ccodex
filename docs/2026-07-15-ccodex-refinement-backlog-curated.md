@@ -1,7 +1,7 @@
 # ccodex refinement backlog — curated
 
 **Date:** 2026-07-15
-**Source:** triaged down from `ccodex-refine-and-orchestration-summary.md` (the full collection).
+**Source:** triaged down from `C:\Users\lenticetsai\AppData\Local\Temp\ccodex-refine-and-orchestration-summary.md` (the full collection).
 **Purpose:** keep only the items judged worth building; everything else is explicitly dropped so it
 does not get silently re-litigated. Build gated per item — pick the next one, spec it, then
 implement.
