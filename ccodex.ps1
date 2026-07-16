@@ -46,6 +46,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\JobIndex.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobLock.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobStatus.ps1')
+. (Join-Path $PSScriptRoot 'lib\JobList.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
 . (Join-Path $PSScriptRoot 'lib\ReviewPrompt.ps1')
@@ -1646,6 +1647,68 @@ function Invoke-CcodexDebugCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
 }
 
+function Invoke-CcodexListCommand {
+    # Read-only listing of jobs (design: docs/2026-07-15-ccodex-list-command-design.md).
+    # Human text by default; a stable JSON envelope (schema_version + count + jobs[]) under
+    # -Json. Never writes, never reconciles — a running job's health is the heartbeat-derived
+    # ok|stale from Get-CcodexJobList. For an authoritative reconciled verdict on one job, use
+    # `ccodex status <id>`.
+    param(
+        [switch]$Json,
+        [string]$RepoOverride = $null,
+        [string[]]$State = @(),
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    $validStates = @('created', 'running', 'done', 'failed', 'timed_out', 'cancelled')
+    foreach ($s in $State) {
+        if ($s -cnotin $validStates) {
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = "ccodex: --state must be one of: $($validStates -join ', '); got '$s'." }
+        }
+    }
+
+    $repoKey = $null
+    if ($RepoOverride) {
+        try {
+            $repoRoot = Resolve-CcodexRepo -RepoOverride $RepoOverride
+        } catch {
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $_.Exception.Message }
+        }
+        $repoKey = Get-CcodexRepoKey -RepoRoot $repoRoot
+    }
+
+    # Get-CcodexJobList returns via the `, @(...)` idiom, which keeps the result an array
+    # across the pipeline boundary; plain assignment consumes it intact. Wrapping in a
+    # further @() would nest it (the whole array as one element), so do NOT.
+    $jobs = Get-CcodexJobList -Root $StateRoot -RepoKey $repoKey -State $State
+
+    if ($Json) {
+        $envelope = [ordered]@{
+            schema_version = 1
+            count          = $jobs.Count
+            jobs           = $jobs
+        }
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+    }
+
+    if ($jobs.Count -eq 0) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = 'ccodex: no jobs found.'; Message = $null }
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($job in $jobs) {
+        if ($job.status -eq 'unknown') {
+            $lines.Add("$($job.job_id)  unknown  ($($job.error))")
+            continue
+        }
+        # health= is appended only for a running job whose derived health is 'stale' (an
+        # 'ok' running job and every non-running job append nothing — mirrors the status line).
+        $healthText = if ($job.status -eq 'running' -and $job.health -eq 'stale') { ' health=stale' } else { '' }
+        $lines.Add("$($job.job_id)  $($job.status)$healthText  $($job.mode)/$($job.access)  $($job.backend)  $($job.repo)")
+    }
+    return [pscustomobject]@{ WrapperExitCode = 0; Stdout = ([string]::Join("`n", $lines)); Message = $null }
+}
+
 function Invoke-CcodexDoctorProbe {
     # Minimal one-shot process runner used only by `doctor` to invoke plain `codex
     # --version` / `codex doctor` (no prompt on stdin, no job artifacts). Reuses the
@@ -2524,6 +2587,32 @@ try {
             }
             $exitCode = $debugResult.WrapperExitCode
         }
+        'list' {
+            # No positional job id. --json is a presence flag; --repo binds to $Repo (narrows
+            # to that repo's key); --state is repeatable (Get-CcodexArgValues, so a bare
+            # `--state` with no value is a usage error); --state-root is a hidden test flag.
+            $listJson = ($args -contains '--json')
+            $listStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            try {
+                $listStates = Get-CcodexArgValues -ArgumentList $args -FlagName '--state'
+            } catch {
+                Write-Host $_.Exception.Message
+                $exitCode = 2
+                break
+            }
+            $listParams = @{}
+            if ($listJson) { $listParams['Json'] = $true }
+            if ($Repo) { $listParams['RepoOverride'] = $Repo }
+            if ($listStates.Count -gt 0) { $listParams['State'] = $listStates }
+            if ($listStateRoot) { $listParams['StateRoot'] = $listStateRoot }
+            $listResult = Invoke-CcodexListCommand @listParams
+            if ($listResult.WrapperExitCode -eq 0) {
+                Write-Output $listResult.Stdout
+            } else {
+                Write-Host $listResult.Message
+            }
+            $exitCode = $listResult.WrapperExitCode
+        }
         'cleanup' {
             # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
             # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
@@ -2617,7 +2706,7 @@ try {
             $exitCode = $doctorResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, resume, submit, status, wait, read, cancel, diff, apply, tail, debug, cleanup, doctor, worker."
+            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, resume, submit, list, status, wait, read, cancel, diff, apply, tail, debug, cleanup, doctor, worker."
             $exitCode = 2
         }
     }
