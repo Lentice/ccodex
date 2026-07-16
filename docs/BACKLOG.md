@@ -20,7 +20,7 @@ and the delegation-run issue record
 | 4. `submit --resume` (async follow-ups) | 28b6f66 |
 | 5. Structured failure signal + `doctor --json` | 22800dd |
 | F2. Cold-start exit-23 flake: 120 s sentinel default + `CCODEX_STARTUP_TIMEOUT_SEC` + dead-worker fast-fail | 7079237 |
-| F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 2026-07-16 |
+| F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
 
 ## Open — curated backlog items (user picks)
 
