@@ -33,6 +33,9 @@ and the delegation-run issue record
 | 8 | `apply --check` (transactional preview) | 3 | validate the patch applies to the clean main repo before mutating |
 | 9 | `review --include-untracked` | 3 | review new/untracked files, not just tracked diffs |
 | 10 | Review profiles + `capabilities --json` | 3 | deterministic prompt presets; capability manifest consumed by skill/commands |
+| 11 | `diff --stat` / `--name-only` (scoped diff sizing) | 2 | delegation-run friction (2026-07-16 s2): `diff` always emits stat + full patch, so a reviewer must pull the whole patch just to size it. A stat/name-only mode lets the review agent scope before loading the full diff. |
+| 12 | `apply --message <msg>` / `--reset-author` (land with operator identity in one step) | 2 | delegation-run friction (2026-07-16 s2): every landed item needs a manual `git commit --amend --reset-author` + message rewrite because `apply` lands the worker's synthetic `ccodex-worker` commit with message `ccodex: worker output <id>`. Optional flags to set author/message at apply time remove the per-item dance. |
+| 13 | `tail --summary` / truncate `aggregated_output` | 3 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. |
 
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 
