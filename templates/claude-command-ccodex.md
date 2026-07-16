@@ -159,12 +159,16 @@ conversation.
 9. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
 
    ```powershell
+   ccodex list                       # enumerate jobs, newest first (--repo narrows; --state filters; --json for a machine envelope)
    ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
    ccodex tail <job_id> --lines 80   # raw stderr.log / codex-events.jsonl tail for a stuck job
    ccodex debug <job_id>             # compact one-shot diagnosis + suggested next command
    ccodex cleanup --dry-run          # periodic hygiene: preview the retention sweep first
    ccodex cleanup --older-than 14d   # then actually delete aged terminal jobs
    ```
+
+   `list` is read-only and does not reconcile a dead-worker job — a crashed job may still show
+   `running`/`health=stale`; use `ccodex status <id>` for an authoritative verdict.
 
    Reach for `cancel` the moment a background job is known to be the wrong task or stuck — don't
    just let it run to a timeout. Reach for `cleanup --older-than <Nd|Nh>` periodically (or when

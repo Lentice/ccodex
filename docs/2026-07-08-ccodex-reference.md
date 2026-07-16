@@ -288,6 +288,50 @@ Submit several jobs before waiting on any of them to run independent tasks in pa
 For a job created by `ccodex resume`, `status`/`debug` append `parent=<parent_job_id>` /
 `parent: <parent_job_id>` to name the job it continued — see [resume](#resume) above.
 
+### list
+
+**`ccodex list [--json] [--repo <path>] [--state <s> ...]`** enumerates jobs, newest first. It is
+the job-enumeration endpoint the batch/orchestration use cases build on.
+
+```powershell
+ccodex list                                        # human table, all repos, newest first
+ccodex list --repo D:\some\repo                     # narrow to one repo's jobs
+ccodex list --state running --state failed          # repeatable: only these states
+ccodex list --json                                  # machine-readable envelope
+```
+
+- **Flags:** `--json` (presence) switches to the JSON envelope below; absent ⇒ human text (always
+  the default). `--repo <path>` resolves to a repo key and scans only that subtree; absent ⇒
+  **global** across all repos. `--state <s>` is repeatable (`created|running|done|failed|timed_out|
+  cancelled`); absent ⇒ all states; an invalid value is a usage error (exit `2`). `--state-root
+  <root>` is a hidden test-support flag mirroring the other subcommands.
+- **Enumeration source:** the `jobs/` tree (`<root>\ccodex\jobs\<repo_key>\<job_id>\status.json`),
+  the same authoritative source `cleanup` uses — not the flat `index/`, which can carry dangling
+  entries and miss a crash-orphaned dir. Sorted by `job_id` descending; the id's leading UTC
+  timestamp makes lexical order chronological.
+- **Read-only. Zero writes. No reconciliation.** Unlike `status`/`wait`/`read`, `list` never calls
+  `Update-CcodexOrphanStatus`. A `running` job's `health` is the heartbeat-derived `ok|stale` from
+  `Get-CcodexJobHealth` (needs no lock). Tradeoff: a job whose worker died without completion
+  evidence still shows `running` here, with `health=stale` as the signal — run `ccodex status <id>`
+  for an authoritative, reconciled verdict.
+- **Human line format** (one per job):
+
+  ```
+  <job_id>  <status>[ health=stale]  <mode>/<access>  <backend>  <repo>
+  ```
+
+  `health=stale` is appended only for a `running` job whose derived health is `stale` (an `ok`
+  running job and every non-running job append nothing — mirrors the `status` line's restraint). A
+  job whose `status.json` is missing/unreadable renders as `<job_id>  unknown  (<error>)`. Zero
+  jobs ⇒ `ccodex: no jobs found.` and exit `0`.
+- **`--json` envelope:** a top-level `schema_version` (currently `1`, distinct from each job
+  object's own `schema_version`), `count`, and `jobs[]`. Each normal job = that job's `status.json`
+  fields plus a derived `health` and its absolute `job_dir`; an unreadable/missing status.json
+  yields a minimal `{ job_id, status:"unknown", error, job_dir }`. Rendered with `ConvertTo-Json
+  -Depth 10`. Zero jobs ⇒ `{ "schema_version": 1, "count": 0, "jobs": [] }`.
+- **Exit codes:** `0` (success, including zero jobs); `2` (invalid `--state` value or an
+  unresolvable `--repo`); `12` (wrapper-internal error, rare).
+
 ### cancel, tail, debug, cleanup, and doctor
 
 **`ccodex cancel <job_id>`** stops a `running` (or still-`created`) job: it identity-checks the

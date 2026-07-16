@@ -165,6 +165,20 @@ ccodex wait <job_id>      # blocks until terminal, then prints the result
 ccodex read <job_id>      # non-blocking result read
 ```
 
+**List jobs** (newest first) — the enumeration endpoint for orchestrating several jobs:
+
+```powershell
+ccodex list                                    # human table, all repos
+ccodex list --repo D:\some\repo --state running  # narrow to one repo / state(s)
+ccodex list --json                             # {schema_version, count, jobs[]} envelope
+```
+
+`--repo` narrows to one repo (default is global, across all repos); `--state` is repeatable and
+filters by status (`created|running|done|failed|timed_out|cancelled`). `list` is read-only: unlike
+`status`, it does **not** reconcile a dead-worker job, so a crashed job may still show `running`
+with `health=stale` — run `ccodex status <id>` for an authoritative verdict. Exit `0` even with
+zero jobs; exit `2` on a bad `--state`/`--repo`.
+
 **Delegated implementation**, isolated in a worktree until you explicitly land it:
 
 ```powershell

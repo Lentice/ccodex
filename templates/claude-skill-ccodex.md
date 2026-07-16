@@ -50,7 +50,7 @@ Commands appear in the supported list as their phase is installed:
 
 | Commands | Feature set |
 |---|---|
-| `run`, `review`, `submit`, `status`, `wait`, `read` | core (always present) |
+| `run`, `review`, `submit`, `list`, `status`, `wait`, `read` | core (always present) |
 | `cleanup`, `cancel`, `tail`, `debug`, `doctor` | job management (Phase 2b) |
 | `diff`, `apply` (+ `run --mode implement`) | worktree isolation (Phase 4) |
 | `resume` | multi-turn sessions (Phase 5) |
@@ -83,6 +83,10 @@ ccodex review --repo <submodule-path> --range <base>..HEAD --path . --intent "..
 ccodex wait <job_id> --wait-timeout-sec 600                        # blocks; exit 20 = still running
 ccodex read <job_id>                                               # print result again anytime
 ccodex status <job_id>                                             # one-line state
+ccodex list                                                        # enumerate jobs, newest first (all repos; --repo narrows)
+ccodex list --json --state running                                 # machine-readable {schema_version,count,jobs[]}, filtered by state
+                                                                   # read-only: does NOT reconcile a dead worker (a crashed job may
+                                                                   # still show running/health=stale) - use `status <id>` for a verdict
 
 # Runaway guard for any run/submit
 "..." | ccodex run --mode review --hard-timeout-sec 900 --repo <repo>
