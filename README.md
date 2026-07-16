@@ -220,7 +220,13 @@ zero jobs; exit `2` on a bad `--state`/`--repo`.
 "Add input validation to the signup form." | ccodex run --mode implement --repo D:\some\repo
 ccodex diff <job_id>     # ALWAYS review before applying — never auto-apply
 ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
+ccodex apply --allow-untracked <job_id>  # opt in when only unrelated untracked files exist
 ```
+
+`apply` requires a fully clean main repo by default. `--allow-untracked` permits pre-existing
+untracked files only when none of their repo-relative paths overlap a path touched by the worker
+patch; an overlap exits `2` before `git am`. Modified, staged, or deleted tracked files still
+block, and pre-existing untracked files are preserved on success or rollback.
 
 If review finds something to change, resume the implement job instead of submitting the whole
 brief again. The child runs in a new worktree containing the parent's accumulated edits, and its

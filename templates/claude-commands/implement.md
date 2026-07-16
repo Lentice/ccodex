@@ -23,8 +23,10 @@ ccodex diff <job_id>     # read every change like a PR you're about to merge
 ccodex apply <job_id>    # only after you've reviewed and decided to land it
 ```
 
-`apply` needs a clean main-repo tree and a `done` job; exit `25` means conflict — the main repo
-is untouched, so report it and resolve by hand rather than retrying. After applying, run the
+`apply` needs a clean main-repo tree by default and a `done` job. When the only dirt is unrelated
+untracked files, `apply --allow-untracked <job_id>` opts in safely; tracked dirt or a patch-path
+overlap still exits `2`. Exit `25` means conflict — the main repo and its pre-existing untracked
+files are untouched, so report it and resolve by hand rather than retrying. After applying, run the
 project's tests yourself; Codex's own test claims don't count as verification.
 
 If review finds something to revise, continue the same thread before applying:

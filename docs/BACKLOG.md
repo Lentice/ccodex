@@ -22,6 +22,7 @@ and the delegation-run issue record
 | F2. Cold-start exit-23 flake: 120 s sentinel default + `CCODEX_STARTUP_TIMEOUT_SEC` + dead-worker fast-fail | 7079237 |
 | F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
 | F1. `help` / `--help` / `-h` support (top level + per subcommand) | fdc58b8 |
+| F4. `apply --allow-untracked` (opt-in, overlap-safe) | PENDING_HASH |
 
 ## Open — curated backlog items (user picks)
 
@@ -40,7 +41,6 @@ Priority order per the Codex-confirmed triage:
 | # | Item | Origin | Notes |
 |---|---|---|---|
 | F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose. **Blocked — precondition unmet (verified 2026-07-16, codex-cli 0.144.4):** `codex exec --json` emits only `thread`/`turn`/`item` events; quota surfaces solely as prose stderr (matched by `FailureClassify`'s `usage limit`/`rate limit`/`quota`/`429` substrings). No structured retry/reset field exists to source these from. Revisit only if a future Codex release emits structured rate-limit evidence. |
-| F4 | `apply --allow-untracked` (opt-in, overlap-safe) | O2 | only if demand persists; keep clean-tree default |
 
 ## Explicitly not planned
 

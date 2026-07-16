@@ -178,8 +178,10 @@ ccodex apply <job_id>    # only once you've reviewed it and decided to land it
 **Never auto-apply.** `apply` is the one command in this policy that must never be run
 automatically at a checkpoint or unattended — always inspect `ccodex diff <job_id>` first and make
 an explicit adopt/reject decision, exactly as with a review finding. `apply` requires a clean main
-repo working tree and only accepts a `done` job; on conflict it exits `25` and leaves the main
-repo untouched — report the conflict and let the user decide how to resolve it rather than
+repo working tree by default and only accepts a `done` job. If the only dirt is unrelated untracked
+files, `apply --allow-untracked <job_id>` is an opt-in override; tracked dirt and any path overlap
+still exit `2`, and pre-existing untracked files are preserved. On conflict it exits `25` and leaves
+the main repo untouched — report the conflict and let the user decide how to resolve it rather than
 retrying blindly.
 
 When review feedback continues an implement job, resume it and review the newest child's

@@ -285,6 +285,99 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyDirty 'applied
 $postHeadDirty = (& git -C $gitRepoApplyDirty rev-parse HEAD).Trim()
 Assert-Equal $postHeadDirty $preHeadDirty 'dirty main repo HEAD unchanged'
 
+Write-Host "apply: untracked main-repo file without override -> exit 2, repo untouched"
+$gitRepoApplyUntrackedDefault = Join-Path $tempRoot 'gitrepo-apply-untracked-default'
+New-CcodexTestGitRepo -Path $gitRepoApplyUntrackedDefault
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'default-target.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'default target content'
+$runApplyUntrackedDefault = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyUntrackedDefault }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyUntrackedDefault.WrapperExitCode 0 'setup: default-untracked implement run succeeds'
+$statusApplyUntrackedDefault = Get-Content -LiteralPath (Join-Path $runApplyUntrackedDefault.JobDir 'status.json') -Raw | ConvertFrom-Json
+$defaultScratchPath = Join-Path $gitRepoApplyUntrackedDefault 'scratch.txt'
+[System.IO.File]::WriteAllText($defaultScratchPath, "keep default scratch`n", $utf8NoBomTest)
+$preHeadUntrackedDefault = (& git -C $gitRepoApplyUntrackedDefault rev-parse HEAD).Trim()
+
+$applyUntrackedDefault = Invoke-CcodexApplyCommand -JobId $statusApplyUntrackedDefault.job_id -StateRoot $localAppData
+Assert-Equal $applyUntrackedDefault.WrapperExitCode 2 'apply without --allow-untracked rejects an untracked main-repo file'
+Assert-True ($applyUntrackedDefault.Message -like '*scratch.txt*') 'default exit-2 message lists the untracked file'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyUntrackedDefault 'default-target.txt'))) 'default rejection does not land the worker patch'
+Assert-Equal ([System.IO.File]::ReadAllText($defaultScratchPath)) "keep default scratch`n" 'default rejection leaves the untracked file untouched'
+$postHeadUntrackedDefault = (& git -C $gitRepoApplyUntrackedDefault rev-parse HEAD).Trim()
+Assert-Equal $postHeadUntrackedDefault $preHeadUntrackedDefault 'default rejection leaves main repo HEAD unchanged'
+
+Write-Host "apply: --allow-untracked with a non-overlapping file -> patch lands and file survives"
+$gitRepoApplyUntrackedAllowed = Join-Path $tempRoot 'gitrepo-apply-untracked-allowed'
+New-CcodexTestGitRepo -Path $gitRepoApplyUntrackedAllowed
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'allowed-target.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'allowed target content'
+$runApplyUntrackedAllowed = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyUntrackedAllowed }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyUntrackedAllowed.WrapperExitCode 0 'setup: allowed-untracked implement run succeeds'
+$statusApplyUntrackedAllowed = Get-Content -LiteralPath (Join-Path $runApplyUntrackedAllowed.JobDir 'status.json') -Raw | ConvertFrom-Json
+$allowedScratchPath = Join-Path $gitRepoApplyUntrackedAllowed 'scratch.txt'
+[System.IO.File]::WriteAllText($allowedScratchPath, "keep allowed scratch`n", $utf8NoBomTest)
+$preHeadUntrackedAllowed = (& git -C $gitRepoApplyUntrackedAllowed rev-parse HEAD).Trim()
+
+# Exercise the shell dispatcher so this scenario covers --allow-untracked parsing as well as
+# Invoke-CcodexApplyCommand's behavior.
+$applyUntrackedAllowedOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') apply --allow-untracked $statusApplyUntrackedAllowed.job_id --state-root $localAppData
+$applyUntrackedAllowedExit = $LASTEXITCODE
+Assert-Equal $applyUntrackedAllowedExit 0 'shell apply --allow-untracked with a non-overlapping file -> exit 0'
+Assert-True (($applyUntrackedAllowedOutput -join "`n") -like '*applied job*') 'shell dispatcher prints the successful apply line'
+Assert-True (Test-Path -LiteralPath (Join-Path $gitRepoApplyUntrackedAllowed 'allowed-target.txt')) 'allowed apply lands the non-overlapping worker patch'
+Assert-Equal ([System.IO.File]::ReadAllText($allowedScratchPath)) "keep allowed scratch`n" 'allowed apply preserves the pre-existing untracked file byte-for-byte'
+$postHeadUntrackedAllowed = (& git -C $gitRepoApplyUntrackedAllowed rev-parse HEAD).Trim()
+Assert-True ($postHeadUntrackedAllowed -ne $preHeadUntrackedAllowed) 'allowed apply advances main repo HEAD'
+
+Write-Host "apply: --allow-untracked overlap -> exit 2 before git am, repo untouched"
+$gitRepoApplyUntrackedOverlap = Join-Path $tempRoot 'gitrepo-apply-untracked-overlap'
+New-CcodexTestGitRepo -Path $gitRepoApplyUntrackedOverlap
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'overlap.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'worker overlap content'
+$runApplyUntrackedOverlap = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyUntrackedOverlap }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyUntrackedOverlap.WrapperExitCode 0 'setup: overlap-untracked implement run succeeds'
+$statusApplyUntrackedOverlap = Get-Content -LiteralPath (Join-Path $runApplyUntrackedOverlap.JobDir 'status.json') -Raw | ConvertFrom-Json
+$overlapPath = Join-Path $gitRepoApplyUntrackedOverlap 'overlap.txt'
+[System.IO.File]::WriteAllText($overlapPath, "pre-existing overlap`n", $utf8NoBomTest)
+$preHeadUntrackedOverlap = (& git -C $gitRepoApplyUntrackedOverlap rev-parse HEAD).Trim()
+
+$applyUntrackedOverlap = Invoke-CcodexApplyCommand -JobId $statusApplyUntrackedOverlap.job_id -StateRoot $localAppData -AllowUntracked
+Assert-Equal $applyUntrackedOverlap.WrapperExitCode 2 'allow-untracked rejects a patch path that already exists untracked'
+Assert-True ($applyUntrackedOverlap.Message -like '*overlap.txt*') 'overlap exit-2 message names the overlapping path'
+Assert-Equal ([System.IO.File]::ReadAllText($overlapPath)) "pre-existing overlap`n" 'overlap rejection preserves the pre-existing file byte-for-byte'
+$postHeadUntrackedOverlap = (& git -C $gitRepoApplyUntrackedOverlap rev-parse HEAD).Trim()
+Assert-Equal $postHeadUntrackedOverlap $preHeadUntrackedOverlap 'overlap rejection leaves main repo HEAD unchanged'
+
+Write-Host "apply: --allow-untracked with tracked dirt -> exit 2, repo untouched"
+$gitRepoApplyTrackedDirtyAllowed = Join-Path $tempRoot 'gitrepo-apply-tracked-dirty-allowed'
+New-CcodexTestGitRepo -Path $gitRepoApplyTrackedDirtyAllowed
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'tracked-dirty-target.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'tracked dirty target content'
+$runApplyTrackedDirtyAllowed = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyTrackedDirtyAllowed }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyTrackedDirtyAllowed.WrapperExitCode 0 'setup: tracked-dirty-allowed implement run succeeds'
+$statusApplyTrackedDirtyAllowed = Get-Content -LiteralPath (Join-Path $runApplyTrackedDirtyAllowed.JobDir 'status.json') -Raw | ConvertFrom-Json
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyTrackedDirtyAllowed 'seed.txt'), "tracked dirt`n", $utf8NoBomTest)
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyTrackedDirtyAllowed 'scratch.txt'), "untracked scratch`n", $utf8NoBomTest)
+$preHeadTrackedDirtyAllowed = (& git -C $gitRepoApplyTrackedDirtyAllowed rev-parse HEAD).Trim()
+
+$applyTrackedDirtyAllowed = Invoke-CcodexApplyCommand -JobId $statusApplyTrackedDirtyAllowed.job_id -StateRoot $localAppData -AllowUntracked
+Assert-Equal $applyTrackedDirtyAllowed.WrapperExitCode 2 'allow-untracked still rejects a tracked-dirty main repo'
+Assert-True ($applyTrackedDirtyAllowed.Message -like '*seed.txt*') 'tracked-dirty exit-2 message names the tracked file'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyTrackedDirtyAllowed 'tracked-dirty-target.txt'))) 'tracked-dirty rejection does not land the worker patch'
+$postHeadTrackedDirtyAllowed = (& git -C $gitRepoApplyTrackedDirtyAllowed rev-parse HEAD).Trim()
+Assert-Equal $postHeadTrackedDirtyAllowed $preHeadTrackedDirtyAllowed 'tracked-dirty rejection leaves main repo HEAD unchanged'
+
 Write-Host "apply: textual conflict -> exit 25, main repo restored (clean + HEAD unchanged), diff hint"
 $gitRepoApplyConflict = Join-Path $tempRoot 'gitrepo-apply-conflict'
 New-CcodexTestGitRepo -Path $gitRepoApplyConflict
@@ -310,6 +403,35 @@ $postHeadConflict = (& git -C $gitRepoApplyConflict rev-parse HEAD).Trim()
 Assert-Equal $postHeadConflict $preHeadConflict 'main repo HEAD unchanged after the failed apply'
 Assert-True ($applyConflict.Message -like '*seed.txt*') 'exit-25 message names the conflicting file'
 Assert-True ($applyConflict.Message -like "*ccodex diff $($statusApplyConflict.job_id)*") 'exit-25 message points at ccodex diff'
+
+Write-Host "apply: failed --allow-untracked apply restores tracked state without warning about preserved scratch"
+$gitRepoApplyConflictUntracked = Join-Path $tempRoot 'gitrepo-apply-conflict-untracked'
+New-CcodexTestGitRepo -Path $gitRepoApplyConflictUntracked
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'seed.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'worker conflict version'
+$runApplyConflictUntracked = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyConflictUntracked }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyConflictUntracked.WrapperExitCode 0 'setup: conflict-with-untracked implement run succeeds'
+$statusApplyConflictUntracked = Get-Content -LiteralPath (Join-Path $runApplyConflictUntracked.JobDir 'status.json') -Raw | ConvertFrom-Json
+[System.IO.File]::WriteAllText((Join-Path $gitRepoApplyConflictUntracked 'seed.txt'), "main conflict version`n", $utf8NoBomTest)
+& git -C $gitRepoApplyConflictUntracked add seed.txt | Out-Null
+& git -C $gitRepoApplyConflictUntracked commit -q -m 'main diverges with untracked scratch' | Out-Null
+$conflictScratchPath = Join-Path $gitRepoApplyConflictUntracked 'scratch.txt'
+[System.IO.File]::WriteAllText($conflictScratchPath, "preserve conflict scratch`n", $utf8NoBomTest)
+$preHeadConflictUntracked = (& git -C $gitRepoApplyConflictUntracked rev-parse HEAD).Trim()
+
+$applyConflictUntracked = Invoke-CcodexApplyCommand -JobId $statusApplyConflictUntracked.job_id -StateRoot $localAppData -AllowUntracked
+Assert-Equal $applyConflictUntracked.WrapperExitCode 25 'conflicting allow-untracked apply -> exit 25'
+Assert-True ($applyConflictUntracked.Message -notlike '*WARNING:*') 'restored conflict does not warn solely because the pre-existing untracked file remains'
+Assert-Equal ([System.IO.File]::ReadAllText($conflictScratchPath)) "preserve conflict scratch`n" 'failed apply preserves the pre-existing untracked file byte-for-byte'
+Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $gitRepoApplyConflictUntracked 'seed.txt'))) "main conflict version`n" 'failed apply restores the tracked file content'
+$conflictUntrackedPorcelain = @(& git -c core.quotepath=false -C $gitRepoApplyConflictUntracked status --porcelain | Where-Object { $_ -and $_.Trim() -ne '' })
+Assert-Equal $conflictUntrackedPorcelain.Count 1 'restored repo has only the expected pre-existing untracked entry'
+Assert-Equal $conflictUntrackedPorcelain[0] '?? scratch.txt' 'restored porcelain entry is the pre-existing scratch file'
+$postHeadConflictUntracked = (& git -C $gitRepoApplyConflictUntracked rev-parse HEAD).Trim()
+Assert-Equal $postHeadConflictUntracked $preHeadConflictUntracked 'failed apply restores main repo HEAD with untracked file present'
 
 Write-Host "apply: hooks are disabled transactionally and failed multi-patch recovery leaves no hook output"
 $gitRepoApplyHookConflict = Join-Path $tempRoot 'gitrepo-apply-hook-conflict'
@@ -454,7 +576,8 @@ New-Item -ItemType Directory -Path $lockedApplyLockDir -Force | Out-Null
 # broken as stale within the short timeout.
 Lock-CcodexJob -JobDir $lockedApplyLockDir -TimeoutSec 5 -CommandName 'test-holder' | Out-Null
 $preHeadLocked = (& git -C $gitRepoApplyLocked rev-parse HEAD).Trim()
-$applyLocked = Invoke-CcodexApplyCommand -JobId $statusApplyLocked.job_id -StateRoot $localAppData -LockTimeoutSec 1
+# Keep the original third positional parameter contract: it is LockTimeoutSec, not the new switch.
+$applyLocked = Invoke-CcodexApplyCommand $statusApplyLocked.job_id $localAppData 1
 Assert-Equal $applyLocked.WrapperExitCode 21 'apply while the per-main-repo lock is held -> exit 21'
 Assert-True ($applyLocked.Message -like '*apply lock*') 'exit-21 message names the apply lock'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyLocked 'locked-file.txt'))) 'main repo was not mutated while the lock was held (no applied file)'

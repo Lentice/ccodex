@@ -1716,7 +1716,8 @@ function Invoke-CcodexApplyCommand {
     # <job_id>", Phase 4 Task 5). Shares the unknown/non-terminal/no-worktree/worktree-removed
     # precondition chain (3/4/2/3) with `diff` via Resolve-CcodexWorktreeJobContext, then adds
     # apply-only preconditions: the job must be `done` (a failed/timed_out/cancelled job -> 2),
-    # and the MAIN repo working tree must be clean (else -> 2). An empty change set is a no-op
+    # and the MAIN repo working tree must have no tracked dirt (untracked files also block unless
+    # -AllowUntracked is set, and an untracked/patch-path overlap always blocks). An empty set is a no-op
     # (exit 0). Otherwise `git format-patch <base>..HEAD --stdout` from the worktree is piped to
     # `git am --3way` in the main repo. Success (a new commit landed) prints the applied range
     # and exits 0. ANY non-success outcome -- textual conflict, or an already-applied/empty patch
@@ -1731,7 +1732,8 @@ function Invoke-CcodexApplyCommand {
         # Wall-clock bound for acquiring the per-main-repo apply lock (see below). Overridable
         # for tests; production callers keep the default. A timeout yields exit 21, matching the
         # lock-timeout contract `cancel` already uses.
-        [int]$LockTimeoutSec = 30
+        [int]$LockTimeoutSec = 30,
+        [switch]$AllowUntracked
     )
 
     $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
@@ -1745,6 +1747,7 @@ function Invoke-CcodexApplyCommand {
     $rangeEndpoint = if (-not [string]::IsNullOrEmpty($context.SnapshotCommit)) { $context.SnapshotCommit } else { 'HEAD' }
     $mainRepo = $context.MainRepo
     $jobDir = $context.JobDir
+    $range = "$baseCommit..$rangeEndpoint"
 
     # apply-only precondition: only `done` jobs may be applied. `diff` inspects any terminal
     # job, but applying the partial output of a failed/timed_out/cancelled run is unsafe.
@@ -1776,31 +1779,65 @@ function Invoke-CcodexApplyCommand {
         return [pscustomobject]@{ WrapperExitCode = 21; Stdout = $null; Message = $message }
     }
     try {
-        # Main repo working tree must be clean: `am` mutates the working tree, so any uncommitted
-        # local change could be silently entangled with (or clobbered by) the applied patch.
-        $porcelain = @(& git -C $mainRepo status --porcelain 2>&1)
+        # Tracked changes always block because `am` mutates the working tree. Untracked files keep
+        # the historical clean-tree default unless the caller explicitly opts into the guarded path.
+        $porcelain = if ($AllowUntracked) {
+            # Expand untracked directories to leaf paths so the overlap comparison below is exact.
+            @(& git -c core.quotepath=false -C $mainRepo status --porcelain --untracked-files=all 2>&1)
+        } else {
+            # Keep the default path byte-identical to the pre-F4 command and diagnostics.
+            @(& git -C $mainRepo status --porcelain 2>&1)
+        }
         if ($LASTEXITCODE -ne 0) {
             $message = "ccodex: internal error: git status --porcelain failed in main repo '$mainRepo': $($porcelain -join "`n")"
             return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
         }
         $dirtyLines = @($porcelain | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-        if ($dirtyLines.Count -gt 0) {
-            $message = "ccodex: main repo working tree is not clean; commit or stash your changes before applying job $JobId.`n  main repo: $mainRepo`n  dirty:`n$([string]::Join("`n", ($dirtyLines | ForEach-Object { "    $_" })))"
+        $untrackedLines = @($dirtyLines | Where-Object { $_.ToString().Length -ge 2 -and $_.ToString().Substring(0, 2) -eq '??' })
+        $trackedDirtyLines = @($dirtyLines | Where-Object { $_.ToString().Length -lt 2 -or $_.ToString().Substring(0, 2) -ne '??' })
+        $blockingDirtyLines = if ($AllowUntracked) { $trackedDirtyLines } else { $dirtyLines }
+        if ($blockingDirtyLines.Count -gt 0) {
+            $message = "ccodex: main repo working tree is not clean; commit or stash your changes before applying job $JobId.`n  main repo: $mainRepo`n  dirty:`n$([string]::Join("`n", ($blockingDirtyLines | ForEach-Object { "    $_" })))"
             return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
         }
 
         # Keep an explicit pre-apply inventory so recovery can remove only untracked files this
         # transaction introduced. (The clean-tree precondition normally makes this empty, but the
         # inventory preserves that safety if Git's ignore rules or status behavior change.)
-        $preUntracked = @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            $message = "ccodex: internal error: could not inventory untracked files in main repo '$mainRepo': $($preUntracked -join "`n")"
-            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        if ($AllowUntracked) {
+            $preUntracked = @($untrackedLines | ForEach-Object { $_.ToString().Substring(3) })
+        } else {
+            $preUntracked = @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $message = "ccodex: internal error: could not inventory untracked files in main repo '$mainRepo': $($preUntracked -join "`n")"
+                return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+            }
+        }
+        $preUntracked = @($preUntracked)
+        $preUntrackedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($path in $preUntracked) { [void]$preUntrackedSet.Add([string]$path) }
+
+        if ($AllowUntracked -and $preUntracked.Count -gt 0) {
+            $patchTouchedPaths = @(& git -c core.quotepath=false -C $worktreePath diff --name-only $range 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                $message = "ccodex: internal error: git diff --name-only $range failed in worktree '$worktreePath': $($patchTouchedPaths -join "`n")"
+                return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+            }
+
+            $overlappingPaths = New-Object System.Collections.Generic.List[string]
+            foreach ($path in $patchTouchedPaths) {
+                $pathText = [string]$path
+                if ($preUntrackedSet.Contains($pathText) -and -not $overlappingPaths.Contains($pathText)) {
+                    $overlappingPaths.Add($pathText)
+                }
+            }
+            if ($overlappingPaths.Count -gt 0) {
+                $message = "ccodex: cannot apply job $JobId because the patch overlaps existing untracked files; applying could make git am fail or clobber them.`n  main repo: $mainRepo`n  overlapping:`n$([string]::Join("`n", ($overlappingPaths | ForEach-Object { "    $_" })))"
+                return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
+            }
         }
         $emptyHooksDir = Join-Path $applyLockDir 'empty-hooks'
         New-Item -ItemType Directory -Path $emptyHooksDir -Force | Out-Null
-
-        $range = "$baseCommit..$rangeEndpoint"
 
         # Empty change set (worker committed nothing) -> nothing to apply; exit 0 no-op.
         $revList = @(& git -C $worktreePath rev-list $range 2>&1)
@@ -1841,7 +1878,12 @@ function Invoke-CcodexApplyCommand {
         & git -C $mainRepo am --abort 2>&1 | Out-Null
         & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
 
-        $postUntracked = @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
+        $postUntracked = if ($AllowUntracked) {
+            @(& git -c core.quotepath=false -C $mainRepo ls-files --others --exclude-standard 2>&1)
+        } else {
+            @(& git -C $mainRepo ls-files --others --exclude-standard 2>&1)
+        }
+        $postUntracked = @($postUntracked)
         $newUntracked = @()
         if ($LASTEXITCODE -eq 0) {
             $newUntracked = @(
@@ -1857,8 +1899,22 @@ function Invoke-CcodexApplyCommand {
         }
 
         $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
-        $restorePorcelain = @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-        $restored = ($restoredHead -eq $preHead) -and ($restorePorcelain.Count -eq 0)
+        $restorePorcelain = if ($AllowUntracked) {
+            @(& git -c core.quotepath=false -C $mainRepo status --porcelain --untracked-files=all 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+        } else {
+            @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+        }
+        $restorePorcelain = @($restorePorcelain)
+        $unexpectedRestoreLines = if ($AllowUntracked) {
+            @($restorePorcelain | Where-Object {
+                $line = $_.ToString()
+                $line.Length -lt 3 -or $line.Substring(0, 2) -ne '??' -or -not $preUntrackedSet.Contains($line.Substring(3))
+            })
+        } else {
+            $restorePorcelain
+        }
+        $unexpectedRestoreLines = @($unexpectedRestoreLines)
+        $restored = ($restoredHead -eq $preHead) -and ($unexpectedRestoreLines.Count -eq 0)
 
         # Parse conflicting file names out of the am output.
         $conflictFiles = New-Object System.Collections.Generic.List[string]
@@ -3005,8 +3061,20 @@ try {
             # Positional job id lands in $PositionalTask (same declaration-order binding
             # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`diff` use). --state-root is a
             # hidden test-support flag.
-            $applyJobId = $PositionalTask
             $applyStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $applyAllowUntracked = ($args -contains '--allow-untracked')
+            $applyJobId = $PositionalTask
+            if (-not $applyJobId -and $applyAllowUntracked) {
+                # With the public flag before the job id, PowerShell leaves the remaining tokens
+                # in $args instead of binding the id to $PositionalTask. Remove apply's flags and
+                # recover the first positional token so both documented argument orders work.
+                for ($i = 0; $i -lt $args.Count; $i++) {
+                    $token = [string]$args[$i]
+                    if ($token -eq '--allow-untracked') { continue }
+                    if ($token -eq '--state-root') { $i++; continue }
+                    if (-not $token.StartsWith('--')) { $applyJobId = $token; break }
+                }
+            }
             if (-not $applyJobId) {
                 Write-Host "ccodex: apply requires a job id."
                 $exitCode = 2
@@ -3014,6 +3082,7 @@ try {
             }
             $applyParams = @{ JobId = $applyJobId }
             if ($applyStateRoot) { $applyParams['StateRoot'] = $applyStateRoot }
+            if ($applyAllowUntracked) { $applyParams['AllowUntracked'] = $true }
             $applyResult = Invoke-CcodexApplyCommand @applyParams
             if ($applyResult.WrapperExitCode -eq 0) {
                 Write-Output $applyResult.Stdout

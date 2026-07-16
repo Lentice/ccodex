@@ -163,8 +163,12 @@ repo is never touched. Then:
 
 ```powershell
 ccodex diff <job_id>    # inspect what the worker changed (git diff base..snapshot)
-ccodex apply <job_id>   # apply those changes to the main repo (requires a clean tree)
+ccodex apply <job_id>   # apply those changes (requires a clean tree by default)
 ```
+
+If the only main-repo dirt is unrelated untracked files, `ccodex apply --allow-untracked
+<job_id>` is the opt-in override. It still rejects tracked dirt and any untracked path touched by
+the patch (exit `2`), and preserves the pre-existing untracked files during rollback.
 
 `apply` exits **25** on conflict and leaves the main repo untouched — report the conflict, do
 not force it. Review the diff before applying; you own what gets applied.

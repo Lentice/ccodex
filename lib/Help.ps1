@@ -113,9 +113,10 @@ $script:CcodexHelpCommands = [ordered]@{
         Example = 'ccodex diff <implement_job_id>'
     }
     apply = [ordered]@{
-        Summary = 'Apply a done worktree job to its clean main repository.'
-        Usage   = 'ccodex apply <job_id>'
+        Summary = 'Apply a done worktree job to its main repository.'
+        Usage   = 'ccodex apply <job_id> [--allow-untracked]'
         Flags   = @(
+            [ordered]@{ Flag = '--allow-untracked'; Desc = 'Allow non-overlapping untracked files; tracked dirt still blocks.' }
             [ordered]@{ Flag = '--state-root <path>'; Desc = 'Override the state root (test/support use).' }
         )
         Example = 'ccodex apply <implement_job_id>'

@@ -33,7 +33,7 @@ Capability summary (full per-command reference: `docs/2026-07-08-ccodex-referenc
 - **Review + delegation:** `ccodex review` scoped diff review (`--embed-diff` recommended),
   `.ccodex/ccodex.json` delegation policy, installed Claude rule/skill/commands.
 - **Worktree isolation:** `run --mode implement` in a detached worktree, `diff`, `apply`
-  (conflict → exit 25, main repo untouched).
+  (conflict → exit 25, main repo untouched), plus overlap-safe `apply --allow-untracked`.
 - **Multi-turn:** `resume <job_id>` (sync) and `submit --resume <job_id>` (async follow-up),
   always a brand-new child job with `parent_job_id` lineage; implement parents continue in a
   distinct snapshot-seeded worktree with cumulative diff/apply; `thread_expired` handling.
@@ -100,9 +100,8 @@ Operational facts:
 
 See `docs/BACKLOG.md` — the single living list. As of 2026-07-16: five curated items open
 (provenance/idempotency, installer hardening, `apply --check`, `review --include-untracked`,
-review profiles + `capabilities --json`) and two delegation-run items (F5 quota retry hints and
-F4 `apply --allow-untracked`). F1, F2, and F3 are complete. The user picks; the agent specs and
-implements.
+review profiles + `capabilities --json`) and one blocked delegation-run item (F5 quota retry
+hints). F1, F2, F3, and F4 are complete. The user picks; the agent specs and implements.
 
 Standing accepted-minor (dev-notes): completion-evidence files not backend-scoped on the
 currently unreachable foreign-takeover path — revisit only if job dirs ever become shared

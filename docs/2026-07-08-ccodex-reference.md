@@ -254,16 +254,21 @@ exit `2` if the job wasn't run with `--access worktree` in the first place.
 ccodex diff <job_id>
 ```
 
-**`ccodex apply <job_id>`** — explicitly lands a **done** worktree job's resolved cumulative
+**`ccodex apply [--allow-untracked] <job_id>`** — explicitly lands a **done** worktree job's resolved cumulative
 range onto the main repo: `git format-patch <range_base>..<endpoint> --stdout` from the worktree, piped to
-`git am --3way` in the main repo. Requires the main repo's working tree to be clean first (exit
-`2`, naming the dirty files, otherwise); only `done` jobs may be applied (`failed`/`timed_out`/
-`cancelled` → exit `2`); an empty change set is a no-op (exit `0`, main repo untouched). On
+`git am --3way` in the main repo. By default the main repo's working tree must be fully clean
+(exit `2`, naming the dirty files, otherwise). `--allow-untracked` permits a tree whose only
+differences are untracked files, but first compares the patch's touched paths with the normalized
+pre-existing untracked inventory; any overlap is rejected with exit `2` and the overlapping paths
+named. Tracked modifications, staged changes, or deletions always block, with or without the flag.
+Only `done` jobs may be applied (`failed`/`timed_out`/`cancelled` → exit `2`); an empty change set
+is a no-op (exit `0`, main repo untouched). On
 success it prints the applied commit range and exits `0`. **Any** non-success outcome — a textual
 conflict, or a patch `git am` accepts as a no-op without advancing `HEAD` (e.g. already applied) —
 runs `git am --abort` and force-restores the main repo to its pre-apply `HEAD`, then exits **`25`**
 naming the conflicting files and pointing at `ccodex diff <job_id>`. The main repo is never left
-mutated except by a genuinely successful apply.
+mutated except by a genuinely successful apply; with `--allow-untracked`, the pre-existing
+untracked files are preserved and do not make a successful rollback look incomplete.
 
 For a resumed implement series, apply only the newest accepted descendant. Its range is already
 cumulative (parent + child work); never apply an ancestor and then its cumulative descendant.
@@ -273,6 +278,7 @@ an operator error.
 ```powershell
 ccodex diff <job_id>    # ALWAYS review before applying — never auto-apply
 ccodex apply <job_id>
+ccodex apply --allow-untracked <job_id>  # only for non-overlapping untracked files
 # -> ccodex: applied job <job_id> to <main_repo>
 #      range: <base_commit>..<new_head>
 ```
@@ -703,8 +709,9 @@ Callers can rely on these wrapper exit codes:
 | `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
 | `25` | `ccodex apply <job_id>` failed or conflicted; `git am --abort` ran and the main repo was force-restored to its pre-apply `HEAD` (never left mutated). Review `ccodex diff <job_id>`, resolve by hand, and re-run `apply`. |
 
-`diff` and `apply` additionally use exit `2` for a non-worktree job or (for `apply`) a dirty main
-repo/non-`done` job, and exit `4` for a job that hasn't finished yet — see
+`diff` and `apply` additionally use exit `2` for a non-worktree job or (for `apply`) a non-`done`
+job, tracked-dirty main repo, default-mode untracked file, or `--allow-untracked` path overlap;
+they use exit `4` for a job that hasn't finished yet — see
 [implement, diff, and apply](#implement-diff-and-apply) above. `cancel`, `tail`, `debug`, and
 `cleanup` additionally use exit `3` for an unknown job id (same as `status`/`wait`/`read`) and
 exit `12` for a wrapper-internal failure; `cleanup` and `doctor` are documented in full in

@@ -77,8 +77,10 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
    ccodex apply <job_id>    # only after you've reviewed the diff and want it landed
    ```
 
-   `apply` requires a clean main-repo working tree and only applies a `done` job; on conflict it
-   exits `25` and leaves the main repo untouched — report the conflict to the user rather than
+   `apply` requires a clean main-repo working tree by default and only applies a `done` job. If
+   the only dirt is unrelated untracked files, `apply --allow-untracked <job_id>` opts in safely;
+   tracked dirt or any patch-path overlap still exits `2`. On conflict it exits `25` and leaves
+   the main repo (including pre-existing untracked files) untouched — report the conflict rather than
    retrying blindly. Treat the diff exactly like a human PR you're about to merge: read it, decide,
    then act.
 
