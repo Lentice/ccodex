@@ -27,7 +27,7 @@ Capability summary (full per-command reference: `docs/2026-07-08-ccodex-referenc
 
 - **Core:** `run` (sync), `submit`/`worker`/`status`/`wait`/`read` (async, CIM detached backend
   with startup sentinel), failure classification (`failure_reason`), `codex_thread_id` capture,
-  `--hard-timeout-sec`.
+  `--hard-timeout-sec`, and exit-0 top-level/per-command `help`/`--help`/`-h`.
 - **Job management:** `cleanup` (with `--scrub-thread-ids`), `cancel`, `tail`, `debug`,
   `doctor`, per-job locks, heartbeat, `list`.
 - **Review + delegation:** `ccodex review` scoped diff review (`--embed-diff` recommended),
@@ -100,9 +100,9 @@ Operational facts:
 
 See `docs/BACKLOG.md` — the single living list. As of 2026-07-16: five curated items open
 (provenance/idempotency, installer hardening, `apply --check`, `review --include-untracked`,
-review profiles + `capabilities --json`) and three delegation-run items (F1 `help`, F5 quota
-retry hints, F4 `apply --allow-untracked`). F2 and F3 are complete. The user picks; the agent
-specs and implements.
+review profiles + `capabilities --json`) and two delegation-run items (F5 quota retry hints and
+F4 `apply --allow-untracked`). F1, F2, and F3 are complete. The user picks; the agent specs and
+implements.
 
 Standing accepted-minor (dev-notes): completion-evidence files not backend-scoped on the
 currently unreachable foreign-takeover path — revisit only if job dirs ever become shared

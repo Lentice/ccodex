@@ -6,6 +6,10 @@ Use the installed `ccodex` CLI to delegate work to Codex as an external subagent
 the task text when the user supplies it inline; otherwise use the task described in the
 conversation.
 
+When command syntax is uncertain, run `ccodex <command> --help` (or `ccodex help <command>`).
+Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown command exits
+`2` without starting a job.
+
 1. **Summarize the task clearly.** Write a short, self-contained task description — Codex has no
    access to this conversation, only what you send it.
 

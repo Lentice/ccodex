@@ -33,10 +33,10 @@ Hard rules (follow these exactly):
 
 ## Availability check (do this first in a new environment)
 
-1. Run `ccodex help`. It exits **2** — that is EXPECTED here (discovery, not an error) — and
-   prints a line like `ccodex: command 'help' is not implemented. Supported commands: run,
-   review, submit, ...`. That list is ground truth for what this installation can do — never
-   call a command that is not in it.
+1. Run `ccodex help` (equivalently bare `ccodex`, `ccodex --help`, or `ccodex -h`). It exits
+   **0** and prints the canonical command list plus common flags. That list is ground truth for
+   what this installation can do — never call a command that is not in it. Use
+   `ccodex <command> --help` or `ccodex help <command>` for concise command-specific usage.
 2. If `ccodex` is not on PATH: ask the user for the ccodex repo location (or to clone it) and
    for permission to install, then run `pwsh -File <repo>\install.ps1` and ensure
    `%USERPROFILE%\.local\bin` is on the user PATH. The installer also installs this skill, the
@@ -203,7 +203,7 @@ Trust the exit code plus `status.json.failure_reason`; never parse stderr prose.
 | Signal | Meaning → reaction |
 |---|---|
 | `0` | Success; stdout is the result. |
-| `2` | Usage error (also the expected code for `ccodex help` discovery). Fix the invocation. |
+| `2` | Usage error (including help for an unknown command). Fix the invocation. |
 | `3` / `4` | Job not found / not terminal yet. |
 | `10` + `quota_or_rate_limit` | Codex quota/rate limit. Report to the user; **never retry-loop**. |
 | `10` + `auth` | Codex needs `codex login`. Report; continue without the result. |

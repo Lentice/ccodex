@@ -13,6 +13,7 @@
 ## Contents
 
 1. [Command reference](#command-reference)
+   - [help](#help)
    - [run and submit](#run-and-submit)
    - [review](#review)
    - [implement, diff, and apply](#implement-diff-and-apply)
@@ -32,10 +33,32 @@
 
 ## Command reference
 
-`ccodex.ps1` dispatches to `run`, `submit`, `status`, `wait`, `read`, `review`, `resume`,
+`ccodex.ps1` dispatches to `help`, `run`, `submit`, `status`, `wait`, `read`, `review`, `resume`,
 `cancel`, `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker`
 subcommand (never called directly — it is the entrypoint the detached backend launches for
 `submit`). Any other subcommand exits `2` with a "not implemented" message.
+
+### help
+
+Help is intercepted before command validation and never starts or mutates a job:
+
+```powershell
+ccodex                         # top-level help
+ccodex help                    # top-level help
+ccodex --help                  # top-level help
+ccodex -h                      # top-level help
+ccodex help <command>          # per-command help
+ccodex <command> --help        # per-command help
+ccodex <command> -h            # per-command help
+```
+
+Top-level help contains the synopsis, canonical command inventory, one-line summaries, common
+flags, and a diagnostic note for `debug`. Per-command help contains a usage line, summary,
+relevant flags, and a short example. Every valid help form exits `0`; `help <unknown>` and
+`<unknown> --help` print the standard unknown-command message and exit `2`. The command
+inventory and both help forms are generated from `lib/Help.ps1`, the same source used by the
+dispatcher's unknown-command message, so they cannot drift. The internal `worker` command is
+never listed.
 
 ### run and submit
 
@@ -666,7 +689,7 @@ Callers can rely on these wrapper exit codes:
 
 | Code | Meaning |
 | ---- | ------- |
-| `0`  | Success — `result.md` was produced and its content was printed to stdout (`run`/`wait`/`read`), or the job id + job dir were printed (`submit`). |
+| `0`  | Success — help was printed; `result.md` was produced and its content was printed to stdout (`run`/`wait`/`read`); or the job id + job dir were printed (`submit`). |
 | `2`  | Usage/validation error (bad `--mode`/`--access`, missing/ambiguous prompt source, repo resolution failure, unknown subcommand, etc.). |
 | `3`  | Job id not found (`status`/`wait`/`read`). |
 | `4`  | Job exists but has not reached a terminal status yet (`read` only — `wait` blocks instead). |
@@ -779,8 +802,8 @@ As with plain submit, only `--model`/`--effort` travel on that launch line and n
 ## Repository layout
 
 ```text
-ccodex.ps1          # dispatcher: parses args, implements run/submit/status/wait/read/review/
-                    #   resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker
+ccodex.ps1          # dispatcher: parses args, intercepts help, and implements run/submit/status/
+                    #   wait/read/review/resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
 install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md,
                     #   ~\.claude\commands\ccodex\<name>.md (the /ccodex:<name> commands),
@@ -789,7 +812,8 @@ templates/          # worker-prompt contract, the /ccodex Claude command, the pe
                     #   claude-commands/ set (/ccodex:review, :ask, :implement, :resume, :jobs,
                     #   :doctor, :cleanup), the delegation rule template, and the agent skill
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
-                    #   (includes lib/Worktree.ps1 for --access worktree jobs and
+                    #   (includes lib/Help.ps1 as the command/help inventory,
+                    #   lib/Worktree.ps1 for --access worktree jobs, and
                     #   lib/Resume.ps1 for ccodex resume)
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
 docs/               # design spec and phase plans
@@ -814,6 +838,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   accepts `--lines`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
   accepts `--no-smoke` and `--repo`
+- `lib/Help.ps1` — canonical ordered command metadata plus top-level/per-command help rendering;
+  also supplies the unknown-command inventory used by the dispatcher
 - `ccodex.cmd` — `PATH` shim that forwards to `pwsh -File ccodex.ps1`
 - `install.ps1` — copies `ccodex.ps1` + `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes the
   `ccodex.cmd` shim there, installs the default worker-prompt template to
@@ -894,7 +920,7 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   `apply` guidance and the resume-on-follow-up pattern)
 - `templates/claude-skill-ccodex.md` — the `ccodex` Claude Code agent skill, installed to
   `~/.claude/skills/ccodex/SKILL.md`, teaching any session how and when to use every phase's
-  commands (discovered at runtime via `ccodex help`'s exit-2 command list)
+  commands (discovered at runtime via `ccodex help`'s exit-0 canonical command list)
 - A full plain-PowerShell test suite under `tests/` (no Pester; see [Testing](#testing) below)
 
 `tmux` was considered as an execution backend but is superseded by the native detached backend

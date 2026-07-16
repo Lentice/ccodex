@@ -41,7 +41,14 @@ $failed = 0
 $total = [System.Diagnostics.Stopwatch]::StartNew()
 foreach ($file in $toRun) {
     $output = $null
-    $elapsed = Measure-Command { $output = & pwsh -NoLogo -NoProfile -File $file.FullName 2>&1 }
+    # Help.tests.ps1 keeps its pure lib/ assertions in the quick suite and gates only its
+    # child-process dispatch matrix behind this full-suite switch. That preserves fast coverage
+    # without silently dropping the shell-level cases from the completion gate.
+    if ($Suite -eq 'full' -and $file.Name -eq 'Help.tests.ps1') {
+        $elapsed = Measure-Command { $output = & pwsh -NoLogo -NoProfile -File $file.FullName -IncludeDispatch 2>&1 }
+    } else {
+        $elapsed = Measure-Command { $output = & pwsh -NoLogo -NoProfile -File $file.FullName 2>&1 }
+    }
     if ($LASTEXITCODE -eq 0) {
         Write-Host ("  PASS {0} ({1:n1}s)" -f $file.Name, $elapsed.TotalSeconds)
     } else {

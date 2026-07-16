@@ -14,6 +14,12 @@ try {
 
     Set-Content -LiteralPath (Join-Path $tempRoot 'Alpha.tests.ps1') -Value 'exit 0' -Encoding utf8
     Set-Content -LiteralPath (Join-Path $tempRoot 'Beta.tests.ps1') -Value 'Write-Host "beta failing"; exit 1' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $tempRoot 'Help.tests.ps1') -Value @'
+param([switch]$IncludeDispatch)
+$mode = if ($IncludeDispatch) { 'dispatch' } else { 'pure' }
+[System.IO.File]::WriteAllText((Join-Path $PSScriptRoot 'help-mode.txt'), $mode)
+exit 0
+'@ -Encoding utf8
     Set-Content -LiteralPath (Join-Path $tempRoot 'SlowGamma.tests.ps1') -Value 'exit 0' -Encoding utf8
 
     Write-Host "full suite runs every discovered file and exits with the failed-file count"
@@ -25,6 +31,7 @@ try {
     Assert-True ($fullText -like '*FAIL*Beta.tests.ps1*') 'full suite reports the failing file by name'
     Assert-True ($fullText -like '*beta failing*') 'a failing file has its captured output echoed (flakes must self-document)'
     Assert-True ($fullText -like '*1 test file(s) failed*') 'full suite prints the failure count summary'
+    Assert-Equal (Get-Content -LiteralPath (Join-Path $tempRoot 'help-mode.txt') -Raw) 'dispatch' 'full suite enables Help dispatch cases'
 
     Write-Host "quick suite skips slow-listed files, says so, and still reports failures"
     $quickOut = & pwsh -NoLogo -NoProfile -File $runnerPath -Suite quick -TestsPath $tempRoot -SlowFiles @('SlowGamma.tests.ps1') 2>&1
@@ -33,6 +40,7 @@ try {
     Assert-True ($quickText -like '*skipped*SlowGamma.tests.ps1*') 'quick suite names the skipped slow file (no silent skips)'
     Assert-True ($quickText -notlike '*PASS SlowGamma.tests.ps1*') 'quick suite did not run the slow file'
     Assert-True ($quickText -like '*FAIL*Beta.tests.ps1*') 'quick suite reports the failing file by name'
+    Assert-Equal (Get-Content -LiteralPath (Join-Path $tempRoot 'help-mode.txt') -Raw) 'pure' 'quick suite runs only pure Help function cases'
 
     Write-Host "quick suite over passing files exits 0"
     Remove-Item -LiteralPath (Join-Path $tempRoot 'Beta.tests.ps1') -Force

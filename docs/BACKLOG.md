@@ -21,6 +21,7 @@ and the delegation-run issue record
 | 5. Structured failure signal + `doctor --json` | 22800dd |
 | F2. Cold-start exit-23 flake: 120 s sentinel default + `CCODEX_STARTUP_TIMEOUT_SEC` + dead-worker fast-fail | 7079237 |
 | F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
+| F1. `help` / `--help` / `-h` support (top level + per subcommand) | PENDING_HASH |
 
 ## Open — curated backlog items (user picks)
 
@@ -38,7 +39,6 @@ Priority order per the Codex-confirmed triage:
 
 | # | Item | Origin | Notes |
 |---|---|---|---|
-| F1 | `help` / `--help` / `-h` support (top level + per subcommand) | O1 | intercept before command validation; concise usage output |
 | F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose |
 | F4 | `apply --allow-untracked` (opt-in, overlap-safe) | O2 | only if demand persists; keep clean-tree default |
 

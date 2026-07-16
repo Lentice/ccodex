@@ -140,6 +140,15 @@ Everything the slash commands do is plain CLI underneath — useful for scripts,
 poking at it by hand. The essential flows — full flag reference, exit-code contract, and file
 formats are in [`docs/2026-07-08-ccodex-reference.md`](docs/2026-07-08-ccodex-reference.md).
 
+**Getting help / cheat sheet:** bare `ccodex`, `ccodex help`, `ccodex --help`, and `ccodex -h`
+print the top-level command list and common flags. Use either form below for concise help on one
+command; help exits `0` and never starts a job.
+
+```powershell
+ccodex --help
+ccodex <command> --help   # equivalent: ccodex help <command>
+```
+
 **Scoped review of a diff.** Use `--embed-diff` so the wrapper generates and embeds the diff
 itself; it's the reliable form on hosts where Codex's own sandbox can't spawn `git diff`
 (signature: `CreateProcessWithLogonW failed: 1385`).

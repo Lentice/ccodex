@@ -33,6 +33,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'lib\Paths.ps1')
+. (Join-Path $PSScriptRoot 'lib\Help.ps1')
 . (Join-Path $PSScriptRoot 'lib\Repo.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobId.ps1')
 . (Join-Path $PSScriptRoot 'lib\StdinTimeout.ps1')
@@ -2540,6 +2541,37 @@ if ($ImportOnly) { return }
 
 $exitCode = 12
 try {
+    # Help must be resolved before command validation. In particular, --help/-h are undeclared
+    # flags and therefore remain in $args, while `help <command>` binds the requested command to
+    # $PositionalTask. Keep ImportOnly's return above this block so dot-sourcing stays side-effect
+    # free for tests and module consumers.
+    if ([string]::IsNullOrWhiteSpace($Command)) {
+        Write-Host (Get-CcodexTopLevelHelpText)
+        exit 0
+    }
+
+    $requestedHelpCommand = $null
+    if ($Command -in @('help', '--help', '-h')) {
+        if ($Command -eq 'help' -and -not [string]::IsNullOrWhiteSpace($PositionalTask)) {
+            $requestedHelpCommand = $PositionalTask
+        } else {
+            Write-Host (Get-CcodexTopLevelHelpText)
+            exit 0
+        }
+    } elseif (($args -contains '--help') -or ($args -contains '-h')) {
+        $requestedHelpCommand = $Command
+    }
+
+    if ($null -ne $requestedHelpCommand) {
+        $commandHelp = Get-CcodexCommandHelpText -Command $requestedHelpCommand
+        if ($null -eq $commandHelp) {
+            Write-Host (Get-CcodexUnknownCommandText -Command $requestedHelpCommand)
+            exit 2
+        }
+        Write-Host $commandHelp
+        exit 0
+    }
+
     switch ($Command) {
         'run' {
             # Redirected stdin is read directly from the OS stream by
@@ -3246,7 +3278,7 @@ try {
             $exitCode = $doctorResult.WrapperExitCode
         }
         default {
-            Write-Host "ccodex: command '$Command' is not implemented. Supported commands: run, review, resume, submit, list, status, wait, read, cancel, diff, apply, tail, debug, cleanup, doctor, worker."
+            Write-Host (Get-CcodexUnknownCommandText -Command $Command)
             $exitCode = 2
         }
     }
