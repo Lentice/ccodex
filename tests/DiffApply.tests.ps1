@@ -169,6 +169,71 @@ Assert-True ($diffRemoved.Message -like "*$($runRemoved.JobDir)*") 'exit-3 messa
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 
+Write-Host "resume/diff/apply: worktree child uses a fresh snapshot-seeded worktree and cumulative frozen range"
+$resumeRepo = Join-Path $tempRoot 'gitrepo-resume-cumulative'
+New-CcodexTestGitRepo -Path $resumeRepo
+$seriesBase = (& git -C $resumeRepo rev-parse HEAD).Trim()
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'parent implement done'
+$env:CCODEX_FAKE_THREAD_ID = 'thread-worktree-resume'
+$env:CCODEX_FAKE_WRITE_FILE = 'parent-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'parent content'
+$resumeParent = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $resumeRepo }
+Assert-Equal $resumeParent.WrapperExitCode 0 'setup: parent worktree implement run succeeds'
+$resumeParentStatus = Get-Content -LiteralPath (Join-Path $resumeParent.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-True (-not [string]::IsNullOrEmpty($resumeParentStatus.snapshot_commit)) 'parent terminal status records snapshot_commit'
+Assert-Equal $resumeParentStatus.snapshot_commit ((& git -C $resumeParentStatus.worktree_repo rev-parse HEAD).Trim()) 'parent snapshot_commit equals finalized worktree HEAD'
+
+$env:CCODEX_FAKE_RESULT = 'child implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'child-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'child content'
+$resumeChild = Invoke-CcodexResume -ParentJobId $resumeParentStatus.job_id -PositionalTask 'address review feedback' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd `
+    -LocalAppDataRoot $localAppData -AppDataRoot $appData
+Assert-Equal $resumeChild.WrapperExitCode 0 'sync resume of a worktree parent succeeds'
+$resumeChildStatus = Get-Content -LiteralPath (Join-Path $resumeChild.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-True ($resumeChildStatus.worktree_repo -ne $resumeParentStatus.worktree_repo) 'child worktree path is distinct from the parent worktree'
+Assert-Equal $resumeChildStatus.base_commit $resumeParentStatus.snapshot_commit 'child own base_commit is the parent frozen snapshot'
+Assert-Equal $resumeChildStatus.series_base_commit $seriesBase 'child series_base_commit is the original main base'
+Assert-True (Test-Path -LiteralPath (Join-Path $resumeChildStatus.worktree_repo 'parent-change.txt')) 'child worktree starts with the parent accumulated change'
+Assert-True (Test-Path -LiteralPath (Join-Path $resumeChildStatus.worktree_repo 'child-change.txt')) 'child worktree contains its own follow-up change'
+$resumePrompt = [System.IO.File]::ReadAllText((Join-Path $resumeChild.JobDir 'prompt.md'))
+Assert-True ($resumePrompt -like "*NEW isolated git worktree: $($resumeChildStatus.worktree_repo)*") 'child prompt contains the relocation worktree envelope'
+Assert-True ($resumePrompt -like "*Artifact directory for this turn: *artifacts*User follow-up:*address review feedback*") 'child prompt contains the relocated artifact path and original follow-up'
+
+$resumeDiff = Invoke-CcodexDiffCommand -JobId $resumeChildStatus.job_id -StateRoot $localAppData
+Assert-Equal $resumeDiff.WrapperExitCode 0 'diff of the child cumulative series succeeds'
+Assert-True ($resumeDiff.Stdout -like '*parent-change.txt*') 'child diff includes the parent change'
+Assert-True ($resumeDiff.Stdout -like '*child-change.txt*') 'child diff includes the child change'
+
+# Mutate the terminal child worktree after finalization. The recorded snapshot endpoint must
+# freeze diff/apply and grandchildren against this late commit.
+[System.IO.File]::WriteAllText((Join-Path $resumeChildStatus.worktree_repo 'late-mutation.txt'), "late`n", $utf8NoBomTest)
+& git -C $resumeChildStatus.worktree_repo add late-mutation.txt | Out-Null
+& git -C $resumeChildStatus.worktree_repo commit -q -m 'late mutation after terminal status' | Out-Null
+$frozenDiff = Invoke-CcodexDiffCommand -JobId $resumeChildStatus.job_id -StateRoot $localAppData
+Assert-True ($frozenDiff.Stdout -notlike '*late-mutation.txt*') 'diff endpoint is frozen at snapshot_commit, not live worktree HEAD'
+
+$env:CCODEX_FAKE_RESULT = 'grandchild implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'grandchild-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'grandchild content'
+$resumeGrandchild = Invoke-CcodexResume -ParentJobId $resumeChildStatus.job_id -PositionalTask 'one more adjustment' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd `
+    -LocalAppDataRoot $localAppData -AppDataRoot $appData
+Assert-Equal $resumeGrandchild.WrapperExitCode 0 'grandchild worktree resume succeeds'
+$resumeGrandchildStatus = Get-Content -LiteralPath (Join-Path $resumeGrandchild.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $resumeGrandchildStatus.series_base_commit $seriesBase 'grandchild keeps the original series base B'
+Assert-Equal $resumeGrandchildStatus.base_commit $resumeChildStatus.snapshot_commit 'grandchild is seeded from the child recorded snapshot'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $resumeGrandchildStatus.worktree_repo 'late-mutation.txt'))) 'grandchild ignores post-terminal parent worktree mutation'
+
+$resumeApply = Invoke-CcodexApplyCommand -JobId $resumeChildStatus.job_id -StateRoot $localAppData
+Assert-Equal $resumeApply.WrapperExitCode 0 'apply of the child cumulative range succeeds on untouched main B'
+Assert-True (Test-Path -LiteralPath (Join-Path $resumeRepo 'parent-change.txt')) 'cumulative apply lands the parent change'
+Assert-True (Test-Path -LiteralPath (Join-Path $resumeRepo 'child-change.txt')) 'cumulative apply lands the child change'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $resumeRepo 'late-mutation.txt'))) 'cumulative apply excludes post-terminal worktree mutation'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID, Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+
 # ============================================================================
 # apply
 # ============================================================================
@@ -261,6 +326,10 @@ $statusApplyHookConflict = Get-Content -LiteralPath (Join-Path $runApplyHookConf
 [System.IO.File]::WriteAllText((Join-Path $statusApplyHookConflict.worktree_repo 'seed.txt'), "worker conflict`n", $utf8NoBomTest)
 & git -C $statusApplyHookConflict.worktree_repo add seed.txt | Out-Null
 & git -C $statusApplyHookConflict.worktree_repo commit -q -m 'worker conflict patch' | Out-Null
+# Model a pre-F3 status that has no frozen endpoint; current jobs deliberately ignore any
+# post-terminal commit like the one above and use snapshot_commit instead of live HEAD.
+$statusApplyHookConflict.snapshot_commit = $null
+Write-CcodexJsonFileAtomic -Path (Join-Path $runApplyHookConflict.JobDir 'status.json') -Object $statusApplyHookConflict
 [System.IO.File]::WriteAllText((Join-Path $gitRepoApplyHookConflict 'seed.txt'), "main conflict`n", $utf8NoBomTest)
 & git -C $gitRepoApplyHookConflict add seed.txt | Out-Null
 & git -C $gitRepoApplyHookConflict commit -q -m 'main conflict patch' | Out-Null

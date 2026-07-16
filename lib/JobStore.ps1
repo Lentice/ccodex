@@ -59,6 +59,12 @@ function New-CcodexStatusObject {
         # never captured into a <base>..HEAD commit, so diff/apply must refuse rather than report a
         # misleading empty range. Null for non-worktree jobs and for successful finalization.
         [string]$WorktreeFinalizeError = $null,
+        # Finalized worktree HEAD recorded after snapshot completion. This freezes diff/apply
+        # against later worktree mutation. Null until finalization and for non-worktree jobs.
+        [string]$SnapshotCommit = $null,
+        # Original series root for cumulative diff/apply on resumed worktree children. Null for
+        # non-resume jobs; a direct worktree job continues to use base_commit as its range root.
+        [string]$SeriesBaseCommit = $null,
         # Phase 5 resume lineage (append-only addition; null for non-resume jobs). A resumed
         # job records the id of the parent whose Codex thread it continued.
         [string]$ParentJobId = $null,
@@ -93,6 +99,8 @@ function New-CcodexStatusObject {
         base_commit       = $BaseCommit
         worktree_committed = $WorktreeCommitted
         worktree_finalize_error = $WorktreeFinalizeError
+        snapshot_commit    = $SnapshotCommit
+        series_base_commit = $SeriesBaseCommit
         parent_job_id     = $ParentJobId
         group             = $Group
         label             = $Label
@@ -112,7 +120,8 @@ function New-CcodexDebugObject {
         # Phase 4 worktree fields (null for non-worktree jobs).
         [string]$MainRepo = $null,
         [string]$WorktreeRepo = $null,
-        [string]$BaseCommit = $null
+        [string]$BaseCommit = $null,
+        [string]$SnapshotCommit = $null
     )
     return [ordered]@{
         job_id              = $JobId
@@ -128,6 +137,7 @@ function New-CcodexDebugObject {
         main_repo           = $MainRepo
         worktree_repo       = $WorktreeRepo
         base_commit         = $BaseCommit
+        snapshot_commit     = $SnapshotCommit
     }
 }
 

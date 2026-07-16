@@ -26,3 +26,13 @@ ccodex apply <job_id>    # only after you've reviewed and decided to land it
 `apply` needs a clean main-repo tree and a `done` job; exit `25` means conflict — the main repo
 is untouched, so report it and resolve by hand rather than retrying. After applying, run the
 project's tests yourself; Codex's own test claims don't count as verification.
+
+If review finds something to revise, continue the same thread before applying:
+
+```powershell
+"<review feedback>" | ccodex resume <job_id>
+ccodex diff <child_job_id>     # cumulative parent + child changes
+ccodex apply <child_job_id>    # only the newest accepted descendant
+```
+
+The child uses a new snapshot-seeded worktree. Never apply the parent and then the cumulative child.

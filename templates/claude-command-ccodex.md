@@ -88,8 +88,10 @@ conversation.
    ```
 
    `resume` always creates a brand-new job (new job id, new artifacts) — it never mutates the
-   parent job you're resuming from. If it fails with exit `2` naming a scrubbed/absent thread id
-   or worktree access, or fails with `failure_reason: thread_expired`, the session is gone —
+   parent job you're resuming from. Worktree parents get a distinct child worktree seeded from
+   their frozen snapshot; the child diff/apply is cumulative, so apply only the newest accepted
+   descendant. If it fails with exit `2` naming a scrubbed/absent thread id, or fails with
+   `failure_reason: thread_expired`, the session is gone —
    start a fresh `run` instead of retrying `resume`. Chain follow-ups off the latest child's job
    id, not the original parent, if the conversation continues past one reply.
 
@@ -130,7 +132,7 @@ conversation.
    | Exit code | Meaning |
    | --- | --- |
    | `0`  | Success — stdout is the final result. |
-   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure; also `resume`/`submit --resume` against a worktree parent or an absent/scrubbed thread id). |
+   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure; also `resume`/`submit --resume` against an absent/scrubbed thread id). |
    | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`/`resume`/`submit --resume`). |
    | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`/`resume`/`submit --resume`) — use `wait` or check back later. |
    | `10` | Codex itself exited non-zero. |

@@ -20,10 +20,15 @@ Notes:
 - `resume` creates a brand-new job (new id, `parent_job_id` lineage) and inherits the parent's
   mode/access/repo — never pass `--repo`/`--mode`/`--access` (exit `2`). `--model`/`--effort`
   are accepted per call.
+- For an implement/worktree parent, that new job also gets a distinct worktree seeded from the
+  parent's frozen snapshot. Its `diff`/`apply` is cumulative; apply only the newest accepted
+  descendant, never an ancestor followed by its descendant.
 - Use `submit --resume` when the follow-up should run in the background, then `wait`/`read` its
   returned child id. It also inherits group/label and shares `resume`'s parent preconditions.
 - Chain further follow-ups off the NEWEST child job id, not the original parent.
-- Exit `2` naming a scrubbed/absent thread id or worktree access, or a failure with
+- Exit `2` naming a scrubbed/absent thread id, or a failure with
   `failure_reason: thread_expired`, means the session is gone — start a fresh
   `ccodex run` instead of retrying resume.
+- A removed parent worktree exits `3`; missing/finalization-invalid/non-linear snapshot evidence
+  exits `12`. Start fresh rather than trying to reconstruct lost continuation state.
 - Triage the reply like any Codex output: verify, then adopt or reject with reasons.

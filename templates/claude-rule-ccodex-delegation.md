@@ -95,8 +95,9 @@ has no memory of the prior turn:
 ```
 
 `resume` always creates a brand-new job — it never mutates the job you're resuming from — and
-inherits that job's mode/access/repo. If it exits `2` naming a scrubbed/absent thread id or
-worktree access, or fails with `failure_reason: thread_expired`, the session is gone; start a
+inherits that job's mode/access/repo. Worktree parents get a distinct child worktree seeded from
+the recorded snapshot, preserving prior edits without touching the parent. If it exits `2` naming
+a scrubbed/absent thread id, or fails with `failure_reason: thread_expired`, the session is gone; start a
 fresh `run`/`review` instead of retrying `resume`. This does not count as a separate checkpoint —
 it is a continuation of whichever checkpoint (or explicit request) started the original call, and
 still counts toward `max_codex_calls_per_task`.
@@ -141,7 +142,7 @@ keeping the process/`command_exit_code` authoritative.
 | exit `10` + `failure_reason: network` | One retry is safe; if it fails again, note it and continue. |
 | exit `10` with no `failure_reason` | Read `status.json.error`/stderr for context, then continue; use judgment, do not retry-loop. |
 | exit `10` + `failure_reason: thread_expired` (resumed job only) | Codex no longer recognizes the resumed session; start a fresh `run`/`review` instead of retrying the follow-up. |
-| exit `2`/`3`/`4` on `resume` or `submit --resume` | Parent is a worktree job or has an absent/scrubbed thread id (`2`), doesn't exist (`3`), or hasn't finished yet (`4`); start a fresh call or wait, as appropriate. |
+| exit `2`/`3`/`4` on `resume` or `submit --resume` | Parent has an absent/scrubbed thread id (`2`), doesn't exist or lost its worktree (`3`), or hasn't finished yet (`4`); start a fresh call or wait, as appropriate. |
 | exit `11` | Codex produced no usable result; note it and continue without the review. |
 | exit `20` | The job is still running; re-run `wait` rather than treating it as failed. |
 | exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |
@@ -180,6 +181,9 @@ an explicit adopt/reject decision, exactly as with a review finding. `apply` req
 repo working tree and only accepts a `done` job; on conflict it exits `25` and leaves the main
 repo untouched — report the conflict and let the user decide how to resolve it rather than
 retrying blindly.
+
+When review feedback continues an implement job, resume it and review the newest child's
+cumulative diff. Apply only that newest accepted descendant; never apply the ancestor first.
 
 ## Job lifecycle hygiene
 

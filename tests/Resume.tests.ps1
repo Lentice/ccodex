@@ -18,6 +18,12 @@ function New-CcodexTestParentJob {
         [string]$Access = 'read-only',
         [string]$Repo = 'D:\Repo',
         [string]$CodexThreadId = $null,
+        [string]$MainRepo = $null,
+        [string]$WorktreeRepo = $null,
+        [string]$BaseCommit = $null,
+        [string]$SnapshotCommit = $null,
+        [string]$SeriesBaseCommit = $null,
+        [string]$WorktreeFinalizeError = $null,
         [string]$Root = $tempRoot
     )
     $repoKey = 'deadbeefcafe'
@@ -25,7 +31,10 @@ function New-CcodexTestParentJob {
     New-Item -ItemType Directory -Path $jobDir -Force | Out-Null
 
     $statusObject = New-CcodexStatusObject -JobId $JobId -Status $Status -Mode $Mode -Access $Access -Repo $Repo `
-        -CreatedAt (Get-Date).ToUniversalTime().ToString('o') -CodexThreadId $CodexThreadId
+        -CreatedAt (Get-Date).ToUniversalTime().ToString('o') -CodexThreadId $CodexThreadId `
+        -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit `
+        -SnapshotCommit $SnapshotCommit -SeriesBaseCommit $SeriesBaseCommit `
+        -WorktreeFinalizeError $WorktreeFinalizeError
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObject
 
     $indexPath = Get-CcodexIndexPath -JobId $JobId -Root $Root
@@ -66,10 +75,19 @@ $ctxFailed = Get-CcodexResumeContext -ParentJobId 'parent-failed' -StateRoot $te
 Assert-Equal $ctxFailed.ThreadId 'thread-333' 'a failed parent with a thread id yields full context'
 Assert-Equal $ctxFailed.Mode 'test' 'failed-parent context still carries its mode'
 
-Write-Host "Get-CcodexResumeContext: worktree-access parent throws the distinct not-supported message"
-New-CcodexTestParentJob -JobId 'parent-worktree' -Status 'done' -Mode 'implement' -Access 'worktree' -CodexThreadId 'thread-444' | Out-Null
-Assert-Throws { Get-CcodexResumeContext -ParentJobId 'parent-worktree' -StateRoot $tempRoot } 'worktree-access parent is rejected'
-Assert-Equal $script:CcodexLastError "ccodex: job 'parent-worktree' ran in worktree access mode - resume is not supported for worktree jobs; start a fresh run." 'worktree-not-supported message is exact'
+Write-Host "Get-CcodexResumeContext: worktree parent is allowed and carries its frozen repository context"
+$contextMain = Join-Path $tempRoot 'context-main'
+$contextWorktree = Join-Path $tempRoot 'context-parent-worktree'
+New-Item -ItemType Directory -Path $contextMain, $contextWorktree -Force | Out-Null
+New-CcodexTestParentJob -JobId 'parent-worktree' -Status 'done' -Mode 'implement' -Access 'worktree' `
+    -Repo $contextMain -CodexThreadId 'thread-444' -MainRepo $contextMain -WorktreeRepo $contextWorktree `
+    -BaseCommit 'base-111' -SnapshotCommit 'snapshot-222' -SeriesBaseCommit 'series-000' | Out-Null
+$ctxWorktree = Get-CcodexResumeContext -ParentJobId 'parent-worktree' -StateRoot $tempRoot
+Assert-Equal $ctxWorktree.MainRepo $contextMain 'worktree context carries main_repo'
+Assert-Equal $ctxWorktree.ParentWorktreeRepo $contextWorktree 'worktree context carries the parent worktree path'
+Assert-Equal $ctxWorktree.ParentBaseCommit 'base-111' 'worktree context carries the parent base commit'
+Assert-Equal $ctxWorktree.ParentSnapshotCommit 'snapshot-222' 'worktree context carries the frozen parent snapshot'
+Assert-Equal $ctxWorktree.ParentSeriesBaseCommit 'series-000' 'worktree context carries the inherited series root'
 
 # --- Build-CcodexResumeArgs ---
 
@@ -216,6 +234,89 @@ if ($initFailureResume.JobDir -and (Test-Path -LiteralPath $initFailureResume.Jo
     Assert-True (Test-Path -LiteralPath (Join-Path $initFailureResume.JobDir 'worker-complete.json')) 'retained child job has completion evidence'
 } else {
     Assert-True (-not (Test-Path -LiteralPath (Get-CcodexIndexPath -JobId $initFailureResume.JobId -Root $cmdStateRoot))) 'removed incomplete child job has no dangling index entry'
+}
+
+Write-Host "Invoke-CcodexResume: worktree continuation preconditions map to exits 3/12/2 without reserving"
+$preconditionMain = Join-Path $cmdRoot 'precondition-main'
+New-Item -ItemType Directory -Path $preconditionMain -Force | Out-Null
+& git -C $preconditionMain init -q | Out-Null
+& git -C $preconditionMain config user.email 'test@example.com' | Out-Null
+& git -C $preconditionMain config user.name 'ccodex test' | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $preconditionMain 'seed.txt'), "seed`n", (New-Object System.Text.UTF8Encoding($false)))
+& git -C $preconditionMain add seed.txt | Out-Null
+& git -C $preconditionMain commit -q -m 'base' | Out-Null
+$preconditionBase = (& git -C $preconditionMain rev-parse HEAD).Trim()
+$existingParentWt = Join-Path $cmdRoot 'existing-parent-wt'
+New-Item -ItemType Directory -Path $existingParentWt -Force | Out-Null
+
+New-CcodexTestParentJob -JobId 'wt-parent-removed' -Status 'done' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId 'thread-wt-removed' -MainRepo $preconditionMain `
+    -WorktreeRepo (Join-Path $cmdRoot 'removed-parent-wt') -BaseCommit $preconditionBase -SnapshotCommit $preconditionBase -Root $cmdStateRoot | Out-Null
+$removedResume = Invoke-CcodexResume -ParentJobId 'wt-parent-removed' -PositionalTask 'continue' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $removedResume.WrapperExitCode 3 'removed parent worktree -> exit 3'
+Assert-True ($removedResume.Message -like '*worktree removed*') 'removed parent worktree message is explicit'
+Assert-True ($null -eq $removedResume.JobId) 'removed-worktree precondition does not reserve a child job'
+
+New-CcodexTestParentJob -JobId 'wt-parent-no-snapshot' -Status 'cancelled' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId 'thread-wt-no-snapshot' -MainRepo $preconditionMain `
+    -WorktreeRepo $existingParentWt -BaseCommit $preconditionBase -Root $cmdStateRoot | Out-Null
+$noSnapshotResume = Invoke-CcodexResume -ParentJobId 'wt-parent-no-snapshot' -PositionalTask 'continue' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $noSnapshotResume.WrapperExitCode 12 'missing parent snapshot_commit -> exit 12'
+Assert-True ($noSnapshotResume.Message -like '*no recorded worktree snapshot*') 'missing-snapshot message explains cancelled/pre-F3 parents'
+
+New-CcodexTestParentJob -JobId 'wt-parent-finalize-failed' -Status 'failed' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId 'thread-wt-finalize' -MainRepo $preconditionMain `
+    -WorktreeRepo $existingParentWt -BaseCommit $preconditionBase -SnapshotCommit $preconditionBase `
+    -WorktreeFinalizeError 'simulated finalize error' -Root $cmdStateRoot | Out-Null
+$finalizeResume = Invoke-CcodexResume -ParentJobId 'wt-parent-finalize-failed' -PositionalTask 'continue' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $finalizeResume.WrapperExitCode 12 'recorded parent worktree_finalize_error -> exit 12'
+
+New-CcodexTestParentJob -JobId 'wt-parent-scrubbed' -Status 'done' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId $null -MainRepo $preconditionMain -WorktreeRepo $existingParentWt `
+    -BaseCommit $preconditionBase -SnapshotCommit $preconditionBase -Root $cmdStateRoot | Out-Null
+$scrubbedWtResume = Invoke-CcodexResume -ParentJobId 'wt-parent-scrubbed' -PositionalTask 'continue' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $scrubbedWtResume.WrapperExitCode 2 'scrubbed worktree parent thread id -> exit 2'
+
+$preconditionTree = (& git -C $preconditionMain rev-parse 'HEAD^{tree}').Trim()
+$unrelatedSnapshot = ('unrelated snapshot' | & git -C $preconditionMain -c user.name='ccodex test' -c user.email='test@example.com' commit-tree $preconditionTree).Trim()
+New-CcodexTestParentJob -JobId 'wt-parent-nonlinear' -Status 'done' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId 'thread-wt-nonlinear' -MainRepo $preconditionMain `
+    -WorktreeRepo $existingParentWt -BaseCommit $preconditionBase -SnapshotCommit $unrelatedSnapshot -Root $cmdStateRoot | Out-Null
+$nonlinearResume = Invoke-CcodexResume -ParentJobId 'wt-parent-nonlinear' -PositionalTask 'continue' `
+    -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+Assert-Equal $nonlinearResume.WrapperExitCode 12 'non-ancestor parent snapshot -> exit 12'
+Assert-True ($nonlinearResume.Message -like '*history is not linear*') 'non-ancestor message names the linear-history requirement'
+
+Write-Host "Invoke-CcodexResume: a post-worktree-add initialization failure tears down the child transactionally"
+$transactionParent = New-CcodexJobWorktree -MainRepo $preconditionMain -JobId 'transaction-parent-wt' -StateRoot $cmdStateRoot
+[System.IO.File]::WriteAllText((Join-Path $transactionParent.WorktreePath 'parent.txt'), "parent`n", (New-Object System.Text.UTF8Encoding($false)))
+$transactionSnapshot = Complete-CcodexJobWorktree -WorktreePath $transactionParent.WorktreePath -JobId 'transaction-parent-wt'
+New-CcodexTestParentJob -JobId 'wt-parent-transaction' -Status 'done' -Mode 'implement' -Access 'worktree' `
+    -Repo $preconditionMain -CodexThreadId 'thread-wt-transaction' -MainRepo $preconditionMain `
+    -WorktreeRepo $transactionParent.WorktreePath -BaseCommit $preconditionBase `
+    -SnapshotCommit $transactionSnapshot.HeadCommit -Root $cmdStateRoot | Out-Null
+$originalWriteTextFileWt = ${function:Write-CcodexTextFile}
+${function:Write-CcodexTextFile} = {
+    param([string]$Path, [string]$Content)
+    if ($Path -like '*prompt.md') { throw 'simulated worktree resume prompt failure' }
+    & $originalWriteTextFileWt @PSBoundParameters
+}
+try {
+    $transactionFailure = Invoke-CcodexResume -ParentJobId 'wt-parent-transaction' -PositionalTask 'continue' `
+        -PipelineExpected $false -PipelineObjects $null -CodexPath $fixtureCmd -LocalAppDataRoot $cmdStateRoot -AppDataRoot $cmdAppData
+} finally {
+    ${function:Write-CcodexTextFile} = $originalWriteTextFileWt
+}
+Assert-Equal $transactionFailure.WrapperExitCode 12 'post-add initialization failure -> exit 12'
+$failedChildWt = Join-Path (Join-Path (Get-CcodexLocalAppDataRoot -Root $cmdStateRoot) 'worktrees') $transactionFailure.JobId
+Assert-True (-not (Test-Path -LiteralPath $failedChildWt)) 'failed child worktree is removed transactionally'
+if ($transactionFailure.JobDir) {
+    Assert-Equal (Read-CcodexStatusFile -JobDir $transactionFailure.JobDir).status 'failed' 'transaction failure keeps terminal status evidence'
+    Assert-True (Test-Path -LiteralPath (Join-Path $transactionFailure.JobDir 'worker-complete.json')) 'transaction failure keeps worker completion evidence'
 }
 
 Write-Host "shell-level: piped follow-up through the dispatcher resumes a done parent -> exit 0"

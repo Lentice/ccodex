@@ -76,12 +76,13 @@ Parent validation happens before any child directory is reserved, in this order:
 | `--resume` is missing its required value, task text is absent/ambiguous, or an inherited-context flag is supplied | `2` |
 | Parent has no index entry, or its indexed job directory is missing | `3` |
 | Parent is not terminal (`done`/`failed`/`timed_out`/`cancelled`) | `4` |
-| Parent used worktree access | `2` |
 | Parent has no `codex_thread_id` (absent or scrubbed) | `2` |
+| Worktree parent's worktree directory was removed | `3` |
+| Worktree parent has `worktree_finalize_error`, lacks `snapshot_commit`, or its snapshot is not descended from the cumulative base | `12` |
 
-The last four messages are exactly the same as synchronous `resume`; worktree access is checked
-before thread-id presence. A launch/sentinel failure remains exit `23`, and success keeps plain
-submit's exact two-line output shape.
+The parent checks are shared with synchronous `resume`. Worktree continuations additionally
+validate positive finalization evidence before reserving the child. A launch/sentinel failure
+remains exit `23`, and success keeps plain submit's exact two-line output shape.
 
 ```powershell
 # Synchronous, read-only review or brainstorming (defaults to --access read-only)
@@ -212,12 +213,16 @@ When the process exits (success, failure, or a hard-timeout kill), the wrapper s
 whatever the worker left behind into one deterministic snapshot commit (author
 `ccodex-worker <ccodex@local>`, message `ccodex: worker output <job_id>`) on top of the worktree's
 base commit — a no-op worker leaves the worktree at its base commit instead (`status.json`'s
-`worktree_committed` is `false`). `status.json`/`debug.json` additionally record `main_repo`,
-`worktree_repo`, and `base_commit` for a worktree job (`null` for non-worktree jobs).
+`worktree_committed` is `false`). Every finalized worktree job records that frozen HEAD in
+`snapshot_commit`. `status.json`/`debug.json` additionally record `main_repo`, `worktree_repo`,
+and `base_commit` for a worktree job (`null` for non-worktree jobs); a resumed worktree child
+also records `series_base_commit`, the original main-repo base inherited through the lineage.
 
-**`ccodex diff <job_id>`** — read-only inspection of a worktree job's changes; prints
-`git diff --stat <base_commit>..HEAD` followed by the full `git diff <base_commit>..HEAD` from the
-job's worktree. An empty change set prints an informational "no changes to diff" line instead
+**`ccodex diff <job_id>`** — read-only inspection of a worktree job's changes. Its range base is
+`series_base_commit` when present, otherwise `base_commit`; its endpoint is `snapshot_commit`
+when present, otherwise live worktree `HEAD` for pre-F3 jobs. It prints `git diff --stat
+<range_base>..<endpoint>` followed by the full diff. An empty change set prints an informational
+"no changes to diff" line instead
 (still exit `0`). Exit `3` for an unknown job id or a worktree already removed by `cleanup`
 ("worktree removed; artifacts remain at `<job_dir>`"); exit `4` if the job hasn't finished yet;
 exit `2` if the job wasn't run with `--access worktree` in the first place.
@@ -226,8 +231,8 @@ exit `2` if the job wasn't run with `--access worktree` in the first place.
 ccodex diff <job_id>
 ```
 
-**`ccodex apply <job_id>`** — explicitly lands a **done** worktree job's snapshot commit onto the
-main repo: `git format-patch <base_commit>..HEAD --stdout` from the worktree, piped to
+**`ccodex apply <job_id>`** — explicitly lands a **done** worktree job's resolved cumulative
+range onto the main repo: `git format-patch <range_base>..<endpoint> --stdout` from the worktree, piped to
 `git am --3way` in the main repo. Requires the main repo's working tree to be clean first (exit
 `2`, naming the dirty files, otherwise); only `done` jobs may be applied (`failed`/`timed_out`/
 `cancelled` → exit `2`); an empty change set is a no-op (exit `0`, main repo untouched). On
@@ -236,6 +241,11 @@ conflict, or a patch `git am` accepts as a no-op without advancing `HEAD` (e.g. 
 runs `git am --abort` and force-restores the main repo to its pre-apply `HEAD`, then exits **`25`**
 naming the conflicting files and pointing at `ccodex diff <job_id>`. The main repo is never left
 mutated except by a genuinely successful apply.
+
+For a resumed implement series, apply only the newest accepted descendant. Its range is already
+cumulative (parent + child work); never apply an ancestor and then its cumulative descendant.
+The existing failed-apply restore path handles that misuse safely as exit `25`, but it is still
+an operator error.
 
 ```powershell
 ccodex diff <job_id>    # ALWAYS review before applying — never auto-apply
@@ -275,10 +285,13 @@ failure classification are shared with synchronous `resume`.
 # -> CONTINUED, from the SAME Codex thread — job_id_1's context carries forward
 ```
 
-**`resume` always creates a brand-new job** — a fresh job id, job directory, `prompt.md`
-(containing only the follow-up text, never the worker-prompt template), and index entry — and the
-parent job's directory/`status.json` are strictly read-only to it; nothing about the parent is
-ever mutated. The child's `status.json` carries `parent_job_id` (the parent's job id) for lineage,
+**`resume` always creates a brand-new job** — a fresh job id, job directory, `prompt.md`, and
+index entry — and the parent job's directory/`status.json` are strictly read-only to it; nothing
+about the parent is ever mutated. Non-worktree `prompt.md` is the follow-up text only. A worktree
+parent creates a new detached child worktree at the parent's recorded `snapshot_commit`; its
+prompt prepends a relocation envelope naming the new worktree and child artifact directory so
+paths remembered from earlier turns are not reused. The child's `status.json` carries
+`parent_job_id` (the parent's job id) for lineage,
 alongside the same `codex_thread_id`, `group`, and `label`. Group and label are inherited-only;
 `resume --group` and `resume --label` are rejected as usage errors (exit 2). Internally it invokes
 `codex exec resume <thread_id>` (the
@@ -293,11 +306,14 @@ identical to `run`.
 | --- | --- | --- |
 | Parent job id has no index entry, or its job directory is missing | `3` | same "not found" message `status`/`wait`/`read` use |
 | Parent job exists but is not yet terminal (`done`/`failed`/`timed_out`/`cancelled`) | `4` | names the job id and its current status |
-| Parent ran with `--access worktree` (Phase 4) | `2` | "ran in worktree access mode - resume is not supported for worktree jobs; start a fresh run" |
+| Worktree parent's directory was removed | `3` | "worktree removed"; the WIP no longer exists |
+| Worktree parent recorded `worktree_finalize_error` | `12` | names the finalization failure |
+| Worktree parent lacks `snapshot_commit` | `12` | cancelled or predates worktree-resume support; start fresh |
 | Parent's `codex_thread_id` is absent or was scrubbed | `2` | "has no codex thread id (absent or scrubbed by cleanup) - start a fresh run" |
+| Worktree snapshot is not descended from `series_base_commit ?? base_commit` | `12` | history is not linear from its base |
 
-Worktree-access rejection is checked before the thread-id check, so a worktree parent always gets
-the worktree message even if it happens to still carry a thread id. Beyond these, `resume` shares
+For worktree parents, the directory/finalization/snapshot checks precede the thread-id and ancestry
+checks, and every nonzero precondition returns before a child is reserved. Beyond these, `resume` shares
 `run`'s usual usage-error exit `2` (bad/ambiguous prompt source, etc.) and its `10`/`11`/`12`/`24`
 failure exits.
 
@@ -743,8 +759,9 @@ directory. `status.json` additionally records `backend` (`sync` for `run`, `nati
 `codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`,
 `last_heartbeat_at`, `parent_job_id` (the parent's job id for a `resume`d job, `null` otherwise),
 `group`, and `label` (nullable strings, always present and inherited by resumed children),
-and — for a `--access worktree` job — `main_repo`, `worktree_repo`, `base_commit`, and
-`worktree_committed` (all `null` for non-worktree jobs; see [Failure classes](#failure-classes),
+and — for a `--access worktree` job — `main_repo`, `worktree_repo`, `base_commit`,
+`worktree_committed`, `worktree_finalize_error`, and `snapshot_commit`; resumed worktree children
+also carry `series_base_commit` (all are `null` when not applicable; see [Failure classes](#failure-classes),
 [Hard timeout](#hard-timeout), [implement, diff, and apply](#implement-diff-and-apply),
 [resume](#resume), and
 [cancel, tail, debug, cleanup, and doctor](#cancel-tail-debug-cleanup-and-doctor) above). Every
@@ -755,7 +772,7 @@ never race each other; a lock that cannot be acquired within its timeout surface
 
 For `submit --resume`, `parent_job_id` and the inherited `codex_thread_id` are present from the
 initial `created` status. This status metadata is how the worker recognizes a resumed child and
-builds `codex exec … resume <thread-id> -`; no resume flag is added to the worker launch line.
+builds `codex exec … resume <thread-id> -`, targeting `worktree_repo` when present; no resume flag is added to the worker launch line.
 As with plain submit, only `--model`/`--effort` travel on that launch line and neither enters
 `status.json`.
 
@@ -853,13 +870,14 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   forms) from a diff selector, paths, intent, and focus
 - `lib/Worktree.ps1` — the `--access worktree` lifecycle: `New-CcodexJobWorktree` creates a
   detached git worktree at the main repo's current HEAD under
-  `%LOCALAPPDATA%\ccodex\worktrees\<job_id>\`; `Complete-CcodexJobWorktree` stages and commits
+  `%LOCALAPPDATA%\ccodex\worktrees\<job_id>\`; `New-CcodexResumeWorktree` creates a distinct
+  continuation worktree at an explicit parent snapshot; `Complete-CcodexJobWorktree` stages and commits
   whatever the worker left behind (as `ccodex-worker <ccodex@local>`) into one deterministic
   snapshot commit after the process exits; `Remove-CcodexJobWorktree` tears the worktree down
   (best-effort when the main repo itself is already gone)
 - `lib/Resume.ps1` — the `ccodex resume` lifecycle: `Get-CcodexResumeContext` resolves a parent
   job id to its Codex thread id and inherited mode/access/repo, enforcing the resume preconditions
-  (terminal parent, non-worktree access, a live `codex_thread_id`); `Build-CcodexResumeArgs`
+  and exposing frozen worktree context when applicable; `Build-CcodexResumeArgs`
   splices `exec resume <thread_id>` into the same argument shape `run` uses, so result validation
   and failure classification never fork
 - `templates/worker-prompt.md` — default worker-prompt contract template

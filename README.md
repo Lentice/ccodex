@@ -36,8 +36,8 @@ Two goals:
 - **Worktree-isolated implementation** (`--mode implement`): Codex's edits land in an isolated git
   worktree, never your working tree, until you explicitly review and `apply` them.
 - **Multi-turn follow-up** (`ccodex resume` / `ccodex submit --resume`): continue the same Codex
-  session synchronously or in the background for a clarifying question or pushback, instead of
-  starting from scratch.
+  session synchronously or in the background for a clarifying question or pushback, including
+  implement jobs in a new snapshot-seeded child worktree instead of starting from scratch.
 - **Debuggable by default**: every job leaves `prompt.md`, `status.json`, raw event/stderr logs,
   and the final result behind under a global state root.
 - **Job lifecycle management**: `cancel`, `tail`, `debug`, `cleanup` (with retention + stale
@@ -213,6 +213,18 @@ ccodex diff <job_id>     # ALWAYS review before applying — never auto-apply
 ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 ```
 
+If review finds something to change, resume the implement job instead of submitting the whole
+brief again. The child runs in a new worktree containing the parent's accumulated edits, and its
+`diff`/`apply` range is cumulative:
+
+```powershell
+"Address the review finding." | ccodex resume <implement_job_id>
+ccodex diff <child_job_id>     # parent + child changes
+ccodex apply <child_job_id>    # apply only the newest accepted descendant
+```
+
+Never apply an ancestor and then its cumulative descendant.
+
 **Continue a discussion** with the same Codex session instead of starting a fresh, memory-less
 `run` — e.g. when Codex's last answer was a clarifying question:
 
@@ -223,7 +235,8 @@ ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 
 Use `resume` when you want the result now; use `submit --resume` for an async follow-up, then
 `wait`/`read` the returned child id. Both forms share the same parent preconditions and inherit
-the parent's context; `--model` and `--effort` may still be chosen per follow-up.
+the parent's context; worktree parents create a distinct child worktree from their frozen
+snapshot. `--model` and `--effort` may still be chosen per follow-up.
 
 **Pick a model or effort per call** (optional; omit both to use Codex's configured defaults) —
 `run`, `submit`, `review`, and `resume` all take `--model <model>` and

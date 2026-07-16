@@ -183,6 +183,8 @@ Assert-Equal $afterDeadCorruptEvidence $beforeDeadCorruptEvidence 'dead worker w
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + exit_code.txt=0 + result.md -> reconcile to done"
 $dirDeadSuccess = New-TestJobDir 'orphan-dead-success'
 $deadSuccessStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+$deadSuccessStatus.snapshot_commit = 'snapshot-commit-123'
+$deadSuccessStatus.series_base_commit = 'series-base-456'
 Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadSuccess 'status.json') -Object $deadSuccessStatus
 Write-CcodexTextFile -Path (Join-Path $dirDeadSuccess 'exit_code.txt') -Content '0'
 Write-CcodexTextFile -Path (Join-Path $dirDeadSuccess 'result.md') -Content 'the result'
@@ -200,6 +202,8 @@ Assert-Equal $rewrittenSuccess.job_id 'job1' 'rewritten status.json preserves jo
 Assert-Equal $rewrittenSuccess.mode 'review' 'rewritten status.json preserves mode'
 Assert-Equal $rewrittenSuccess.access 'read-only' 'rewritten status.json preserves access'
 Assert-Equal $rewrittenSuccess.repo 'D:\Repo' 'rewritten status.json preserves repo'
+Assert-Equal $rewrittenSuccess.snapshot_commit 'snapshot-commit-123' 'rewritten status.json preserves snapshot_commit'
+Assert-Equal $rewrittenSuccess.series_base_commit 'series-base-456' 'rewritten status.json preserves series_base_commit'
 Assert-Equal $rewrittenSuccess.failure_reason $null 'rewritten status.json failure_reason stays null on a successful reconciliation'
 Assert-True ($rewrittenSuccess.PSObject.Properties.Name -contains 'failure') 'successful reconciliation includes the failure key'
 Assert-Equal $rewrittenSuccess.failure $null 'successful reconciliation keeps failure null'

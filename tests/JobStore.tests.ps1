@@ -73,13 +73,17 @@ Assert-True ([string]::IsNullOrEmpty($status.main_repo)) 'main_repo defaults to 
 Assert-True ([string]::IsNullOrEmpty($status.worktree_repo)) 'worktree_repo defaults to null when not specified'
 Assert-True ([string]::IsNullOrEmpty($status.base_commit)) 'base_commit defaults to null when not specified'
 Assert-True ($null -eq $status.worktree_committed) 'worktree_committed defaults to null when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.snapshot_commit)) 'snapshot_commit defaults to null when not specified'
+Assert-True ([string]::IsNullOrEmpty($status.series_base_commit)) 'series_base_commit defaults to null when not specified'
 
 Write-Host "New-CcodexStatusObject round-trips the worktree fields and keeps the existing key order intact"
-$statusWt = New-CcodexStatusObject -JobId 'jobwt' -Status 'done' -Mode 'implement' -Access 'worktree' -Repo 'D:\Repo' -CreatedAt '2026-07-07T00:00:00Z' -MainRepo 'D:\Repo' -WorktreeRepo 'D:\State\ccodex\worktrees\jobwt' -BaseCommit 'abc123def456' -WorktreeCommitted $true
+$statusWt = New-CcodexStatusObject -JobId 'jobwt' -Status 'done' -Mode 'implement' -Access 'worktree' -Repo 'D:\Repo' -CreatedAt '2026-07-07T00:00:00Z' -MainRepo 'D:\Repo' -WorktreeRepo 'D:\State\ccodex\worktrees\jobwt' -BaseCommit 'abc123def456' -WorktreeCommitted $true -SnapshotCommit 'def456abc789' -SeriesBaseCommit '000111222333'
 Assert-Equal $statusWt.main_repo 'D:\Repo' 'main_repo round-trips'
 Assert-Equal $statusWt.worktree_repo 'D:\State\ccodex\worktrees\jobwt' 'worktree_repo round-trips'
 Assert-Equal $statusWt.base_commit 'abc123def456' 'base_commit round-trips'
 Assert-Equal $statusWt.worktree_committed $true 'worktree_committed round-trips'
+Assert-Equal $statusWt.snapshot_commit 'def456abc789' 'snapshot_commit round-trips'
+Assert-Equal $statusWt.series_base_commit '000111222333' 'series_base_commit round-trips'
 # The new fields are appended, so the earlier backend-block ordering is unchanged.
 $statusWtKeys = [System.Collections.Generic.List[string]]::new()
 foreach ($key in $statusWt.Keys) { $statusWtKeys.Add($key) }
@@ -105,12 +109,14 @@ $debugObj = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job'
 Assert-Equal $debugObj.backend 'sync' 'debug object records sync backend'
 Assert-Equal $debugObj.codex_path 'C:\codex.cmd' 'debug object records resolved codex path'
 Assert-True ([string]::IsNullOrEmpty($debugObj.worktree_repo)) 'debug object worktree_repo defaults to null'
+Assert-True ([string]::IsNullOrEmpty($debugObj.snapshot_commit)) 'debug object snapshot_commit defaults to null'
 
 Write-Host "New-CcodexDebugObject records the worktree fields when supplied"
-$debugObjWt = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'implement' -Access 'worktree' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec') -MainRepo 'D:\Repo' -WorktreeRepo 'D:\State\ccodex\worktrees\job1' -BaseCommit 'abc123def456'
+$debugObjWt = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'implement' -Access 'worktree' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec') -MainRepo 'D:\Repo' -WorktreeRepo 'D:\State\ccodex\worktrees\job1' -BaseCommit 'abc123def456' -SnapshotCommit 'def456abc789'
 Assert-Equal $debugObjWt.main_repo 'D:\Repo' 'debug object records main_repo'
 Assert-Equal $debugObjWt.worktree_repo 'D:\State\ccodex\worktrees\job1' 'debug object records worktree_repo'
 Assert-Equal $debugObjWt.base_commit 'abc123def456' 'debug object records base_commit'
+Assert-Equal $debugObjWt.snapshot_commit 'def456abc789' 'debug object records snapshot_commit'
 
 Write-Host "New-CcodexDebugObject honors an explicit -Backend"
 $debugObj2 = New-CcodexDebugObject -JobId 'job1' -Repo 'D:\Repo' -JobDir 'D:\Job' -Mode 'review' -Access 'read-only' -CodexPath 'C:\codex.cmd' -CodexArgs @('exec') -Backend 'native'

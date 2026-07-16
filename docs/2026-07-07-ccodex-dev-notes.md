@@ -214,6 +214,28 @@ only a live call validates flag placement against the real CLI.
   destination's `*.md` before copying so a renamed/removed template never leaves a ghost
   command (also a Codex review finding).
 
+## Worktree continuation pitfalls (F3, 2026-07-16)
+
+- A resumed implement job always gets a **new** worktree seeded from the parent's recorded
+  `snapshot_commit`; never use the parent's live `HEAD` or mutate/reuse its worktree. The parent
+  directory is positive WIP evidence, while `snapshot_commit` is positive finalization evidence.
+- Keep `base_commit` as the child worktree's own seed. `series_base_commit` is a separate,
+  append-only cumulative range root inherited as `parent.series_base_commit ?? parent.base_commit`.
+  Conflating them makes grandchildren omit ancestor work from `diff`/`apply`.
+- `diff`/`apply` resolve both ends from status: base = `series_base_commit ?? base_commit`, endpoint
+  = `snapshot_commit ?? HEAD`. The endpoint fallback exists only for pre-F3 jobs; using live HEAD
+  for a newly finalized job reopens post-terminal mutation races.
+- Sync `resume` and async `submit --resume` must both go through
+  `Initialize-CcodexResumeJob`. Any failure after `git worktree add` must tear down the child
+  worktree and either leave terminal `status.json` + `worker-complete.json` evidence or roll back
+  the reservation/index completely.
+- Async resumed workers must build `Build-CcodexResumeArgs -RepoRoot` from `worktree_repo` when
+  present, not status `repo` (the main repo). The relocation envelope in child `prompt.md` is also
+  load-bearing: the resumed thread remembers obsolete parent paths.
+- A descendant patch is cumulative. Apply only the newest accepted descendant, never an ancestor
+  and then the descendant. Merge commits remain a documented limitation because `format-patch`
+  omits them; the ancestor check rejects clearly broken histories but does not linearize merges.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them

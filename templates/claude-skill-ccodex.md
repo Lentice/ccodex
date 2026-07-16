@@ -182,8 +182,9 @@ the same Codex session instead of starting over:
 `resume` always creates a brand-new job (new job id/directory, `parent_job_id` lineage in its
 `status.json`) and inherits the parent's mode/access/repo — it never mutates the parent. It exits
 `3` if `<job_id>` doesn't exist, `4` if the parent hasn't reached a terminal status yet, and `2`
-if the parent ran with `--access worktree` or its `codex_thread_id` is absent/scrubbed (message
-names which). If it fails with `failure_reason: thread_expired` (Codex itself rejected the
+if its `codex_thread_id` is absent/scrubbed. A worktree parent is continued in a distinct child
+worktree seeded from its frozen snapshot; removed worktree state exits `3`, while missing/invalid
+snapshot evidence exits `12`. If it fails with `failure_reason: thread_expired` (Codex itself rejected the
 session), the session is gone either way — start a fresh `run` instead of retrying `resume`.
 Chain follow-ups off the newest child's job id, not the original parent, if the exchange
 continues past one reply.
@@ -191,6 +192,9 @@ continues past one reply.
 Use `submit --resume` when the follow-up should run in the background, then collect the returned
 child with `wait`/`read`. It inherits mode/access/repo/group/label and shares synchronous
 `resume`'s parent checks and exit `2`/`3`/`4` semantics; never override those inherited fields.
+
+For a resumed implement series, `diff`/`apply` is cumulative from the original base. Apply only
+the newest accepted descendant; never apply an ancestor and then its cumulative descendant.
 
 ## Exit codes and failure reactions
 

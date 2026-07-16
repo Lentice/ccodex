@@ -312,9 +312,9 @@ Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeRunning 'non-terminal parent c
 $worktreeParent = New-CcodexSubmitResumeParent -Access 'worktree'
 $beforeWorktree = Get-CcodexSubmitJobDirCount
 $worktreeAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $worktreeParent.JobId }
-Assert-Equal $worktreeAsyncResume.WrapperExitCode 2 'submit --resume worktree parent exits 2'
-Assert-True ($worktreeAsyncResume.Message -like '*resume is not supported for worktree jobs*') 'worktree rejection uses the resume precondition message'
-Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeWorktree 'worktree parent creates no child job dir'
+Assert-Equal $worktreeAsyncResume.WrapperExitCode 3 'submit --resume worktree parent whose recorded worktree is absent exits 3'
+Assert-True ($worktreeAsyncResume.Message -like '*worktree removed*') 'worktree resume reports lost parent WIP explicitly'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeWorktree 'removed-worktree parent creates no child job dir'
 
 $scrubbedParent = New-CcodexSubmitResumeParent -ThreadId $null
 $beforeScrubbed = Get-CcodexSubmitJobDirCount

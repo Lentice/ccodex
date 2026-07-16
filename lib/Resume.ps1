@@ -1,18 +1,15 @@
 # lib/Resume.ps1
 #
-# Phase 5 (multi-turn advisor): parent job resolution/preconditions for `ccodex resume`,
-# plus the `codex exec resume` argument shape. Resume always creates a NEW job; this module
-# never mutates the parent job's directory or status.json — it only reads them.
+# Parent job resolution/preconditions for `ccodex resume`, plus the `codex exec resume`
+# argument shape. Resume always creates a NEW job; this module never mutates the parent job's
+# directory or status.json. Worktree parents expose their frozen snapshot context so the caller
+# can validate and seed a distinct continuation worktree.
 
 function Get-CcodexResumeContext {
     # Resolves a parent job id to the context a resume needs: its Codex thread id and its
-    # inherited mode/access/repo. Three distinct throw shapes map to the caller's usage-error
-    # exit codes (documented in the Phase 5 plan): index lookup failure -> 3 (not found,
-    # message owned by Get-CcodexJobRecord), non-terminal parent -> 4 (still running), and two
-    # "resume not possible for this parent" cases -> 2 (worktree access, or a thread id that is
-    # absent/scrubbed). Worktree access is checked BEFORE the thread-id check: a worktree
-    # parent is categorically unresumable regardless of whether it happens to still carry a
-    # thread id, so that message must win.
+    # inherited mode/access/repo. Worktree parents additionally carry the main repo, parent
+    # worktree, own base, frozen snapshot, and inherited series base. Index lookup failure maps
+    # to 3, a non-terminal parent to 4, and an absent/scrubbed thread id to 2 at the caller.
     param(
         [Parameter(Mandatory)][string]$ParentJobId,
         [string]$StateRoot = $env:LOCALAPPDATA
@@ -33,12 +30,12 @@ function Get-CcodexResumeContext {
         throw "ccodex: job '$ParentJobId' is still $($status.status) - resume requires the parent job to be finished (done, failed, timed_out, or cancelled)."
     }
 
-    if ($status.access -eq 'worktree') {
-        throw "ccodex: job '$ParentJobId' ran in worktree access mode - resume is not supported for worktree jobs; start a fresh run."
-    }
-
+    $isWorktree = $status.access -eq 'worktree'
     $threadId = [string]$status.codex_thread_id
-    if ([string]::IsNullOrEmpty($threadId)) {
+    # Worktree continuation has a stricter ordered precondition chain in the shared
+    # initializer (worktree existence/finalization/snapshot before thread presence), so carry
+    # an empty thread through for that branch. Non-worktree resume keeps the established check.
+    if (-not $isWorktree -and [string]::IsNullOrEmpty($threadId)) {
         throw "ccodex: job '$ParentJobId' has no codex thread id (absent or scrubbed by cleanup) - start a fresh run."
     }
 
@@ -50,6 +47,12 @@ function Get-CcodexResumeContext {
         Repo        = [string]$status.repo
         Group       = $status.group
         Label       = $status.label
+        MainRepo                 = if ($isWorktree) { [string]$status.main_repo } else { $null }
+        ParentWorktreeRepo       = if ($isWorktree) { [string]$status.worktree_repo } else { $null }
+        ParentBaseCommit         = if ($isWorktree) { [string]$status.base_commit } else { $null }
+        ParentSnapshotCommit     = if ($isWorktree) { [string]$status.snapshot_commit } else { $null }
+        ParentSeriesBaseCommit   = if ($isWorktree) { [string]$status.series_base_commit } else { $null }
+        ParentWorktreeFinalizeError = if ($isWorktree) { [string]$status.worktree_finalize_error } else { $null }
     }
 }
 

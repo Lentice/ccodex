@@ -90,6 +90,7 @@ try {
 
     $env:CCODEX_FAKE_EXIT_CODE = '0'
     $env:CCODEX_FAKE_RESULT = 'implement e2e: wrote the output file'
+    $env:CCODEX_FAKE_THREAD_ID = 'thread-implement-e2e'
     $env:CCODEX_FAKE_WRITE_FILE = 'e2e-output.txt'
     $env:CCODEX_FAKE_WRITE_TEXT = 'hello from the e2e worker'
 
@@ -109,8 +110,6 @@ try {
     Assert-True ($waitA.Stdout -like '*wrote the output file*') 'wait prints the fixture result content'
     Assert-True (-not ($waitA.Stdout -like '*fake-codex ran*')) 'wait stdout never carries raw Codex JSONL'
 
-    Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
-
     $statusA = Get-Content -LiteralPath (Join-Path $jobDirA 'status.json') -Raw | ConvertFrom-Json
     Assert-Equal $statusA.status 'done' 'setup: job reached terminal done'
     Assert-Equal $statusA.access 'worktree' 'setup: implement job ran with --access worktree'
@@ -119,20 +118,45 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $worktreePathA 'e2e-output.txt') -PathType Leaf) 'setup: the fixture wrote the file INTO the worktree via its -C parsing'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $mainRepoA 'e2e-output.txt'))) 'setup: the main repo has NOT been touched by the worker (worktree isolation holds)'
 
-    $diffA = Invoke-CcodexShim -Arguments @('diff', $jobIdA, '--state-root', $stateRoot)
-    Assert-Equal $diffA.ExitCode 0 'diff on the done implement job exits 0'
+    $env:CCODEX_FAKE_RESULT = 'implement e2e: follow-up done'
+    $env:CCODEX_FAKE_WRITE_FILE = 'e2e-followup.txt'
+    $env:CCODEX_FAKE_WRITE_TEXT = 'hello from the resumed e2e worker'
+    $submitResumeA = Invoke-CcodexShim -Arguments @('submit', '--resume', $jobIdA, '--state-root', $stateRoot, '--detach-mechanism', 'startprocess') -StdinText 'Address the follow-up review finding.'
+    Assert-Equal $submitResumeA.ExitCode 0 'async submit --resume of the implement parent exits 0'
+    Assert-Equal $submitResumeA.Lines.Count 2 'async worktree resume stdout is exactly child id plus child dir'
+    $childJobIdA = $submitResumeA.Lines[0]
+    $childJobDirA = $submitResumeA.Lines[1]
+    $waitResumeA = Invoke-CcodexShim -Arguments @('wait', $childJobIdA, '--state-root', $stateRoot, '--wait-timeout-sec', '30')
+    Assert-Equal $waitResumeA.ExitCode 0 'async worktree resume reaches done'
+    $childStatusA = Get-Content -LiteralPath (Join-Path $childJobDirA 'status.json') -Raw | ConvertFrom-Json
+    $childWorktreePathA = [string]$childStatusA.worktree_repo
+    Assert-Equal $childStatusA.parent_job_id $jobIdA 'async child records parent_job_id'
+    Assert-Equal $childStatusA.base_commit $statusA.snapshot_commit 'async child is seeded from the parent snapshot_commit'
+    Assert-Equal $childStatusA.series_base_commit $statusA.base_commit 'async child records the original cumulative series base'
+    Assert-True ($childWorktreePathA -ne $worktreePathA) 'async child uses a distinct worktree path'
+    Assert-True (Test-Path -LiteralPath (Join-Path $childWorktreePathA 'e2e-output.txt')) 'async child worktree contains parent output'
+    Assert-True (Test-Path -LiteralPath (Join-Path $childWorktreePathA 'e2e-followup.txt')) 'async resumed worker targets and edits the child worktree'
+    $childPromptA = [System.IO.File]::ReadAllText((Join-Path $childJobDirA 'prompt.md'))
+    Assert-True ($childPromptA -like "*NEW isolated git worktree: $childWorktreePathA*") 'async child prompt contains the relocation envelope'
+
+    Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+
+    $diffA = Invoke-CcodexShim -Arguments @('diff', $childJobIdA, '--state-root', $stateRoot)
+    Assert-Equal $diffA.ExitCode 0 'diff on the done resumed implement child exits 0'
     Assert-True ($diffA.Stdout -like '*e2e-output.txt*') 'diff stdout mentions the changed file'
     Assert-True ($diffA.Stdout -like '*+hello from the e2e worker*') 'diff stdout includes the full patch content'
+    Assert-True ($diffA.Stdout -like '*e2e-followup.txt*') 'child diff includes the resumed follow-up change'
     Assert-True (-not ($diffA.Stdout -like '*fake-codex ran*')) 'diff stdout never carries raw Codex JSONL'
     Assert-True (-not ($diffA.Stdout -like '*"type":"event"*')) 'diff stdout never carries a raw Codex JSONL event object'
 
     $preApplyHeadA = (& git -C $mainRepoA rev-parse HEAD).Trim()
-    $applyA = Invoke-CcodexShim -Arguments @('apply', $jobIdA, '--state-root', $stateRoot)
-    Assert-Equal $applyA.ExitCode 0 'apply on the done implement job exits 0'
+    $applyA = Invoke-CcodexShim -Arguments @('apply', $childJobIdA, '--state-root', $stateRoot)
+    Assert-Equal $applyA.ExitCode 0 'apply on the done resumed child exits 0'
     Assert-True (-not ($applyA.Stdout -like '*fake-codex ran*')) 'apply stdout never carries raw Codex JSONL'
     Assert-True (-not ($applyA.Stdout -like '*"type":"event"*')) 'apply stdout never carries a raw Codex JSONL event object'
 
     Assert-True (Test-Path -LiteralPath (Join-Path $mainRepoA 'e2e-output.txt') -PathType Leaf) 'apply landed the worker file in the MAIN repo'
+    Assert-True (Test-Path -LiteralPath (Join-Path $mainRepoA 'e2e-followup.txt') -PathType Leaf) 'cumulative child apply landed the follow-up file in the MAIN repo'
     $appliedContentA = Get-Content -LiteralPath (Join-Path $mainRepoA 'e2e-output.txt') -Raw
     Assert-Equal $appliedContentA 'hello from the e2e worker' 'main repo file content is exactly what the worker wrote'
     $postApplyHeadA = (& git -C $mainRepoA rev-parse HEAD).Trim()
@@ -142,16 +166,18 @@ try {
 
     $cleanupA = Invoke-CcodexShim -Arguments @('cleanup', '--older-than', '0d', '--state-root', $stateRoot, '--repo', $mainRepoA)
     Assert-Equal $cleanupA.ExitCode 0 'cleanup --older-than 0d exits 0'
-    Assert-True ($cleanupA.Stdout -match 'deleted=1') 'cleanup summary reports the one done job deleted'
-    Assert-True ($cleanupA.Stdout -match 'worktrees_swept=1') 'cleanup summary reports the one worktree swept'
+    Assert-True ($cleanupA.Stdout -match 'deleted=2') 'cleanup summary reports the parent and child jobs deleted'
+    Assert-True ($cleanupA.Stdout -match 'worktrees_swept=2') 'cleanup summary reports both worktrees swept'
     Assert-True (-not (Test-Path -LiteralPath $jobDirA)) 'cleanup removed the job dir'
+    Assert-True (-not (Test-Path -LiteralPath $childJobDirA)) 'cleanup removed the child job dir'
     Assert-True (-not (Test-Path -LiteralPath $worktreePathA)) 'cleanup removed the worktree directory'
+    Assert-True (-not (Test-Path -LiteralPath $childWorktreePathA)) 'cleanup removed the child worktree directory'
     $wtListAfterA = @(& git -C $mainRepoA worktree list)
     $wtStillListedA = @($wtListAfterA | Where-Object { $_ -like "*$worktreePathA*" })
     Assert-Equal $wtStillListedA.Count 0 'git worktree list in the main repo no longer references the removed worktree'
     Assert-True (Test-Path -LiteralPath (Join-Path $mainRepoA 'e2e-output.txt') -PathType Leaf) 'cleanup did not touch the already-applied file in the main repo'
 
-    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID -ErrorAction SilentlyContinue
 
     # ============================================================================
     # Chain 2: conflict path, once end-to-end -- apply -> exit 25, main repo untouched
@@ -209,7 +235,7 @@ try {
 } finally {
     $env:PATH = $savedPath
     $env:APPDATA = $savedAppData
-    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_THREAD_ID, Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force -LiteralPath $tempRoot -ErrorAction SilentlyContinue
 }
 

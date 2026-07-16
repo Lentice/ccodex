@@ -45,6 +45,37 @@ function New-CcodexJobWorktree {
     }
 }
 
+function New-CcodexResumeWorktree {
+    # Creates a NEW detached child worktree at the parent's recorded finalized snapshot.
+    # The explicit seed is intentionally not re-read from the parent's live worktree HEAD:
+    # parent worktrees are frozen inputs to continuation and are never reused or mutated.
+    param(
+        [Parameter(Mandatory)][string]$MainRepo,
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$SeedCommit,
+        [Parameter(Mandatory)][string]$SeriesBaseCommit,
+        [string]$StateRoot = $env:LOCALAPPDATA
+    )
+
+    $worktreesRoot = Join-Path (Get-CcodexLocalAppDataRoot -Root $StateRoot) 'worktrees'
+    $worktreePath = Join-Path $worktreesRoot $JobId
+    $parentDir = Split-Path -Parent $worktreePath
+    if (-not (Test-Path -LiteralPath $parentDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    }
+
+    $addOutput = & git -C $MainRepo worktree add --detach $worktreePath $SeedCommit 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "ccodex: git worktree add failed: $($addOutput -join "`n")"
+    }
+
+    return [pscustomobject]@{
+        WorktreePath     = $worktreePath
+        BaseCommit       = $SeedCommit
+        SeriesBaseCommit = $SeriesBaseCommit
+    }
+}
+
 function Complete-CcodexJobWorktree {
     # Snapshot finalization: stage everything the worker left behind and, if there is
     # anything to stage, commit it under a fixed synthetic identity so this works even on

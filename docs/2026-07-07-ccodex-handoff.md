@@ -35,7 +35,8 @@ Capability summary (full per-command reference: `docs/2026-07-08-ccodex-referenc
 - **Worktree isolation:** `run --mode implement` in a detached worktree, `diff`, `apply`
   (conflict → exit 25, main repo untouched).
 - **Multi-turn:** `resume <job_id>` (sync) and `submit --resume <job_id>` (async follow-up),
-  always a brand-new child job with `parent_job_id` lineage; `thread_expired` handling.
+  always a brand-new child job with `parent_job_id` lineage; implement parents continue in a
+  distinct snapshot-seeded worktree with cumulative diff/apply; `thread_expired` handling.
 - **Machine-readable output:** stable `schema_version: 1` lifecycle envelope via `--json` on
   `status`/`read`/`wait`/`doctor`; `wait --all` batch waiting with `--group`/`--label` job
   metadata for fan-out/gather; structured `status.json.failure` signal (`matched_signal`,
@@ -99,9 +100,9 @@ Operational facts:
 
 See `docs/BACKLOG.md` — the single living list. As of 2026-07-16: five curated items open
 (provenance/idempotency, installer hardening, `apply --check`, `review --include-untracked`,
-review profiles + `capabilities --json`) and five delegation-run items (F2 cold-start timeout
-flake first, then F1 `help`, F3 worktree-job continuation, F5 quota retry hints, F4
-`apply --allow-untracked`). The user picks; the agent specs and implements.
+review profiles + `capabilities --json`) and three delegation-run items (F1 `help`, F5 quota
+retry hints, F4 `apply --allow-untracked`). F2 and F3 are complete. The user picks; the agent
+specs and implements.
 
 Standing accepted-minor (dev-notes): completion-evidence files not backend-scoped on the
 currently unreachable foreign-takeover path — revisit only if job dirs ever become shared

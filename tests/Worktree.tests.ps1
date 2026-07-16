@@ -48,6 +48,21 @@ Assert-True ($LASTEXITCODE -ne 0) 'worktree is detached (symbolic-ref on HEAD fa
 $mainHeadAfterCreate = (& git -C $mainRepo rev-parse HEAD).Trim()
 Assert-Equal $mainHeadAfterCreate $expectedHead 'creating the worktree does not move the main repo HEAD'
 
+# --- New-CcodexResumeWorktree: create at an explicit seed --------------------
+
+Write-Host "New-CcodexResumeWorktree creates a detached child at the recorded parent snapshot"
+[System.IO.File]::WriteAllText((Join-Path $created.WorktreePath 'parent-change.txt'), "parent`n", $utf8NoBom)
+$parentSnapshot = Complete-CcodexJobWorktree -WorktreePath $created.WorktreePath -JobId 'job-create-1'
+$resumeCreated = New-CcodexResumeWorktree -MainRepo $mainRepo -JobId 'job-resume-1' `
+    -SeedCommit $parentSnapshot.HeadCommit -SeriesBaseCommit $expectedHead -StateRoot $stateRoot
+Assert-Equal $resumeCreated.BaseCommit $parentSnapshot.HeadCommit 'resume BaseCommit echoes the explicit seed commit'
+Assert-Equal $resumeCreated.SeriesBaseCommit $expectedHead 'resume SeriesBaseCommit echoes the cumulative series root'
+Assert-True ($resumeCreated.WorktreePath -ne $created.WorktreePath) 'resume creates a distinct child worktree path'
+Assert-Equal ((& git -C $resumeCreated.WorktreePath rev-parse HEAD).Trim()) $parentSnapshot.HeadCommit 'resume worktree HEAD equals the recorded parent snapshot'
+$resumeBranch = (& git -C $resumeCreated.WorktreePath symbolic-ref -q HEAD 2>&1)
+Assert-True ($LASTEXITCODE -ne 0) 'resume worktree is detached'
+Assert-True (Test-Path -LiteralPath (Join-Path $resumeCreated.WorktreePath 'parent-change.txt')) 'resume worktree contains the parent snapshot content'
+
 # --- Complete-CcodexJobWorktree: with changes --------------------------------
 
 Write-Host "Complete-CcodexJobWorktree commits staged changes and reports Committed=true"
