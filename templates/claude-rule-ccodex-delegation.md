@@ -146,9 +146,10 @@ keeping the process/`command_exit_code` authoritative.
 | exit `20` | The job is still running; re-run `wait` rather than treating it as failed. |
 | exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |
 | exit `22` | The job was cancelled (`ccodex cancel`); treat it as intentionally stopped, not a failure. |
+| exit `23` | The worker failed to launch, exited before stamping startup, or exceeded the configured startup window; inspect the message and job directory to distinguish the cause before retrying. |
 | exit `24` | The job hit its timeout; note it and continue — don't just retry unchanged. |
 | exit `25` | `ccodex apply` conflicted or failed; the main repo was left untouched — review `ccodex diff <job_id>`, resolve by hand, report to the user; never retry `apply` unchanged. |
-| exit `2`/`3`/`12`/`23` | Wrapper/usage/internal error; note it and continue without the review. |
+| exit `2`/`3`/`12` | Wrapper/usage/internal error; note it and continue without the review. |
 
 In every failure case, the task itself is not blocked — a skipped or failed review is recorded as
 a note in your final report, not a reason to stop.

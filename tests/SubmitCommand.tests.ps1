@@ -143,6 +143,34 @@ Assert-True (-not [string]::IsNullOrEmpty($resultD.Message)) 'a diagnostic messa
 Assert-True (-not [string]::IsNullOrEmpty($resultD.JobDir)) 'job dir remains available for diagnosis'
 $statusD = Get-Content -LiteralPath (Join-Path $resultD.JobDir 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $statusD.status 'created' 'status.json is left untouched (still created) after a sentinel timeout'
+Assert-True ($resultD.Message -like "*did not start within 0s*") 'explicit zero timeout reports the timeout path, not a generic exit-23 failure'
+
+Write-Host "Invoke-CcodexSubmit: CCODEX_STARTUP_TIMEOUT_SEC=0 is honored when no explicit timeout is bound"
+$savedStartupTimeout = $env:CCODEX_STARTUP_TIMEOUT_SEC
+try {
+    $env:CCODEX_STARTUP_TIMEOUT_SEC = '0'
+    $envTimeoutResult = Invoke-CcodexSubmitForTest -Overrides @{ WorkerScriptPath = $stubWorkerPs }
+    Assert-Equal $envTimeoutResult.WrapperExitCode 23 'environment startup timeout of zero produces wrapper exit 23'
+    Assert-True ($envTimeoutResult.Message -like "*did not start within 0s*") 'environment override reaches the timeout sentinel with the configured zero-second value'
+
+    $env:CCODEX_STARTUP_TIMEOUT_SEC = 'abc'
+    $explicitTimeoutResult = Invoke-CcodexSubmitForTest -Overrides @{ StartupTimeoutSec = 0; WorkerScriptPath = $stubWorkerPs }
+    Assert-Equal $explicitTimeoutResult.WrapperExitCode 23 'explicit startup timeout wins over an invalid environment override'
+    Assert-True ($explicitTimeoutResult.Message -like "*did not start within 0s*") 'explicit timeout winner takes the timeout path and reports its bound value'
+
+    $beforeInvalidEnv = Get-CcodexSubmitJobDirCount
+    $invalidEnvResult = Invoke-CcodexSubmitForTest -Overrides @{ WorkerScriptPath = $stubWorkerPs }
+    Assert-Equal $invalidEnvResult.WrapperExitCode 2 'invalid CCODEX_STARTUP_TIMEOUT_SEC exits 2'
+    Assert-True ($invalidEnvResult.Message -like '*CCODEX_STARTUP_TIMEOUT_SEC*abc*') 'invalid environment error names the variable and bad value'
+    Assert-True ([string]::IsNullOrEmpty($invalidEnvResult.JobDir)) 'invalid environment override is rejected before a job directory is reserved'
+    Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeInvalidEnv 'invalid environment override does not change the job directory count'
+} finally {
+    if ($null -eq $savedStartupTimeout) {
+        Remove-Item Env:\CCODEX_STARTUP_TIMEOUT_SEC -ErrorAction SilentlyContinue
+    } else {
+        $env:CCODEX_STARTUP_TIMEOUT_SEC = $savedStartupTimeout
+    }
+}
 
 # --- (e) shell-level: pwsh -File ccodex.ps1 submit ... --state-root ... --detach-mechanism startprocess ---
 

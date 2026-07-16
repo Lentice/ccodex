@@ -44,6 +44,14 @@ stdin stream, `--prompt-file <path>`, or a positional task argument. `run` sends
 non-interactively and blocks until it finishes; `submit` prepares the same job and hands it to a
 detached background worker, returning immediately (see [status, wait, and read](#status-wait-and-read)).
 
+Before reporting a successful hand-off, `submit` waits for the detached worker to move
+`status.json` off `created`. This startup sentinel defaults to a generous 120-second anti-hang
+window so a healthy worker can cold-start on a saturated host. Set
+`CCODEX_STARTUP_TIMEOUT_SEC` to a non-negative integer to override the window for the current
+process; an explicitly bound `Invoke-CcodexSubmit -StartupTimeoutSec` value takes precedence.
+A non-empty environment value that is not a non-negative integer is a usage error (exit `2`)
+before any job directory is reserved.
+
 `ccodex submit --resume <parent_job_id>` is the asynchronous follow-up form. Its task-text
 sources are identical to plain `submit` (stdin, `--prompt-file`, or positional task text), while
 the value following `--resume` names the finished parent job. It synchronously validates the
@@ -652,7 +660,7 @@ Callers can rely on these wrapper exit codes:
 | `20` | `wait` timed out (`--wait-timeout-sec`) before the job reached a terminal status; the job's lifecycle is unaffected — re-run `wait` to keep waiting. |
 | `21` | `cancel` or `apply` could not acquire the per-job lock within its timeout. Retry the command. (An internal status-write lock failure surfaces as `12`, not `21`.) |
 | `22` | `wait` returned because the job's terminal status is `cancelled` (someone ran `ccodex cancel` on it). |
-| `23` | The background worker failed to launch, or never stamped a startup sentinel, during `submit`. |
+| `23` | The background worker failed to launch, exited before stamping startup (detected immediately after a 500 ms status re-check), or did not stamp startup within the configured window during `submit`. The default window is 120 seconds and `CCODEX_STARTUP_TIMEOUT_SEC` can override it. |
 | `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
 | `25` | `ccodex apply <job_id>` failed or conflicted; `git am --abort` ran and the main repo was force-restored to its pre-apply `HEAD` (never left mutated). Review `ccodex diff <job_id>`, resolve by hand, and re-run `apply`. |
 
@@ -825,7 +833,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   Codex flow as `run` but reads the prepared job directory instead of taking task text on the
   command line, and re-stamps `last_heartbeat_at` on a fixed cadence while Codex runs
 - `lib/Detach.ps1` — detached-process launch (CIM `Win32_Process.Create` in production,
-  `Start-Process` for tests) plus a startup sentinel so `submit` can report exit `23` if the
+  `Start-Process` for tests) plus a PID-aware startup sentinel so `submit` can report exit `23`
+  quickly if the worker exits before stamping startup, or after the configured window if a live
   worker never starts; also process-tree termination (`Stop-CcodexProcessTree`) used by `cancel`
 - `lib/Config.ps1` — `.ccodex/ccodex.json` `delegation` section reader, with per-key defaults and
   enum/type validation

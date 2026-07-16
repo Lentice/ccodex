@@ -39,6 +39,12 @@ sleep). All were loosened: assert the *path taken* via messages/exit codes where
 fixture sleeps outlive worst-case spawn chains, and keep wall-clock bounds only as generous
 anti-hang guards — never as tight performance assertions.
 
+The F2 submit flake had the same root cause at a larger scale: the detached-worker startup
+sentinel used a fixed 20-second window, while a saturated 20-core host measured healthy worker
+cold-starts at 24.8–114.4 seconds. The sentinel now defaults to 120 seconds and accepts the
+`CCODEX_STARTUP_TIMEOUT_SEC` test/CI override; because the launched PID is polled too, a worker
+that actually exits before stamping startup still fails quickly after one 500 ms status re-read.
+
 ### Test harness
 
 - `tests/TestHelpers.ps1` — dot-source it; provides `Assert-Equal`, `Assert-True`,

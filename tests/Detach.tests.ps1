@@ -122,6 +122,17 @@ Write-Host "Wait-CcodexWorkerLaunch: throws when the job is left in 'created' wi
 $jobB = New-CcodexTestJob
 Assert-Throws { Wait-CcodexWorkerLaunch -JobDir $jobB.JobDir -TimeoutSec 1 } "sentinel throws after timeout with no worker ever launched"
 
+Write-Host "Wait-CcodexWorkerLaunch: an already-exited worker fails fast with a distinct message"
+$exitedProcess = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList '-NoLogo -NoProfile -Command "exit 0"' -WindowStyle Hidden -PassThru -Wait
+$jobDead = New-CcodexTestJob
+$deadWorkerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+Assert-Throws {
+    Wait-CcodexWorkerLaunch -JobDir $jobDead.JobDir -ProcessId $exitedProcess.Id -TimeoutSec 30
+} "sentinel throws when the launched worker has already exited"
+$deadWorkerStopwatch.Stop()
+Assert-True ($script:CcodexLastError -like '*worker process exited before stamping startup*') 'dead-worker sentinel reports the distinct process-exited message'
+Assert-True ($deadWorkerStopwatch.Elapsed.TotalSeconds -lt 10) 'dead-worker sentinel returns well before the 30-second timeout (10s anti-hang guard)'
+
 # --- (c) cim mechanism smoke, env-independent ---
 
 Write-Host "Start-CcodexDetachedWorker (cim): production mechanism launches a worker using only flags"

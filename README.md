@@ -170,6 +170,10 @@ ccodex wait --all --group ci --json  # gather a snapshot of matching non-termina
 ccodex read <job_id> --json    # result state/content without scraping human text
 ```
 
+`submit` allows up to 120 seconds for a detached worker to stamp that it has started. On heavily
+loaded hosts, set `CCODEX_STARTUP_TIMEOUT_SEC` to a larger non-negative number of seconds (or to
+`0` for an immediate sentinel timeout); invalid values fail with exit `2` before a job is created.
+
 An existing finished session can also continue asynchronously. The child inherits the parent's
 mode, access, repo, group, and label, and `submit` returns its new child id immediately:
 

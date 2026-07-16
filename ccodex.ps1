@@ -822,7 +822,7 @@ function Invoke-CcodexSubmit {
         [string]$CodexPath,
         [string]$LocalAppDataRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
-        [int]$StartupTimeoutSec = 20,
+        [int]$StartupTimeoutSec = 120,
         [int]$HardTimeoutSec = 0,
         # Test-support only: the production path always launches the currently-running
         # ccodex.ps1 (via $PSCommandPath, which resolves to this file regardless of the
@@ -840,6 +840,17 @@ function Invoke-CcodexSubmit {
         [string]$Label = $null,
         [string]$ResumeParentJobId = $null
     )
+
+    if (-not $PSBoundParameters.ContainsKey('StartupTimeoutSec') -and
+        -not [string]::IsNullOrEmpty($env:CCODEX_STARTUP_TIMEOUT_SEC)) {
+        $startupTimeoutFromEnv = 0
+        if (-not [int]::TryParse($env:CCODEX_STARTUP_TIMEOUT_SEC, [ref]$startupTimeoutFromEnv) -or
+            $startupTimeoutFromEnv -lt 0) {
+            $message = "ccodex: CCODEX_STARTUP_TIMEOUT_SEC must be a non-negative whole number of seconds; got '$($env:CCODEX_STARTUP_TIMEOUT_SEC)'."
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $null; JobId = $null; Message = $message }
+        }
+        $StartupTimeoutSec = $startupTimeoutFromEnv
+    }
 
     $resumeContext = $null
     if ($ResumeParentJobId) {
@@ -967,10 +978,10 @@ function Invoke-CcodexSubmit {
     $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }
 
     try {
-        Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
+        $workerProcessId = Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
             -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism `
-            -Model $Model -Effort $Effort | Out-Null
-        Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec | Out-Null
+            -Model $Model -Effort $Effort
+        Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec -ProcessId $workerProcessId | Out-Null
     } catch {
         # Do NOT rewrite status.json here: a slow-but-alive worker may still be starting,
         # and the job must stay diagnosable in its current ('created') state.

@@ -139,7 +139,7 @@ conversation.
    | `20` | `wait` timed out; the job is still running — re-run `wait` to keep waiting. |
    | `21` | The per-job lock could not be acquired within its timeout — retry the command. |
    | `22` | `wait` returned because the job was cancelled (`ccodex cancel`). |
-   | `23` | The background worker failed to start. |
+   | `23` | The background worker failed to launch, exited before stamping startup, or did not stamp startup within the configured window. |
    | `24` | The job hit `--hard-timeout-sec` and was killed. |
    | `25` | `ccodex apply` conflicted or failed; the main repo was left untouched — review `ccodex diff <job_id>` and resolve by hand. |
 
@@ -158,7 +158,7 @@ conversation.
    | `10` + `failure_reason` absent | Read `error` in `status.json` / stderr; use judgment. |
    | `24` (`timed_out`) | Raise `--hard-timeout-sec` or split the task into smaller pieces; don't just retry unchanged. |
    | `20` | The job is still running — re-run `wait` rather than treating it as failed. |
-   | `23` | Backend/environment issue — inspect the job directory (`status.json`, `stderr.log`) before retrying. |
+   | `23` | The worker failed to launch, exited before stamping startup, or exceeded the configured startup window. Inspect the message and job directory (`status.json`, `stderr.log`) to distinguish the cause before retrying. |
 
    When the failure looks environment-shaped rather than task-specific (auth, quota, sandbox
    denial, or the `CreateProcessWithLogonW failed: 1385` signature), run `ccodex doctor` FIRST

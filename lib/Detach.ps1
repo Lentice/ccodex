@@ -16,8 +16,8 @@
 #
 # Wait-CcodexWorkerLaunch is the startup sentinel: it proves the launched worker is actually
 # alive and has taken ownership of the job (moved status.json off 'created') before the caller
-# treats the launch as successful. Callers map both launch failures (Start-CcodexDetachedWorker
-# throwing) and sentinel timeouts (Wait-CcodexWorkerLaunch throwing) to wrapper exit code 23.
+# treats the launch as successful. Callers map launch failures and startup-sentinel failures
+# (the process exits before stamping, or the timeout expires) to wrapper exit code 23.
 
 function ConvertTo-CcodexQuotedLaunchArg {
     # Wrap a launch-line argument in double quotes, doubling any TRAILING run of backslashes so
@@ -128,7 +128,8 @@ function Start-CcodexDetachedWorker {
 function Wait-CcodexWorkerLaunch {
     param(
         [Parameter(Mandatory)][string]$JobDir,
-        [int]$TimeoutSec = 20
+        [int]$TimeoutSec = 120,
+        [int]$ProcessId
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -139,6 +140,21 @@ function Wait-CcodexWorkerLaunch {
         }
         if ((Get-Date) -ge $deadline) {
             throw "ccodex: worker did not start within ${TimeoutSec}s; job left in 'created' state for diagnosis."
+        }
+        if ($PSBoundParameters.ContainsKey('ProcessId')) {
+            $workerProcess = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+            if (-not $workerProcess) {
+                # Close the narrow race where the worker stamped status.json and then exited
+                # between the first status read and this liveness check.
+                Start-Sleep -Milliseconds 500
+                $statusAfterExit = Read-CcodexStatusFile -JobDir $JobDir
+                if ($statusAfterExit -and $statusAfterExit.status -ne 'created') {
+                    return $statusAfterExit
+                }
+                if ($statusAfterExit -and $statusAfterExit.status -eq 'created') {
+                    throw "ccodex: worker process exited before stamping startup; job left in 'created' state for diagnosis."
+                }
+            }
         }
         Start-Sleep -Milliseconds 250
     }

@@ -209,7 +209,8 @@ Trust the exit code plus `status.json.failure_reason`; never parse stderr prose.
 | `12` | Wrapper internal error. Note it; continue without the review. |
 | `20` | Still running — re-run `wait`, don't treat as failure. |
 | `21` / `22` | Job lock timeout / job was cancelled. |
-| `23` / `24` | Backend failed to start / hard timeout hit. Note it; don't blind-retry. |
+| `23` | Worker launch failed, the process exited before stamping startup, or the configured startup window expired. Inspect the message/job before retrying. |
+| `24` | Hard timeout hit. Note it; don't blind-retry. |
 | `25` | `apply` conflict; main repo untouched. |
 
 A failed or skipped delegation never blocks your own task — record it as a note in your report
