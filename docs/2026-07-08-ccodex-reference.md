@@ -899,14 +899,14 @@ pitfalls to check before changing `ccodex.ps1` or `lib/`, see
   delegation config, `~\.claude\rules\ccodex-delegation.md`. *(done)*
 - **Phase 2b — Job management:** retention config, per-job locks, `cleanup` (including
   `--scrub-thread-ids` for stale session data), `cancel`, heartbeat/health, `tail`, `debug`,
-  `doctor`. *(done — [`docs/2026-07-07-ccodex-phase2b-plan.md`](2026-07-07-ccodex-phase2b-plan.md))*
+  `doctor`. *(done — [`docs/archive/2026-07-07-ccodex-phase2b-plan.md`](archive/2026-07-07-ccodex-phase2b-plan.md))*
 - **Phase 4 — Worktree isolation:** `--mode implement` (default `--access worktree`) runs
   edit-capable workers in an isolated git worktree under the state root, with explicit
   `ccodex diff`/`ccodex apply` and worktree-aware `cleanup`.
-  *(done — [`docs/2026-07-07-ccodex-phase4-plan.md`](2026-07-07-ccodex-phase4-plan.md))*
+  *(done — [`docs/archive/2026-07-07-ccodex-phase4-plan.md`](archive/2026-07-07-ccodex-phase4-plan.md))*
 - **Phase 5 — Multi-turn advisor:** `ccodex resume <job_id>` continues a finished job's Codex
   session for follow-up discussion, always as a brand-new job carrying `parent_job_id` lineage.
-  *(done — [`docs/2026-07-07-ccodex-phase5-plan.md`](2026-07-07-ccodex-phase5-plan.md))*
+  *(done — [`docs/archive/2026-07-07-ccodex-phase5-plan.md`](archive/2026-07-07-ccodex-phase5-plan.md))*
 
 See [`2026-07-03-ccodex-adapter-design.md`](2026-07-03-ccodex-adapter-design.md) for the full
 rationale, non-goals, and phase-by-phase verification criteria, and

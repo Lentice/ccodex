@@ -21,7 +21,8 @@ a technical source when developing; the documents below are the developer-facing
 | Binding contracts: exit codes, `status.json` schema, worker prompt, backend, encoding; dated amendments are authoritative where they refine earlier text | `docs/2026-07-03-ccodex-adapter-design.md` |
 | **Before changing `ccodex.ps1` or `lib/`**: regression-guarded pitfalls, test recipes, fixture env vars, host quirks, post-review hardening notes, accepted minors | `docs/2026-07-07-ccodex-dev-notes.md` |
 | Exact current behavior of a command: full per-command/flag reference, exit-code and failure-class tables, `status.json` field notes, repo/module layout | `docs/2026-07-08-ccodex-reference.md` |
-| How past work was specified and committed (style/granularity reference; not work items) | executed phase plans under `docs/` (`YYYY-MM-DD-<name>.md`) |
+| What is left to do (living list of open items) | `docs/BACKLOG.md` |
+| How past work was specified and committed (style/granularity reference; not work items) | executed phase plans under `docs/archive/` (`YYYY-MM-DD-<name>.md`) |
 
 ## Documentation maintenance (after every user-visible change)
 

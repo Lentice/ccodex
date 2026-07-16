@@ -1041,8 +1041,8 @@ checkpoints and stays the final judge; nothing generative is auto-delegated:
 ### Retention, cleanup, and remaining-phase decisions (2026-07-07)
 
 These decisions govern the remaining phases (2b, 4, 5) so that any agent can implement them from
-the phase plans alone: `docs/2026-07-07-ccodex-phase2b-plan.md`,
-`docs/2026-07-07-ccodex-phase4-plan.md`, `docs/2026-07-07-ccodex-phase5-plan.md`. Recommended
+the phase plans alone: `docs/archive/2026-07-07-ccodex-phase2b-plan.md`,
+`docs/archive/2026-07-07-ccodex-phase4-plan.md`, `docs/archive/2026-07-07-ccodex-phase5-plan.md`. Recommended
 execution order: 2b → 4 → 5 (4 and 5 are independent of each other; both build on 2b's locks and
 cleanup).
 

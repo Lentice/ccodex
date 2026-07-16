@@ -1,9 +1,9 @@
 # ccodex Agent Handoff — Read This First
 
 > Audience: the next agent (or engineer) taking over development. This is the single entry point:
-> it states where the project stands, what remains, in what order, and where every piece of
-> required knowledge lives. Everything here is verifiable against git history and the docs it
-> indexes. Written 2026-07-07 at commit `f8e2fe2` (plus this docs commit); working tree clean.
+> it states where the project stands and where every piece of required knowledge lives.
+> Everything here is verifiable against git history and the docs it indexes.
+> Last updated 2026-07-16 at commit `9e911f1`; working tree clean.
 
 ## 1. What ccodex is and why it exists
 
@@ -15,118 +15,120 @@
 2. **Codex as a second brain (智囊)** — cross-model second opinions on plans, designs, and
    changes, with findings triaged (never adopted blindly) by Claude.
 
-Both goals are already served by the implemented phases; the remaining phases deepen job
-management, isolation, and multi-turn discussion.
+## 2. Current state
 
-## 2. Current state (all verified)
+**All planned phases (1, 2a, 2a.1, 2b, 2c, 3, 4, 5) are implemented and verified** — including
+the verification backlog once deferred from the token-lean Phase 4/5 execution (whole-branch
+Codex reviews, the composed `ImplementE2E` test, and both live smokes; completed 2026-07-08).
+The project is in **maintenance / incremental-feature mode**; open work is tracked exclusively
+in `docs/BACKLOG.md`.
 
-- **Complete and live-verified:** Phase 1 (`run`), Phase 2a (`submit`/`worker`/`status`/`wait`/
-  `read`, CIM detached backend + startup sentinel), Phase 2a.1 (failure classification,
-  `codex_thread_id` capture, `--hard-timeout-sec`), Phase 2c (`ccodex review` scoped diff review,
-  `.ccodex/ccodex.json` delegation policy, installed Claude rule), Phase 3 (`/ccodex` slash
-  command), Phase 2b (`cleanup`/`cancel`/`tail`/`debug`/`doctor`, per-job locks, heartbeat;
-  hardened through four Codex review waves).
-- **Complete, suite-verified, live smokes deferred:** Phase 4 (worktree isolation, `diff`,
-  `apply`) and Phase 5 (`resume` multi-turn advisor, `thread_expired`, lineage). Implemented
-  token-lean (2026-07-08): per-task TDD + full-suite green per commit, but per-task reviews,
-  the composed E2E test, and live smokes are deferred — see § 4's verification backlog.
-- **Post-completion feature wave (2026-07-08, after the verification backlog):** hidden Codex
-  console windows on Windows (`233335a`, live-verified); README split into user-facing +
-  `docs/2026-07-08-ccodex-reference.md` (`a83a5bb`) and CLAUDE.md reoriented to developer docs
-  (`9c72e09`); optional `--model`/`--effort` passthrough on `run`/`submit`/`review`/`resume`
-  (`c043dcf`, valueless-flag guard in `77fb0a8`); per-function `/ccodex:<name>` Claude commands
-  (`templates/claude-commands/`) + Claude-first README (`416cca9`). Whole batch Codex-reviewed
-  (1 Important + 1 Minor finding, both verified and fixed in `77fb0a8`).
-- **Codex CLI upgrade maintenance (2026-07-13):** the installed codex-cli moved
-  0.142.5 → 0.144.1. Invocation contract re-verified live (real `run --effort max` +
-  real `resume`, thread id captured, both exit 0 — see the design spec's "Codex CLI 0.144.1
-  re-verification amendment (2026-07-13)"). `--effort` allowlist expanded to the current
-  eight-value enum (`none|minimal|low|medium|high|xhigh|max|ultra`). Host fact change: the
-  Codex sandbox spawns child processes again on this machine (the `CreateProcessWithLogonW
-  failed: 1385` restriction no longer reproduces), so review's self-diff form works;
-  `--embed-diff` stays the robust recommendation. Future upgrades follow the
-  `codex-upgrade-check` skill (`.claude/skills/codex-upgrade-check/SKILL.md`).
-- **Test suite:** 34 files, all green (latest full run 2026-07-13). Run via
-  `tests/run-tests.ps1` — quick suite by default for the inner loop, `-Suite full` as the
-  completion gate (see dev-notes for details).
-- **Live evidence:** gold-seal round-trip 2026-07-06 (submit → wait → "FINAL", thread id
-  captured); real quota exhaustion 2026-07-07 correctly classified as
-  `failure_reason=quota_or_rate_limit` (exit 10, do-not-retry hint honored).
+Capability summary (full per-command reference: `docs/2026-07-08-ccodex-reference.md`):
+
+- **Core:** `run` (sync), `submit`/`worker`/`status`/`wait`/`read` (async, CIM detached backend
+  with startup sentinel), failure classification (`failure_reason`), `codex_thread_id` capture,
+  `--hard-timeout-sec`.
+- **Job management:** `cleanup` (with `--scrub-thread-ids`), `cancel`, `tail`, `debug`,
+  `doctor`, per-job locks, heartbeat, `list`.
+- **Review + delegation:** `ccodex review` scoped diff review (`--embed-diff` recommended),
+  `.ccodex/ccodex.json` delegation policy, installed Claude rule/skill/commands.
+- **Worktree isolation:** `run --mode implement` in a detached worktree, `diff`, `apply`
+  (conflict → exit 25, main repo untouched).
+- **Multi-turn:** `resume <job_id>` (sync) and `submit --resume <job_id>` (async follow-up),
+  always a brand-new child job with `parent_job_id` lineage; `thread_expired` handling.
+- **Machine-readable output:** stable `schema_version: 1` lifecycle envelope via `--json` on
+  `status`/`read`/`wait`/`doctor`; `wait --all` batch waiting with `--group`/`--label` job
+  metadata for fan-out/gather; structured `status.json.failure` signal (`matched_signal`,
+  `source`, `confidence`, `http_code`).
+- **Passthrough knobs:** `--model`, `--effort` (eight-value enum `none..ultra` since Codex CLI
+  0.144.1) on `run`/`submit`/`review`/`resume`.
+
+Milestones after the phase completions (see git log for the full list):
+
+- **2026-07-08 feature wave:** hidden Codex console windows on Windows; README split into
+  user-facing README + developer reference; per-function `/ccodex:<name>` Claude commands.
+- **2026-07-13 Codex CLI 0.144.1 upgrade:** invocation contract re-verified live; `--effort`
+  enum expanded; host fact — the Codex sandbox spawns child processes again on this machine
+  (the `CreateProcessWithLogonW failed: 1385` restriction no longer reproduces), so review's
+  self-diff form works, though `--embed-diff` stays the robust recommendation. Future upgrades
+  follow the `codex-upgrade-check` skill (`.claude/skills/codex-upgrade-check/SKILL.md`).
+- **2026-07-14 hardening wave:** latency diagnosability + silent `--prompt-file` drop fix;
+  locking/install/cleanup/review/codex-invoke hardening; deferred-review-finding fixes across
+  `resume`/`apply`/`wait`/`cancel`/`doctor`/`cleanup`/install; test false-green corrections;
+  read-only review enforcement + installer ghost-command cleanup (`6ca18e1..078958c`).
+- **2026-07-15/16 feature wave (backlog items 1–5, all landed):** `list` command,
+  `--json` envelope on `status`/`read`/`wait`, `wait --all` + group/label metadata,
+  `submit --resume`, structured failure signal + `doctor --json` (`e029b99..22800dd`).
+- **Living backlog established (`9e911f1`):** `docs/BACKLOG.md` is now the single "what is
+  left" document, fed by the curated refinement backlog and the 2026-07-16 delegation-run
+  issue record.
+
+Operational facts:
+
+- **Test suite:** plain PowerShell assertion scripts under `tests/`, all green (full suite is
+  the completion gate). Run `tests/run-tests.ps1` (quick) / `-Suite full`.
 - **Exit codes active:** 0, 2, 3, 4, 10, 11, 12, 20, 21, 22, 23, 24, 25 — the full contract.
   Authoritative table: design spec § "Exit Code Contract".
-- **Installed copy:** `%USERPROFILE%\.local\bin\ccodex\` (byte-matched at phase completion);
-  job state under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\` with an index at
-  `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\index\`.
+- **Installed copy:** `%USERPROFILE%\.local\bin\ccodex\` (must byte-match the repo after
+  user-facing changes); job state under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\` with
+  an index at `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\index\`.
+- **Live evidence:** gold-seal round-trip 2026-07-06; real quota exhaustion 2026-07-07
+  correctly classified (`failure_reason=quota_or_rate_limit`, exit 10); Phase 4/5 live smokes
+  passed 2026-07-08; 0.144.1 live re-verification 2026-07-13.
 
 ## 3. Document index
-
-Read in this order for a full picture; consult individually as needed.
 
 | Document | Role |
 |---|---|
 | `docs/2026-07-07-ccodex-handoff.md` | This file — entry point and index. |
-| `docs/2026-07-03-ccodex-adapter-design.md` | **Master design spec.** Contracts (exit codes, status schema, worker prompt, backend, encoding), phase rationale, and dated amendments. The amendments are authoritative where they refine earlier sections: "Phase 2 scope amendment (2026-07-04)", "Failure-mode handling amendment (2026-07-05)", "Scoped review and delegation policy (2026-07-05)", "Retention, cleanup, and remaining-phase decisions (2026-07-07)" — the last one governs everything still to build. |
-| `docs/2026-07-07-ccodex-dev-notes.md` | **Read before writing code.** Test recipes, fixtures, six regression-guarded pitfalls, host quirks (Codex sandbox spawn history and `--embed-diff` guidance), process conventions, accepted minors. |
-| `.claude/skills/codex-upgrade-check/SKILL.md` | Project-local skill: the checklist to run whenever the installed Codex CLI is upgraded (what to probe, what to fix, what to re-verify live). |
-| `docs/2026-07-07-ccodex-phase2b-plan.md` | Executed (all 9 tasks, reviews clean). Historical record. |
-| `docs/2026-07-07-ccodex-phase4-plan.md` | Executed (all 7 tasks; T3–T7 reviews deferred, T7's E2E + live smoke deferred — see § 4). |
-| `docs/2026-07-07-ccodex-phase5-plan.md` | Executed (all 4 tasks; reviews deferred, T4's live smoke deferred — see § 4). |
-| `README.md` | User-facing readme: why ccodex exists, key features, installation, concise usage flows, and a short cheat sheet. Must be updated as part of each phase (CLAUDE.md rule). |
-| `docs/2026-07-08-ccodex-reference.md` | Developer-facing technical reference: full per-command/flag reference, exit-code and failure-class contracts, `status.json` field notes, repository/module layout, testing, and roadmap/status history. |
-| `CLAUDE.md` | Repo conventions: what this repo is, testing policy (no Pester), encoding, README-per-phase rule, git/commit policy. |
-| `templates/worker-prompt.md` | The worker prompt contract prepended to `run`/`submit` prompts (installed to `%APPDATA%\ccodex\templates\`). |
-| `templates/claude-command-ccodex.md` | Source of the installed `/ccodex` slash command. |
-| `templates/claude-commands/*.md` | Sources of the installed per-function `/ccodex:<name>` commands (`review`, `ask`, `implement`, `resume`, `jobs`, `doctor`, `cleanup`). |
-| `templates/claude-rule-ccodex-delegation.md` | Source of the installed delegation-policy rule (`~/.claude/rules/ccodex-delegation.md`). |
-| Executed plans: `docs/2026-07-03-...phase1-plan.md`, `docs/2026-07-04-...phase2a-plan.md`, `docs/2026-07-05-ccodex-failure-modes-plan.md`, `docs/2026-07-05-ccodex-delegation-plan.md` | Historical record of completed work. Useful as style/granularity reference for how tasks were specified and committed; not work items. |
-| `.superpowers/sdd/progress.md` | Machine-local, git-ignored SDD ledger (task-by-task completion lines, review outcomes, dogfood results). If present, trust it over recollection; if absent (fresh clone), git history + this handoff are sufficient. |
+| `docs/BACKLOG.md` | **What is left to do.** Living list of open items; update it whenever an item lands, is added, or is dropped. |
+| `docs/2026-07-03-ccodex-adapter-design.md` | **Master design spec.** Binding contracts (exit codes, status schema, worker prompt, backend, encoding) and dated amendments — amendments are authoritative where they refine earlier sections. |
+| `docs/2026-07-07-ccodex-dev-notes.md` | **Read before writing code.** Test recipes, fixtures, regression-guarded pitfalls, host quirks, process conventions, accepted minors. |
+| `docs/2026-07-08-ccodex-reference.md` | Developer-facing technical reference: full per-command/flag reference, exit-code and failure-class contracts, `status.json` field notes, repo/module layout. |
+| `docs/2026-07-15-ccodex-refinement-backlog-curated.md` | Source analysis behind BACKLOG.md's curated items (rationale, tiers, dropped items). |
+| `docs/2026-07-16-ccodex-delegation-run-issues.md` | Issue record from the 2026-07-16 delegation run; source of BACKLOG.md's F-items. |
+| `.claude/skills/codex-upgrade-check/SKILL.md` | Checklist to run whenever the installed Codex CLI is upgraded. |
+| `README.md` | User-facing readme: purpose, features, install, concise usage, cheat sheet. Must be updated with every user-visible change. |
+| `AGENTS.md` / `CLAUDE.md` | Repo conventions: doc map, testing policy (no Pester), encoding, doc-maintenance rule, git/commit policy. |
+| `templates/worker-prompt.md` | Worker prompt contract prepended to `run`/`submit` prompts (installed to `%APPDATA%\ccodex\templates\`). |
+| `templates/claude-command-ccodex.md`, `templates/claude-commands/*.md`, `templates/claude-skill-ccodex.md`, `templates/claude-rule-ccodex-delegation.md` | Sources of the installed Claude integration (slash commands, skill, delegation rule). Keep in sync with behavior changes. |
+| `docs/archive/*.md` | Executed phase plans (1, 2a, failure-modes, delegation, 2b, 4, 5). Historical record; style/granularity reference only, not work items. |
+| `.superpowers/sdd/progress.md` | Machine-local, git-ignored SDD ledger. If present, trust it over recollection; if absent (fresh clone), git history + this handoff are sufficient. |
 
-## 4. Remaining work: none — verification backlog completed 2026-07-08
+## 4. Remaining work
 
-All planned phases (1, 2a, 2a.1, 2b, 2c, 3, 4, 5) are implemented, and the verification that
-was deferred from the token-lean Phase 4/5 execution has since been completed:
+See `docs/BACKLOG.md` — the single living list. As of 2026-07-16: five curated items open
+(provenance/idempotency, installer hardening, `apply --check`, `review --include-untracked`,
+review profiles + `capabilities --json`) and five delegation-run items (F2 cold-start timeout
+flake first, then F1 `help`, F3 worktree-job continuation, F5 quota retry hints, F4
+`apply --allow-untracked`). The user picks; the agent specs and implements.
 
-1. **Codex whole-branch reviews** of `a8f93e8..285bfd3` (P4) and `285bfd3..5e44352` (P5),
-   substituting for the skipped per-task reviews: 6 findings, 5 adopted and fixed in
-   `bd1c9c8..6ccfcd3` (see dev-notes § "Post-review hardening (2026-07-08)"), 1 Minor rejected
-   (resume exit mapping via pinned message text — behavior correct and test-guarded).
-2. **`tests/ImplementE2E.tests.ps1`** landed at `a4b1cd2` (47 assertions: composed
-   submit → wait → diff → apply → cleanup chain, conflict path → 25, stdout purity).
-3. **Phase 4 live smoke PASSED**: real Codex created `HELLO.md` in an isolated worktree of a
-   throwaway repo; `diff` showed exactly that file; `apply` landed it (content verified);
-   `cleanup --older-than 0d` deleted the job and swept the worktree.
-4. **Phase 5 live smoke PASSED** after catching a real bug (exec-level options must precede the
-   `resume` token — fixed in `900ad37`): `resume` returned exactly `CONTINUED` with
-   `parent_job_id` lineage and the parent's thread id in the child status. The negative
-   scrubbed-thread case is covered at shim level by the Phase 5 task tests.
+Standing accepted-minor (dev-notes): completion-evidence files not backend-scoped on the
+currently unreachable foreign-takeover path — revisit only if job dirs ever become shared
+between workers.
 
-The only open item is the dev-notes accepted-minor (completion-evidence files not backend-scoped
-on the currently unreachable foreign-takeover path) — revisit only if job dirs ever become
-shared between workers.
+## 5. Non-negotiable working rules (summary — details in dev-notes and AGENTS.md)
 
-Provenance: `.superpowers/sdd/progress.md` (machine-local) and the task reports under
-`.superpowers/sdd/p4/`, `.superpowers/sdd/p5/`. Governing design decisions live in the spec
-amendment **"Retention, cleanup, and remaining-phase decisions (2026-07-07)"**.
-
-## 5. Non-negotiable working rules (summary — details in dev-notes and CLAUDE.md)
-
-1. TDD per task, full suite green before every commit; exact commit messages from the plan; no
-   co-author trailers; never commit `.superpowers/`.
+1. TDD per task, full suite green before every commit; no co-author trailers; never commit
+   `.superpowers/`.
 2. Contracts are append-only: exit codes, `status.json` fields, file formats. Never rename or
    repurpose an existing field or code.
 3. All wrapper-authored files UTF-8 without BOM via the `lib/JobStore.ps1` writers.
 4. `ccodex.ps1` stays a plain `$args`-parsing script (no `[CmdletBinding()]`) — see dev-notes
    pitfall #1 before touching the dispatcher.
-5. README updated within the phase itself; re-run `install.ps1` and byte-verify after
-   user-facing changes.
-6. Live codex calls only in each phase's final-task smoke; quota failure → report, never retry.
+5. Docs (README, reference, templates) updated within the same piece of work; re-run
+   `install.ps1` and byte-verify the installed copies after user-facing or template changes.
+6. Live codex calls are the exception, not the loop; quota failure → report, never retry.
+7. Keep `docs/BACKLOG.md` current in the same commit that lands, adds, or drops an item.
 
 ## 6. Out-of-repo artifacts to be aware of
 
 - Installed CLI: `%USERPROFILE%\.local\bin\ccodex\` (+ `ccodex.cmd` shim on PATH).
-- Installed Claude integration: `~/.claude/commands/ccodex.md`, `~/.claude/rules/ccodex-delegation.md`.
+- Installed Claude integration: `~/.claude/commands/ccodex.md` + `~/.claude/commands/ccodex/`
+  per-function commands, `~/.claude/skills/ccodex/SKILL.md`,
+  `~/.claude/rules/ccodex-delegation.md`.
 - Worker prompt template: `%APPDATA%\ccodex\templates\worker-prompt.md`.
-- Job state root: `%LOCALAPPDATA%\ccodex\` (jobs + index; Phase 4 adds `worktrees\`).
-- Planned (2b): user retention config at `%APPDATA%\ccodex\config.json`.
+- Job state root: `%LOCALAPPDATA%\ccodex\` (jobs + index + `worktrees\`).
+- User retention config: `%APPDATA%\ccodex\config.json` (optional).
 - Per-project delegation policy: `<repo>/.ccodex/ccodex.json` (optional; this repo currently
   has none, so the documented defaults apply).
