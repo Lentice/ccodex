@@ -22,7 +22,7 @@ and the delegation-run issue record
 | F2. Cold-start exit-23 flake: 120 s sentinel default + `CCODEX_STARTUP_TIMEOUT_SEC` + dead-worker fast-fail | 7079237 |
 | F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
 | F1. `help` / `--help` / `-h` support (top level + per subcommand) | fdc58b8 |
-| F4. `apply --allow-untracked` (opt-in, overlap-safe) | PENDING_HASH |
+| F4. `apply --allow-untracked` (opt-in, overlap-safe) | 0ae6fbd |
 
 ## Open — curated backlog items (user picks)
 
