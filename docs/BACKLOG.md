@@ -19,6 +19,7 @@ and the delegation-run issue record
 | 3. `wait --all` (+ `--group`/`--label` on run/submit/list) | eb05aee |
 | 4. `submit --resume` (async follow-ups) | 28b6f66 |
 | 5. Structured failure signal + `doctor --json` | 22800dd |
+| F2. Cold-start exit-23 flake: 120 s sentinel default + `CCODEX_STARTUP_TIMEOUT_SEC` + dead-worker fast-fail | 7079237 |
 
 ## Open — curated backlog items (user picks)
 
@@ -32,11 +33,10 @@ and the delegation-run issue record
 
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 
-Priority order per the Codex-confirmed triage (F2 first):
+Priority order per the Codex-confirmed triage:
 
 | # | Item | Origin | Notes |
 |---|---|---|---|
-| F2 | Reproduce + fix detached-worker cold-start timeout flake (exit 23) under host load | O5 | suspected fixed 20 s confirmation window (ccodex.ps1:825, Detach.ps1:128); reproduce first, keep artifacts; never blanket-accept exit 23 in tests |
 | F1 | `help` / `--help` / `-h` support (top level + per subcommand) | O1 | intercept before command validation; concise usage output |
 | F3 | Worktree-job continuation: child job + new worktree seeded from parent snapshot commit, resume Codex thread there | O6 | never reuse the parent worktree; unblocks review-pushback rounds on implement jobs |
 | F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose |
