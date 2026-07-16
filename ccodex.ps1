@@ -875,18 +875,91 @@ function Invoke-CcodexSubmit {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$jobId`n$jobDir"; JobDir = $jobDir; JobId = $jobId; Message = $null }
 }
 
+function New-CcodexLifecycleErrorResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$ErrorMessage
+    )
+
+    $envelope = [ordered]@{
+        schema_version    = 1
+        job_id            = $JobId
+        status            = 'unknown'
+        error             = $ErrorMessage
+        job_dir           = $null
+        command_exit_code = 3
+    }
+    return [pscustomobject]@{ WrapperExitCode = 3; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+}
+
+function New-CcodexWaitJsonResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Status,
+        [AllowNull()][object]$StatusObject,
+        [Parameter(Mandatory)][object]$Reconciliation,
+        [Parameter(Mandatory)][string]$JobDir,
+        [AllowNull()][object]$Result,
+        [Parameter(Mandatory)][int]$CommandExitCode
+    )
+
+    $envelope = [ordered]@{
+        schema_version    = 1
+        job_id            = $JobId
+        status            = $Status
+        codex_exit_code   = if ($StatusObject) { $StatusObject.codex_exit_code } else { $null }
+        wrapper_exit_code = if ($StatusObject) { $StatusObject.wrapper_exit_code } else { $null }
+        result            = $Result
+        timeout_reason    = if ($StatusObject) { $StatusObject.timeout_reason } else { $null }
+        health            = if ($Reconciliation.PossiblyStale) { 'possibly-stale' } else { $null }
+        job_dir           = $JobDir
+        command_exit_code = $CommandExitCode
+    }
+    return [pscustomobject]@{ WrapperExitCode = $CommandExitCode; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+}
+
+function New-CcodexReadJsonResult {
+    param(
+        [Parameter(Mandatory)][string]$JobId,
+        [Parameter(Mandatory)][string]$Status,
+        [Parameter(Mandatory)][bool]$Finished,
+        [Parameter(Mandatory)][bool]$ResultPresent,
+        [AllowNull()][object]$Result,
+        [Parameter(Mandatory)][object]$Reconciliation,
+        [Parameter(Mandatory)][string]$JobDir,
+        [Parameter(Mandatory)][int]$CommandExitCode
+    )
+
+    $envelope = [ordered]@{
+        schema_version    = 1
+        job_id            = $JobId
+        status            = $Status
+        finished          = $Finished
+        result_present    = $ResultPresent
+        result            = $Result
+        health            = if ($Reconciliation.PossiblyStale) { 'possibly-stale' } else { $null }
+        job_dir           = $JobDir
+        command_exit_code = $CommandExitCode
+    }
+    return [pscustomobject]@{ WrapperExitCode = $CommandExitCode; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+}
+
 function Invoke-CcodexStatusCommand {
     # Read-only lifecycle report for a job id, callable from any directory. Reconciles
     # a narrowly-gated orphan (dead worker + completion evidence) via
     # Update-CcodexOrphanStatus before composing the line; never writes otherwise.
     param(
         [Parameter(Mandatory)][string]$JobId,
+        [switch]$Json,
         [string]$StateRoot = $env:LOCALAPPDATA
     )
 
     try {
         $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
     } catch {
+        if ($Json) {
+            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message)
+        }
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }
 
@@ -895,6 +968,26 @@ function Invoke-CcodexStatusCommand {
 
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
+
+    $codexExitCode = if ($statusObj) { $statusObj.codex_exit_code } else { $null }
+    $wrapperExitCode = if ($statusObj) { $statusObj.wrapper_exit_code } else { $null }
+    $health = if ($reconciliation.PossiblyStale) { 'possibly-stale' } else { Get-CcodexJobHealth -Status $statusObj }
+    $parentJobId = if ($statusObj) { $statusObj.parent_job_id } else { $null }
+
+    if ($Json) {
+        $envelope = [ordered]@{
+            schema_version    = 1
+            job_id            = $JobId
+            status            = $statusText
+            codex_exit_code   = $codexExitCode
+            wrapper_exit_code = $wrapperExitCode
+            health            = $health
+            parent_job_id     = $parentJobId
+            job_dir           = $record.JobDir
+            command_exit_code = 0
+        }
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+    }
 
     if ($statusText -in @('done', 'failed', 'cancelled')) {
         $codexExitText = if ($null -eq $statusObj.codex_exit_code) { 'null' } else { $statusObj.codex_exit_code }
@@ -914,7 +1007,6 @@ function Invoke-CcodexStatusCommand {
         }
     }
 
-    $parentJobId = if ($statusObj) { $statusObj.parent_job_id } else { $null }
     if (-not [string]::IsNullOrEmpty([string]$parentJobId)) {
         $line += " parent=$parentJobId"
     }
@@ -933,6 +1025,7 @@ function Invoke-CcodexWaitCommand {
     # returns 20 WITHOUT writing status.json — the job's lifecycle is untouched by waiting.
     param(
         [Parameter(Mandatory)][string]$JobId,
+        [switch]$Json,
         [int]$WaitTimeoutSec = 0,
         [int]$PollIntervalMs = 1000,
         [string]$StateRoot = $env:LOCALAPPDATA
@@ -941,6 +1034,9 @@ function Invoke-CcodexWaitCommand {
     try {
         $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
     } catch {
+        if ($Json) {
+            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message)
+        }
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }
 
@@ -973,9 +1069,15 @@ function Invoke-CcodexWaitCommand {
             $recordedCodexExitCode = if ($statusObj -and $null -ne $statusObj.codex_exit_code) { [int]$statusObj.codex_exit_code } else { 0 }
             $validation = Test-CcodexResult -CodexExitCode $recordedCodexExitCode -ResultPath $resultPath
             if ($validation.WrapperExitCode -eq 0) {
+                if ($Json) {
+                    return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $validation.ResultContent -CommandExitCode 0)
+                }
                 return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null }
             }
             $failureMessage = "ccodex: job $JobId done but result.md is missing or empty (codex_exit_code=$recordedCodexExitCode)`n  job dir: $jobDir`n  result:  $resultPath"
+            if ($Json) {
+                return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $null -CommandExitCode 11)
+            }
             return [pscustomobject]@{ WrapperExitCode = 11; Stdout = $null; Message = $failureMessage }
         }
 
@@ -985,6 +1087,9 @@ function Invoke-CcodexWaitCommand {
             $wrapperExitText = if ($null -eq $recordedWrapperExitCode) { 'null' } else { $recordedWrapperExitCode }
             $exitCodeToReturn = if ($recordedWrapperExitCode -in @(10, 11, 12)) { $recordedWrapperExitCode } else { 10 }
             $failureMessage = "ccodex: job $JobId failed codex_exit_code=$codexExitText wrapper_exit_code=$wrapperExitText`n  job dir: $jobDir`n  result:  $resultPath"
+            if ($Json) {
+                return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $null -CommandExitCode $exitCodeToReturn)
+            }
             return [pscustomobject]@{ WrapperExitCode = $exitCodeToReturn; Stdout = $null; Message = $failureMessage }
         }
 
@@ -993,12 +1098,18 @@ function Invoke-CcodexWaitCommand {
             $recordedWrapperExitCode = if ($statusObj -and $null -ne $statusObj.wrapper_exit_code) { [int]$statusObj.wrapper_exit_code } else { 24 }
             $timeoutReasonText = if ($statusObj -and $statusObj.timeout_reason) { " ($($statusObj.timeout_reason))" } else { '' }
             $timeoutMessage = "ccodex: job $JobId timed_out$timeoutReasonText`n  job dir: $jobDir"
+            if ($Json) {
+                return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $null -CommandExitCode $recordedWrapperExitCode)
+            }
             return [pscustomobject]@{ WrapperExitCode = $recordedWrapperExitCode; Stdout = $null; Message = $timeoutMessage }
         }
 
         if ($statusText -eq 'cancelled') {
             # Terminal cancellation (Task 4): concise status line, wrapper exit 22.
             $cancelledMessage = "ccodex: job $JobId cancelled`n  job dir: $jobDir"
+            if ($Json) {
+                return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $null -CommandExitCode 22)
+            }
             return [pscustomobject]@{ WrapperExitCode = 22; Stdout = $null; Message = $cancelledMessage }
         }
 
@@ -1006,6 +1117,9 @@ function Invoke-CcodexWaitCommand {
             $line = "$JobId $statusText"
             if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
             $message = "$line`nccodex: wait timed out after ${WaitTimeoutSec}s; re-run ``ccodex wait $JobId`` to keep waiting."
+            if ($Json) {
+                return (New-CcodexWaitJsonResult -JobId $JobId -Status $statusText -StatusObject $statusObj -Reconciliation $reconciliation -JobDir $jobDir -Result $null -CommandExitCode 20)
+            }
             return [pscustomobject]@{ WrapperExitCode = 20; Stdout = $null; Message = $message }
         }
 
@@ -1024,12 +1138,16 @@ function Invoke-CcodexReadCommand {
     # missing/empty result.md -> a concise failure, exit 11.
     param(
         [Parameter(Mandatory)][string]$JobId,
+        [switch]$Json,
         [string]$StateRoot = $env:LOCALAPPDATA
     )
 
     try {
         $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
     } catch {
+        if ($Json) {
+            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message)
+        }
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }
 
@@ -1042,6 +1160,9 @@ function Invoke-CcodexReadCommand {
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
 
     if ($statusText -notin @('done', 'failed', 'timed_out', 'cancelled')) {
+        if ($Json) {
+            return (New-CcodexReadJsonResult -JobId $JobId -Status $statusText -Finished $false -ResultPresent $false -Result $null -Reconciliation $reconciliation -JobDir $jobDir -CommandExitCode 4)
+        }
         $line = "$JobId $statusText"
         if ($reconciliation.PossiblyStale) { $line += ' health=possibly-stale' }
         $message = "$line`nccodex: job $JobId is not finished yet; run ``ccodex wait $JobId`` to block until it completes."
@@ -1056,10 +1177,16 @@ function Invoke-CcodexReadCommand {
     $validation = Test-CcodexResult -CodexExitCode 0 -ResultPath $resultPath
 
     if ($validation.ResultPresent) {
+        if ($Json) {
+            return (New-CcodexReadJsonResult -JobId $JobId -Status $statusText -Finished $true -ResultPresent $true -Result $validation.ResultContent -Reconciliation $reconciliation -JobDir $jobDir -CommandExitCode 0)
+        }
         return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $validation.ResultContent; Message = $null }
     }
 
     $failureMessage = "ccodex: job $JobId $statusText but result.md is missing or empty`n  job dir: $jobDir`n  result:  $resultPath"
+    if ($Json) {
+        return (New-CcodexReadJsonResult -JobId $JobId -Status $statusText -Finished $true -ResultPresent $false -Result $null -Reconciliation $reconciliation -JobDir $jobDir -CommandExitCode 11)
+    }
     return [pscustomobject]@{ WrapperExitCode = 11; Stdout = $null; Message = $failureMessage }
 }
 
@@ -2339,6 +2466,7 @@ try {
             # `run`/`submit` use for their task text). --state-root is a hidden test flag.
             $statusJobId = $PositionalTask
             $statusStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $statusJson = ($args -contains '--json')
             if (-not $statusJobId) {
                 Write-Host "ccodex: status requires a job id."
                 $exitCode = 2
@@ -2346,8 +2474,11 @@ try {
             }
             $statusParams = @{ JobId = $statusJobId }
             if ($statusStateRoot) { $statusParams['StateRoot'] = $statusStateRoot }
+            if ($statusJson) { $statusParams['Json'] = $true }
             $statusResult = Invoke-CcodexStatusCommand @statusParams
-            if ($statusResult.WrapperExitCode -eq 0) {
+            if ($statusJson) {
+                Write-Output $statusResult.Stdout
+            } elseif ($statusResult.WrapperExitCode -eq 0) {
                 Write-Output $statusResult.Stdout
             } else {
                 Write-Host $statusResult.Message
@@ -2360,6 +2491,7 @@ try {
             $waitJobId = $PositionalTask
             $waitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $waitTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--wait-timeout-sec'
+            $waitJson = ($args -contains '--json')
             if (-not $waitJobId) {
                 Write-Host "ccodex: wait requires a job id."
                 $exitCode = 2
@@ -2368,8 +2500,11 @@ try {
             $waitParams = @{ JobId = $waitJobId }
             if ($waitStateRoot) { $waitParams['StateRoot'] = $waitStateRoot }
             if ($waitTimeoutSecText) { $waitParams['WaitTimeoutSec'] = [int]$waitTimeoutSecText }
+            if ($waitJson) { $waitParams['Json'] = $true }
             $waitResult = Invoke-CcodexWaitCommand @waitParams
-            if ($waitResult.WrapperExitCode -eq 0) {
+            if ($waitJson) {
+                Write-Output $waitResult.Stdout
+            } elseif ($waitResult.WrapperExitCode -eq 0) {
                 Write-Output $waitResult.Stdout
             } else {
                 Write-Host $waitResult.Message
@@ -2381,6 +2516,7 @@ try {
             # `run`/`submit`/`status`/`wait` use). --state-root is a hidden test flag.
             $readJobId = $PositionalTask
             $readStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $readJson = ($args -contains '--json')
             if (-not $readJobId) {
                 Write-Host "ccodex: read requires a job id."
                 $exitCode = 2
@@ -2388,8 +2524,11 @@ try {
             }
             $readParams = @{ JobId = $readJobId }
             if ($readStateRoot) { $readParams['StateRoot'] = $readStateRoot }
+            if ($readJson) { $readParams['Json'] = $true }
             $readResult = Invoke-CcodexReadCommand @readParams
-            if ($readResult.WrapperExitCode -eq 0) {
+            if ($readJson) {
+                Write-Output $readResult.Stdout
+            } elseif ($readResult.WrapperExitCode -eq 0) {
                 Write-Output $readResult.Stdout
             } else {
                 Write-Host $readResult.Message

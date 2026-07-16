@@ -103,15 +103,22 @@ conversation.
    result or poll for it:
 
    ```powershell
-   ccodex wait <job_id>       # blocks until the job finishes, then prints the result
-   ccodex status <job_id>     # non-blocking lifecycle check
-   ccodex read <job_id>       # non-blocking result read (fails if not finished yet)
+   ccodex wait <job_id> --json       # blocks; parse result and command_exit_code
+   ccodex status <job_id> --json     # non-blocking lifecycle envelope
+   ccodex read <job_id> --json       # non-blocking result envelope (exit 4 if unfinished)
    ```
 
    Submit multiple jobs before waiting on any of them to run them in parallel.
 
-7. **Read stdout as the worker's final answer** — nothing else. Do not parse prose from stderr to
-   decide success or failure; use the exit code:
+   For these three commands, always use `--json` in automation and parse the stable top-level
+   `schema_version: 1` envelope instead of scraping human text. `command_exit_code` matches the
+   process exit and is distinct from the job's recorded `wrapper_exit_code`; lifecycle fields are
+   present with `null` when unavailable, and `wait`/`read` carry result text in `result`. Missing
+   job id remains a human usage error (exit `2`).
+
+7. **Read stdout as the worker's final answer** for synchronous commands. For `wait --json` and
+   `read --json`, read the envelope's `result` field. Do not parse prose from stderr to decide
+   success or failure; use the process exit code and matching `command_exit_code`:
 
    | Exit code | Meaning |
    | --- | --- |

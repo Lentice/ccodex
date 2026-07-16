@@ -163,7 +163,15 @@ ccodex review --range <base>..HEAD --path lib/ --intent "Add retry logic to Code
 ccodex status <job_id>   # non-blocking lifecycle check
 ccodex wait <job_id>      # blocks until terminal, then prints the result
 ccodex read <job_id>      # non-blocking result read
+ccodex status <job_id> --json  # stable machine-readable lifecycle envelope
+ccodex wait <job_id> --json    # result and command_exit_code are fields in the envelope
+ccodex read <job_id> --json    # result state/content without scraping human text
 ```
+
+`status`, `wait`, and `read` accept `--json` for a versioned lifecycle envelope whose
+`command_exit_code` matches the process exit code. Human text remains the default. Lifecycle
+fields stay present with `null` values when unavailable, so automation can parse a stable shape.
+As with `list --json`, the top-level `schema_version` is `1`.
 
 **List jobs** (newest first) — the enumeration endpoint for orchestrating several jobs:
 

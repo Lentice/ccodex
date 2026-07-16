@@ -80,9 +80,9 @@ ccodex review --repo <submodule-path> --range <base>..HEAD --path . --intent "..
 
 # Long-running: fire, keep working, collect later
 "Audit error handling across src/" | ccodex submit --mode review --repo <repo>   # prints <job_id>
-ccodex wait <job_id> --wait-timeout-sec 600                        # blocks; exit 20 = still running
-ccodex read <job_id>                                               # print result again anytime
-ccodex status <job_id>                                             # one-line state
+ccodex wait <job_id> --json --wait-timeout-sec 600                 # parse envelope; exit 20 = still running
+ccodex read <job_id> --json                                        # parse result/result_present anytime
+ccodex status <job_id> --json                                      # parse lifecycle state; do not scrape text
 ccodex list                                                        # enumerate jobs, newest first (all repos; --repo narrows)
 ccodex list --json --state running                                 # machine-readable {schema_version,count,jobs[]}, filtered by state
                                                                    # read-only: does NOT reconcile a dead worker (a crashed job may
@@ -97,6 +97,11 @@ ccodex list --json --state running                                 # machine-rea
 ```
 
 Notes:
+- For automation, always pass `--json` to `status`, `wait`, and `read`. Parse the top-level
+  `schema_version: 1` envelope and use `command_exit_code` (which matches the process exit), not
+  the job's recorded `wrapper_exit_code`. Lifecycle fields are always present (`null` when
+  unavailable); `wait`/`read` place result text in `result`. Without `--json`, human text remains
+  the default. A missing job id (usage exit `2`) is still human text.
 - ALWAYS pass `--embed-diff` on `review` unless you have verified this host's Codex sandbox can
   spawn processes: the wrapper runs `git diff` itself and embeds a size-capped diff (on many
   hosts Codex cannot run git; signature: `CreateProcessWithLogonW failed: 1385`). If the

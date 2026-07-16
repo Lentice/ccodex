@@ -278,12 +278,55 @@ process has exited:
 # -> <job_id>
 #    <job_dir>
 
-ccodex status <job_id>   # non-blocking lifecycle line, e.g. "<job_id> running"
-ccodex wait <job_id>      # blocks until terminal, then prints the result (or exits 10/11/20)
-ccodex read <job_id>      # non-blocking result read; exits 4 if not finished yet
+ccodex status <job_id> [--json]   # non-blocking lifecycle state
+ccodex wait <job_id> [--json]     # blocks until terminal (or its wait timeout)
+ccodex read <job_id> [--json]     # non-blocking result read; exits 4 if not finished yet
 ```
 
 Submit several jobs before waiting on any of them to run independent tasks in parallel.
+
+Each command accepts the presence flag `--json`. Without it, the existing human text is the
+default and is unchanged. With it, stdout is an ordered JSON envelope rendered by
+`ConvertTo-Json -Depth 10`; this applies to lifecycle outcomes with nonzero exits as well as
+success. `--json` never changes the process exit code. A missing job id is a usage error (exit
+`2`) and intentionally remains human text rather than a lifecycle envelope.
+
+All normal lifecycle envelopes begin with top-level `schema_version: 1`. This envelope version
+is distinct from the `schema_version` inside a job's `status.json`. Every field listed for a
+normal envelope is always present, with JSON `null` when its source value is absent. The new
+`command_exit_code` is the exit-code-equivalent for this invocation; it is deliberately distinct
+from `wrapper_exit_code`, which is the job's recorded wrapper exit in `status.json`.
+
+**`status --json` envelope contract:**
+
+- Fields: `schema_version`, `job_id`, `status`, `codex_exit_code`, `wrapper_exit_code`, `health`,
+  `parent_job_id`, `job_dir`, `command_exit_code`.
+- `status` is the recorded or reconciled state (falling back to `unknown`); `health` is
+  `possibly-stale` for that reconciliation verdict, otherwise the derived `ok`/`stale` value or
+  `null`. `job_dir` is absolute. A successful status query has `command_exit_code: 0`.
+- An unknown/unloadable job returns exit `3` and
+  `{schema_version,job_id,status:"unknown",error,job_dir:null,command_exit_code:3}`.
+
+**`read --json` envelope contract:**
+
+- Fields: `schema_version`, `job_id`, `status`, `finished`, `result_present`, `result`, `health`,
+  `job_dir`, `command_exit_code`.
+- `finished` means the status is `done`, `failed`, `timed_out`, or `cancelled`.
+  `result_present` reflects result validation and `result` is the full `result.md` text only when
+  usable. Exit/code pairs are success `0`, unfinished `4`, terminal missing/empty result `11`,
+  and unknown job `3` (using the same error envelope shape as `status`).
+
+**`wait --json` envelope contract:**
+
+- Fields: `schema_version`, `job_id`, `status`, `codex_exit_code`, `wrapper_exit_code`, `result`,
+  `timeout_reason`, `health`, `job_dir`, `command_exit_code`.
+- It blocks and polls exactly like human-mode `wait`, then emits one envelope. Exit/code pairs
+  are done with a valid result `0`, done with no usable result `11`, failed `10`/`11`/`12` as
+  recorded and validated, hard timed-out `24` by default (or the recorded wrapper exit),
+  cancelled `22`, wait's own elapsed `--wait-timeout-sec` `20`, and unknown job `3` (the shared
+  error shape). `timeout_reason` surfaces the recorded hard-timeout reason. On wait's own timeout,
+  `status` is the current non-terminal state and `health` may be `possibly-stale`; the command does
+  not modify `status.json`.
 
 For a job created by `ccodex resume`, `status`/`debug` append `parent=<parent_job_id>` /
 `parent: <parent_job_id>` to name the job it continued — see [resume](#resume) above.

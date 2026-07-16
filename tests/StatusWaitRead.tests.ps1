@@ -48,7 +48,8 @@ function New-CcodexTestJobWithStatus {
         [switch]$WithResultFile,
         [string]$LastHeartbeatAt = $null,
         [string]$StartedAt = $null,
-        [string]$ParentJobId = $null
+        [string]$ParentJobId = $null,
+        [string]$TimeoutReason = $null
     )
     $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
     $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
@@ -59,7 +60,7 @@ function New-CcodexTestJobWithStatus {
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content 'test worker prompt body'
-    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode -StartedAt $StartedAt -LastHeartbeatAt $LastHeartbeatAt -ParentJobId $ParentJobId
+    $statusObj = New-CcodexStatusObject -JobId $jobId -Status $Status -Mode $Mode -Access $Access -Repo $targetRepo -CreatedAt $createdAt -BackendId $BackendId -CodexExitCode $CodexExitCode -WrapperExitCode $WrapperExitCode -StartedAt $StartedAt -LastHeartbeatAt $LastHeartbeatAt -ParentJobId $ParentJobId -TimeoutReason $TimeoutReason
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $statusObj
     if ($WithExitCodeEvidence) {
         Write-CcodexTextFile -Path (Join-Path $jobDir 'exit_code.txt') -Content "$EvidenceExitCode"
@@ -184,6 +185,58 @@ $shellOutLines = @($shellOut | Where-Object { $_ -ne $null -and $_ -ne '' })
 Assert-Equal $shellOutLines.Count 1 'shell-level status prints exactly one line'
 Assert-Equal $shellOutLines[0] "$($jobShell.JobId) done codex_exit_code=0 wrapper_exit_code=0" 'shell-level status line matches the terminal format'
 
+# --- status: JSON lifecycle envelope ---
+
+Write-Host "Invoke-CcodexStatusCommand: --json running, terminal, stale, lineage, and unknown envelopes"
+$statusRunningJsonResult = Invoke-CcodexStatusCommand -JobId $jobAlive.JobId -Json -StateRoot $localAppData
+$statusRunningJson = $statusRunningJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $statusRunningJsonResult.WrapperExitCode 0 'status --json running -> exit 0'
+Assert-Equal $statusRunningJson.schema_version 1 'status --json schema version is 1'
+Assert-Equal $statusRunningJson.job_id $jobAlive.JobId 'status --json includes job id'
+Assert-Equal $statusRunningJson.status 'running' 'status --json includes running status'
+Assert-Equal $statusRunningJson.command_exit_code 0 'status --json includes command exit code'
+Assert-Equal $statusRunningJson.health 'ok' 'status --json includes derived health'
+foreach ($key in @('codex_exit_code', 'wrapper_exit_code', 'parent_job_id')) {
+    Assert-True ($statusRunningJson.PSObject.Properties.Name -contains $key) "status --json always includes $key"
+}
+
+$statusDoneJson = (Invoke-CcodexStatusCommand -JobId $jobDone.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-Equal $statusDoneJson.codex_exit_code 0 'status --json terminal includes codex exit code'
+Assert-Equal $statusDoneJson.wrapper_exit_code 0 'status --json terminal includes wrapper exit code'
+Assert-Equal $statusDoneJson.command_exit_code 0 'status --json terminal includes command exit 0'
+
+$statusStaleJson = (Invoke-CcodexStatusCommand -JobId $jobDeadNoEvidence.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-Equal $statusStaleJson.health 'possibly-stale' 'status --json surfaces reconciliation health'
+
+$statusChildJson = (Invoke-CcodexStatusCommand -JobId $jobChild.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-Equal $statusChildJson.parent_job_id $jobParentless.JobId 'status --json surfaces parent lineage'
+
+$statusUnknownJsonResult = Invoke-CcodexStatusCommand -JobId 'does-not-exist-json' -Json -StateRoot $localAppData
+$statusUnknownJson = $statusUnknownJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $statusUnknownJsonResult.WrapperExitCode 3 'status --json unknown -> exit 3'
+Assert-Equal $statusUnknownJson.status 'unknown' 'status --json unknown has unknown status'
+Assert-Equal $statusUnknownJson.command_exit_code 3 'status --json unknown includes command exit 3'
+Assert-True (-not [string]::IsNullOrEmpty($statusUnknownJson.error)) 'status --json unknown includes error'
+
+Write-Host "shell-level: status --json emits its envelope on stdout"
+$shellStatusJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs status $jobDone.JobId --json --state-root $localAppData
+$shellStatusJsonExit = $LASTEXITCODE
+$shellStatusJson = ($shellStatusJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellStatusJsonExit 0 'shell-level status --json exits 0'
+Assert-Equal $shellStatusJson.command_exit_code 0 'shell-level status --json emits parseable envelope'
+
+$shellStatusRunningJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs status $jobAlive.JobId --json --state-root $localAppData
+$shellStatusRunningJsonExit = $LASTEXITCODE
+$shellStatusRunningJson = ($shellStatusRunningJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellStatusRunningJsonExit 0 'shell-level status --json running exits 0'
+Assert-Equal $shellStatusRunningJson.status 'running' 'shell-level status --json running emits current state'
+
+$shellStatusUnknownJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs status does-not-exist-json --json --state-root $localAppData
+$shellStatusUnknownJsonExit = $LASTEXITCODE
+$shellStatusUnknownJson = ($shellStatusUnknownJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellStatusUnknownJsonExit 3 'shell-level status --json unknown exits 3'
+Assert-Equal $shellStatusUnknownJson.command_exit_code 3 'shell-level status --json unknown exit matches envelope'
+
 function Wait-CcodexTestTerminalStatus {
     param([Parameter(Mandatory)][string]$JobDir, [int]$TimeoutSec = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -295,6 +348,79 @@ $shellWaitOutLines = @($shellWaitOut | Where-Object { $_ -ne $null -and $_ -ne '
 Assert-Equal $shellWaitOutLines.Count 1 'shell-level wait prints exactly one line'
 Assert-Equal $shellWaitOutLines[0] 'the result' 'shell-level wait prints the result.md content'
 
+# --- wait: JSON lifecycle envelope ---
+
+Write-Host "Invoke-CcodexWaitCommand: --json terminal envelopes"
+$waitDoneJsonResult = Invoke-CcodexWaitCommand -JobId $jobWaitDone.JobId -Json -StateRoot $localAppData
+$waitDoneJson = $waitDoneJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $waitDoneJson.schema_version 1 'wait --json schema version is 1'
+Assert-Equal $waitDoneJson.result 'the result' 'wait --json done includes result content'
+Assert-Equal $waitDoneJson.command_exit_code 0 'wait --json done command exit is 0'
+
+$waitFailedJsonResult = Invoke-CcodexWaitCommand -JobId $jobWaitFailed.JobId -Json -StateRoot $localAppData
+$waitFailedJson = $waitFailedJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $waitFailedJsonResult.WrapperExitCode 10 'wait --json failed preserves exit 10'
+Assert-Equal $waitFailedJson.command_exit_code 10 'wait --json failed command exit matches invocation'
+Assert-Equal $waitFailedJson.codex_exit_code 1 'wait --json failed surfaces codex exit code'
+
+$jobWaitTimedOutJson = New-CcodexTestJobWithStatus -Status 'timed_out' -WrapperExitCode 24 -TimeoutReason 'hard_timeout_sec=30 exceeded'
+$waitTimedOutJsonResult = Invoke-CcodexWaitCommand -JobId $jobWaitTimedOutJson.JobId -Json -StateRoot $localAppData
+$waitTimedOutJson = $waitTimedOutJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $waitTimedOutJsonResult.WrapperExitCode 24 'wait --json timed_out preserves exit 24'
+Assert-Equal $waitTimedOutJson.command_exit_code 24 'wait --json timed_out command exit is 24'
+Assert-Equal $waitTimedOutJson.timeout_reason 'hard_timeout_sec=30 exceeded' 'wait --json surfaces timeout reason'
+
+$jobWaitCancelledJson = New-CcodexTestJobWithStatus -Status 'cancelled' -WrapperExitCode 22
+$waitCancelledJsonResult = Invoke-CcodexWaitCommand -JobId $jobWaitCancelledJson.JobId -Json -StateRoot $localAppData
+$waitCancelledJson = $waitCancelledJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $waitCancelledJsonResult.WrapperExitCode 22 'wait --json cancelled preserves exit 22'
+Assert-Equal $waitCancelledJson.command_exit_code 22 'wait --json cancelled command exit is 22'
+
+$jobWaitOwnTimeoutJson = New-CcodexTestJobWithStatus -Status 'running' -BackendId $aliveBackendId
+$waitOwnTimeoutStatusPath = Join-Path $jobWaitOwnTimeoutJson.JobDir 'status.json'
+$waitOwnTimeoutBefore = Get-Content -LiteralPath $waitOwnTimeoutStatusPath -Raw
+$waitOwnTimeoutJsonResult = Invoke-CcodexWaitCommand -JobId $jobWaitOwnTimeoutJson.JobId -Json -WaitTimeoutSec 1 -PollIntervalMs 50 -StateRoot $localAppData
+$waitOwnTimeoutAfter = Get-Content -LiteralPath $waitOwnTimeoutStatusPath -Raw
+$waitOwnTimeoutJson = $waitOwnTimeoutJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $waitOwnTimeoutJsonResult.WrapperExitCode 20 'wait --json own timeout preserves exit 20'
+Assert-Equal $waitOwnTimeoutJson.status 'running' 'wait --json own timeout includes current status'
+Assert-Equal $waitOwnTimeoutJson.command_exit_code 20 'wait --json own timeout command exit is 20'
+Assert-Equal $waitOwnTimeoutAfter $waitOwnTimeoutBefore 'wait --json own timeout does not mutate status.json'
+
+Write-Host "shell-level: wait --json emits envelope on stdout for a nonzero exit"
+$shellWaitJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitCancelledJson.JobId --json --state-root $localAppData
+$shellWaitJsonExit = $LASTEXITCODE
+$shellWaitJson = ($shellWaitJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellWaitJsonExit 22 'shell-level wait --json preserves cancelled exit 22'
+Assert-Equal $shellWaitJson.command_exit_code 22 'shell-level wait --json emits nonzero envelope on stdout'
+
+$shellWaitDoneJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitDone.JobId --json --state-root $localAppData
+$shellWaitDoneJsonExit = $LASTEXITCODE
+$shellWaitDoneJson = ($shellWaitDoneJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellWaitDoneJsonExit 0 'shell-level wait --json done exits 0'
+Assert-Equal $shellWaitDoneJson.command_exit_code 0 'shell-level wait --json done exit matches envelope'
+
+$shellWaitFailedJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitFailed.JobId --json --state-root $localAppData
+$shellWaitFailedJsonExit = $LASTEXITCODE
+$shellWaitFailedJson = ($shellWaitFailedJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellWaitFailedJsonExit 10 'shell-level wait --json failed exits 10'
+Assert-Equal $shellWaitFailedJson.command_exit_code 10 'shell-level wait --json failed exit matches envelope'
+
+$shellWaitTimedOutJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitTimedOutJson.JobId --json --state-root $localAppData
+$shellWaitTimedOutJsonExit = $LASTEXITCODE
+$shellWaitTimedOutJson = ($shellWaitTimedOutJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellWaitTimedOutJsonExit 24 'shell-level wait --json timed_out exits 24'
+Assert-Equal $shellWaitTimedOutJson.timeout_reason 'hard_timeout_sec=30 exceeded' 'shell-level wait --json timed_out includes reason'
+
+$shellWaitOwnTimeoutBefore = Get-Content -LiteralPath $waitOwnTimeoutStatusPath -Raw
+$shellWaitOwnTimeoutJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs wait $jobWaitOwnTimeoutJson.JobId --json --wait-timeout-sec 1 --state-root $localAppData
+$shellWaitOwnTimeoutJsonExit = $LASTEXITCODE
+$shellWaitOwnTimeoutAfter = Get-Content -LiteralPath $waitOwnTimeoutStatusPath -Raw
+$shellWaitOwnTimeoutJson = ($shellWaitOwnTimeoutJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellWaitOwnTimeoutJsonExit 20 'shell-level wait --json own timeout exits 20'
+Assert-Equal $shellWaitOwnTimeoutJson.command_exit_code 20 'shell-level wait --json own timeout exit matches envelope'
+Assert-Equal $shellWaitOwnTimeoutAfter $shellWaitOwnTimeoutBefore 'shell-level wait --json own timeout does not mutate status.json'
+
 # ============================================================
 # Invoke-CcodexReadCommand
 # ============================================================
@@ -389,6 +515,63 @@ Assert-Equal $shellReadExit 0 'shell-level read invocation exits 0'
 $shellReadOutLines = @($shellReadOut | Where-Object { $_ -ne $null -and $_ -ne '' })
 Assert-Equal $shellReadOutLines.Count 1 'shell-level read prints exactly one line'
 Assert-Equal $shellReadOutLines[0] 'the result' 'shell-level read prints the result.md content'
+
+# --- read: JSON lifecycle envelope ---
+
+Write-Host "Invoke-CcodexReadCommand: --json success, unfinished, missing, and unknown envelopes"
+$readDoneJsonResult = Invoke-CcodexReadCommand -JobId $jobReadDone.JobId -Json -StateRoot $localAppData
+$readDoneJson = $readDoneJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $readDoneJson.schema_version 1 'read --json schema version is 1'
+Assert-Equal $readDoneJson.finished $true 'read --json done is finished'
+Assert-Equal $readDoneJson.result_present $true 'read --json done has result'
+Assert-Equal $readDoneJson.result 'the result' 'read --json includes result content'
+Assert-Equal $readDoneJson.command_exit_code 0 'read --json done command exit is 0'
+
+$readRunningJsonResult = Invoke-CcodexReadCommand -JobId $jobReadRunning.JobId -Json -StateRoot $localAppData
+$readRunningJson = $readRunningJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $readRunningJsonResult.WrapperExitCode 4 'read --json running preserves exit 4'
+Assert-Equal $readRunningJson.finished $false 'read --json running is unfinished'
+Assert-Equal $readRunningJson.result_present $false 'read --json running has no result'
+Assert-True ($null -eq $readRunningJson.result) 'read --json running result is null'
+Assert-Equal $readRunningJson.command_exit_code 4 'read --json running command exit is 4'
+
+$readMissingJsonResult = Invoke-CcodexReadCommand -JobId $jobReadNoResult.JobId -Json -StateRoot $localAppData
+$readMissingJson = $readMissingJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $readMissingJsonResult.WrapperExitCode 11 'read --json missing result preserves exit 11'
+Assert-Equal $readMissingJson.finished $true 'read --json missing result is terminal'
+Assert-Equal $readMissingJson.command_exit_code 11 'read --json missing result command exit is 11'
+
+$readUnknownJsonResult = Invoke-CcodexReadCommand -JobId 'does-not-exist-json' -Json -StateRoot $localAppData
+$readUnknownJson = $readUnknownJsonResult.Stdout | ConvertFrom-Json
+Assert-Equal $readUnknownJsonResult.WrapperExitCode 3 'read --json unknown preserves exit 3'
+Assert-Equal $readUnknownJson.status 'unknown' 'read --json unknown has unknown status'
+Assert-Equal $readUnknownJson.command_exit_code 3 'read --json unknown command exit is 3'
+Assert-True (-not [string]::IsNullOrEmpty($readUnknownJson.error)) 'read --json unknown includes error'
+
+Write-Host "shell-level: read --json emits envelope on stdout for a nonzero exit"
+$shellReadJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read $jobReadRunning.JobId --json --state-root $localAppData
+$shellReadJsonExit = $LASTEXITCODE
+$shellReadJson = ($shellReadJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellReadJsonExit 4 'shell-level read --json preserves unfinished exit 4'
+Assert-Equal $shellReadJson.command_exit_code 4 'shell-level read --json emits nonzero envelope on stdout'
+
+$shellReadDoneJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read $jobReadDone.JobId --json --state-root $localAppData
+$shellReadDoneJsonExit = $LASTEXITCODE
+$shellReadDoneJson = ($shellReadDoneJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellReadDoneJsonExit 0 'shell-level read --json done exits 0'
+Assert-Equal $shellReadDoneJson.result 'the result' 'shell-level read --json done emits result'
+
+$shellReadMissingJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read $jobReadNoResult.JobId --json --state-root $localAppData
+$shellReadMissingJsonExit = $LASTEXITCODE
+$shellReadMissingJson = ($shellReadMissingJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellReadMissingJsonExit 11 'shell-level read --json missing result exits 11'
+Assert-Equal $shellReadMissingJson.command_exit_code 11 'shell-level read --json missing exit matches envelope'
+
+$shellReadUnknownJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs read does-not-exist-json --json --state-root $localAppData
+$shellReadUnknownJsonExit = $LASTEXITCODE
+$shellReadUnknownJson = ($shellReadUnknownJsonOut -join "`n") | ConvertFrom-Json
+Assert-Equal $shellReadUnknownJsonExit 3 'shell-level read --json unknown exits 3'
+Assert-True (-not [string]::IsNullOrEmpty($shellReadUnknownJson.error)) 'shell-level read --json unknown emits error envelope'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests

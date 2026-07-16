@@ -109,8 +109,15 @@ back to the user — do not present Codex's raw output as your own conclusion.
 
 ## Failure reactions
 
-React to `ccodex`'s exit code and `status.json.failure_reason` without reading logs, per the
-README's failure-class table:
+When checking a background job, call `ccodex status <job_id> --json`, `ccodex wait <job_id>
+--json`, or `ccodex read <job_id> --json`. Parse the top-level `schema_version: 1` lifecycle
+envelope instead of scraping human output. Its `command_exit_code` matches the process exit and
+is separate from the job's recorded `wrapper_exit_code`; fields remain present with `null` when
+unavailable, and `wait`/`read` return content in `result`. A missing job id is still a human usage
+error (exit `2`).
+
+React to the JSON `command_exit_code` and `status.json.failure_reason` without reading logs, per
+the README's failure-class table:
 
 | Signal | Reaction |
 | --- | --- |
