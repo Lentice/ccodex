@@ -108,7 +108,9 @@ conversation.
    ccodex read <job_id> --json       # non-blocking result envelope (exit 4 if unfinished)
    ```
 
-   Submit multiple jobs before waiting on any of them to run them in parallel.
+   Submit multiple jobs before waiting on any of them to run them in parallel. Tag fan-out jobs
+   with `--group <g>` and optional `--label <l>`, then gather once with
+   `ccodex wait --all --group <g> --json` instead of hand-written polling loops.
 
    For these three commands, always use `--json` in automation and parse the stable top-level
    `schema_version: 1` envelope instead of scraping human text. `command_exit_code` matches the
@@ -166,7 +168,7 @@ conversation.
 9. **Manage background jobs** with `cancel`/`tail`/`debug`/`cleanup`:
 
    ```powershell
-   ccodex list                       # enumerate jobs, newest first (--repo narrows; --state filters; --json for a machine envelope)
+   ccodex list                       # enumerate jobs (--repo/--state/--group/--label filter; --json for a machine envelope)
    ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
    ccodex tail <job_id> --lines 80   # raw stderr.log / codex-events.jsonl tail for a stuck job
    ccodex debug <job_id>             # compact one-shot diagnosis + suggested next command

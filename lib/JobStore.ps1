@@ -60,7 +60,9 @@ function New-CcodexStatusObject {
         [string]$WorktreeFinalizeError = $null,
         # Phase 5 resume lineage (append-only addition; null for non-resume jobs). A resumed
         # job records the id of the parent whose Codex thread it continued.
-        [string]$ParentJobId = $null
+        [string]$ParentJobId = $null,
+        [string]$Group = $null,
+        [string]$Label = $null
     )
     return [ordered]@{
         schema_version    = 1
@@ -90,6 +92,8 @@ function New-CcodexStatusObject {
         worktree_committed = $WorktreeCommitted
         worktree_finalize_error = $WorktreeFinalizeError
         parent_job_id     = $ParentJobId
+        group             = $Group
+        label             = $Label
     }
 }
 

@@ -88,6 +88,15 @@ $bad = $withBad | Where-Object { $_.job_id -eq '20260101T000005Z-ffffffff-review
 Assert-Equal $bad.status 'unknown' 'valid-JSON-but-not-an-object -> unknown'
 Assert-True ([bool]$bad.error) 'malformed entry carries an error string'
 
+Write-Host "Get-CcodexJobList: exact group/label filters exclude unknown entries"
+$metaDir = New-TestJob -RepoKey $repoKeyA -JobId '20260101T000006Z-gggggggg-review' -Status 'running'
+$meta = Read-CcodexStatusFile -JobDir $metaDir
+$meta.group = 'ci'; $meta.label = 'full'
+Write-CcodexJsonFileAtomic -Path (Join-Path $metaDir 'status.json') -Object $meta
+$byMeta = Get-CcodexJobList -Root $tempRoot -Group ci -Label full
+Assert-Equal $byMeta.Count 1 'group and label narrow to one job'
+Assert-Equal $byMeta[0].job_id '20260101T000006Z-gggggggg-review'
+
 Write-Host "Get-CcodexJobList: empty state root returns an empty array"
 $emptyRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ccodex-joblist-empty-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $emptyRoot -Force | Out-Null

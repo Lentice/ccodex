@@ -14,6 +14,8 @@ function Get-CcodexJobList {
         [string]$RepoKey = $null,
         # When non-empty, keep only jobs whose status is in this set.
         [string[]]$State = @(),
+        [string]$Group = $null,
+        [string]$Label = $null,
         [int]$StaleAfterSec = 90
     )
 
@@ -62,6 +64,12 @@ function Get-CcodexJobList {
         @($allEntries | Where-Object { $_.status -in $State })
     } else {
         @($allEntries)
+    }
+    if (-not [string]::IsNullOrEmpty($Group)) {
+        $filtered = @($filtered | Where-Object { $null -ne $_.PSObject.Properties['group'] -and $_.group -ceq $Group })
+    }
+    if (-not [string]::IsNullOrEmpty($Label)) {
+        $filtered = @($filtered | Where-Object { $null -ne $_.PSObject.Properties['label'] -and $_.label -ceq $Label })
     }
 
     # `, @(...)` forces an array return even for 0/1 element so callers get a stable

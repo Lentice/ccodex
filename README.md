@@ -156,7 +156,7 @@ ccodex review --range <base>..HEAD --path lib/ --intent "Add retry logic to Code
 **Async: submit, then check in later** (long tasks, or several running in parallel):
 
 ```powershell
-"Run the full test suite and report failures." | ccodex submit --mode test --access workspace
+"Run the full test suite and report failures." | ccodex submit --mode test --access workspace --group ci --label full
 # -> <job_id>
 #    <job_dir>
 
@@ -165,6 +165,7 @@ ccodex wait <job_id>      # blocks until terminal, then prints the result
 ccodex read <job_id>      # non-blocking result read
 ccodex status <job_id> --json  # stable machine-readable lifecycle envelope
 ccodex wait <job_id> --json    # result and command_exit_code are fields in the envelope
+ccodex wait --all --group ci --json  # gather a snapshot of matching non-terminal jobs
 ccodex read <job_id> --json    # result state/content without scraping human text
 ```
 
@@ -178,6 +179,7 @@ As with `list --json`, the top-level `schema_version` is `1`.
 ```powershell
 ccodex list                                    # human table, all repos
 ccodex list --repo D:\some\repo --state running  # narrow to one repo / state(s)
+ccodex list --group ci --label full             # exact metadata filters
 ccodex list --json                             # {schema_version, count, jobs[]} envelope
 ```
 
@@ -209,6 +211,7 @@ effort; Codex rejects unsupported combinations):
 
 ```powershell
 "Deep design review of this plan." | ccodex run --mode brainstorm --model gpt-5.6-terra --effort xhigh
+"Compare another option." | ccodex run --mode brainstorm --group design --label option-b
 ```
 
 **Cleanup**, periodically or when reclaiming disk:

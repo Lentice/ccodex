@@ -84,6 +84,8 @@ $terminalA = Wait-CcodexTestTerminalStatus -JobDir $resultA.JobDir -TimeoutSec 4
 Assert-True ($terminalA -ne $null) 'job reaches a terminal status object'
 Assert-Equal $terminalA.status 'done' 'submitted job reaches terminal done via the detached worker'
 Assert-Equal $terminalA.backend 'native' 'terminal status is stamped backend native'
+Assert-True ([string]::IsNullOrEmpty($terminalA.group)) 'submit without --group records null group'
+Assert-True ([string]::IsNullOrEmpty($terminalA.label)) 'submit without --label records null label'
 
 $resultMdA = Get-Content -LiteralPath (Join-Path $resultA.JobDir 'result.md') -Raw
 Assert-True ($resultMdA -like '*SUBMIT RESULT OK*') 'result.md carries the fixture result content written by the detached worker'
@@ -219,6 +221,18 @@ Write-Host "shell-level: submit --effort turbo is a usage error (exit 2), no wor
 $badEffortSubmitOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --effort turbo
 Assert-Equal $LASTEXITCODE 2 'submit --effort turbo exits 2'
 Assert-True ((($badEffortSubmitOut -join "`n")) -like '*--effort*') 'usage error names the --effort flag (invalid value)'
+
+$env:CCODEX_FAKE_EXIT_CODE = '0'; $env:CCODEX_FAKE_RESULT = 'submit metadata ok'
+$metaOut = "metadata" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess --group sg --label sl
+Assert-Equal $LASTEXITCODE 0 'submit --group/--label exits 0'
+$metaDir = @($metaOut | Where-Object { $_ })[1]
+$metaTerminal = Wait-CcodexTestTerminalStatus -JobDir $metaDir -TimeoutSec 20
+Assert-Equal $metaTerminal.group 'sg' 'submit group survives worker rewrites'
+Assert-Equal $metaTerminal.label 'sl' 'submit label survives worker rewrites'
+$bareLabelOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --label
+Assert-Equal $LASTEXITCODE 2 'submit bare --label exits 2'
+$bareGroupOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --group
+Assert-Equal $LASTEXITCODE 2 'submit bare --group exits 2'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests

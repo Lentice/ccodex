@@ -91,6 +91,15 @@ omitting both leaves the codex argv byte-identical to before these flags existed
 For `submit`, the flags travel to the detached worker on its launch command line (never via
 `status.json`, which carries neither — they are per-invocation knobs, not job lifecycle state).
 
+`run` and `submit` accept optional `--group <g>` and `--label <l>`. These nullable job-metadata
+values travel through `status.json`, survive lifecycle rewrites, and are inherited by resume
+children. Bare flags are usage errors.
+
+| Flag | Commands | Meaning |
+| --- | --- | --- |
+| `--group <g>` | `run`, `submit` | Exact, case-sensitive batch grouping metadata. |
+| `--label <l>` | `run`, `submit` | Exact, case-sensitive descriptive metadata. |
+
 ### review
 
 `ccodex review` is sugar over the `run` pipeline (always `--mode review`, `--access read-only`):
@@ -226,7 +235,9 @@ follow-up text must come from stdin or `--prompt-file`, never a positional.
 (containing only the follow-up text, never the worker-prompt template), and index entry — and the
 parent job's directory/`status.json` are strictly read-only to it; nothing about the parent is
 ever mutated. The child's `status.json` carries `parent_job_id` (the parent's job id) for lineage,
-alongside the same `codex_thread_id`. Internally it invokes `codex exec resume <thread_id>` (the
+alongside the same `codex_thread_id`, `group`, and `label`. Group and label are inherited-only;
+`resume --group` and `resume --label` are rejected as usage errors (exit 2). Internally it invokes
+`codex exec resume <thread_id>` (the
 Task-1 `--ask-for-approval never … --sandbox <mapped-access> --json --color never -C <repo>
 --output-last-message <result.md> -` shape with `exec resume <thread_id>` spliced in place of
 `exec`) so result validation, `failure_reason` classification, and the terminal status write are
@@ -280,10 +291,42 @@ process has exited:
 
 ccodex status <job_id> [--json]   # non-blocking lifecycle state
 ccodex wait <job_id> [--json]     # blocks until terminal (or its wait timeout)
+ccodex wait --all [--group <g>] [--label <l>] [--json] [--wait-timeout-sec <n>]
 ccodex read <job_id> [--json]     # non-blocking result read; exits 4 if not finished yet
 ```
 
 Submit several jobs before waiting on any of them to run independent tasks in parallel.
+
+`wait --all` takes one snapshot of currently `created`/`running` jobs, optionally filtered by
+exact case-sensitive group, label, and repo. Later submissions are excluded. The timeout applies
+to the whole batch; zero matches exit 0. Human output is one line per resolved job plus a summary.
+JSON contains ordered `schema_version`, `jobs`, `summary`, and `command_exit_code`; every nested
+job is the unchanged single-job wait envelope. Summary fields are `total`, `succeeded`, `failed`,
+`timed_out`, `no_result`, `cancelled`, and `wait_timeout`. Exit precedence is 3, 20, 12, 10, 24,
+11, 22, 0. A job id with `--all`, or group/label without `--all`, is exit 2. Single-job wait is
+unchanged.
+
+With no matches, human mode prints exactly `ccodex: no non-terminal jobs match.`; JSON returns
+`jobs: []`, zeroes every summary count, and exits 0. Batch deadline envelopes retain each job's
+actual last-known state, and deadline expiry never writes `status.json`.
+
+| Batch JSON field | Contract |
+| --- | --- |
+| `schema_version` | Always `1`. |
+| `jobs` | One unchanged single-job wait envelope per snapshot job, job-id descending. |
+| `summary` | Always has `total`, `succeeded`, `failed`, `timed_out`, `no_result`, `cancelled`, `wait_timeout`. |
+| `command_exit_code` | Batch process exit code from the precedence table below. |
+
+| Precedence | Exit | Condition |
+| ---: | ---: | --- |
+| 1 | 3 | Missing or unenumerable state root. |
+| 2 | 20 | Batch deadline leaves at least one job non-terminal. |
+| 3 | 12 | Any internal-error result. |
+| 4 | 10 | Any failed result. |
+| 5 | 24 | Any hard-timeout result. |
+| 6 | 11 | Any terminal job without a usable result. |
+| 7 | 22 | Any cancelled result. |
+| 8 | 0 | All succeeded, or the snapshot is empty. |
 
 Each command accepts the presence flag `--json`. Without it, the existing human text is the
 default and is unchanged. With it, stdout is an ordered JSON envelope rendered by
@@ -333,7 +376,7 @@ For a job created by `ccodex resume`, `status`/`debug` append `parent=<parent_jo
 
 ### list
 
-**`ccodex list [--json] [--repo <path>] [--state <s> ...]`** enumerates jobs, newest first. It is
+**`ccodex list [--json] [--repo <path>] [--state <s> ...] [--group <g>] [--label <l>]`** enumerates jobs, newest first. It is
 the job-enumeration endpoint the batch/orchestration use cases build on.
 
 ```powershell
@@ -341,6 +384,7 @@ ccodex list                                        # human table, all repos, new
 ccodex list --repo D:\some\repo                     # narrow to one repo's jobs
 ccodex list --state running --state failed          # repeatable: only these states
 ccodex list --json                                  # machine-readable envelope
+ccodex list --group ci --label full                 # exact, case-sensitive metadata filters
 ```
 
 - **Flags:** `--json` (presence) switches to the JSON envelope below; absent ⇒ human text (always
@@ -596,6 +640,7 @@ directory. `status.json` additionally records `backend` (`sync` for `run`, `nati
 `submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,
 `codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`,
 `last_heartbeat_at`, `parent_job_id` (the parent's job id for a `resume`d job, `null` otherwise),
+`group`, and `label` (nullable strings, always present and inherited by resumed children),
 and — for a `--access worktree` job — `main_repo`, `worktree_repo`, `base_commit`, and
 `worktree_committed` (all `null` for non-worktree jobs; see [Failure classes](#failure-classes),
 [Hard timeout](#hard-timeout), [implement, diff, and apply](#implement-diff-and-apply),

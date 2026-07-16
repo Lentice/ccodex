@@ -86,7 +86,11 @@ $statusResume = New-CcodexStatusObject -JobId 'jobresume' -Status 'done' -Mode '
 Assert-Equal $statusResume.parent_job_id 'parent-abc-123' 'parent_job_id round-trips'
 $statusResumeKeys = [System.Collections.Generic.List[string]]::new()
 foreach ($key in $statusResume.Keys) { $statusResumeKeys.Add($key) }
-Assert-Equal $statusResumeKeys[$statusResumeKeys.Count - 1] 'parent_job_id' 'parent_job_id is the last (appended) key'
+Assert-Equal $statusResumeKeys[$statusResumeKeys.Count - 3] 'parent_job_id' 'parent_job_id precedes metadata keys'
+Assert-Equal $statusResumeKeys[$statusResumeKeys.Count - 2] 'group' 'group follows parent_job_id'
+Assert-Equal $statusResumeKeys[$statusResumeKeys.Count - 1] 'label' 'label follows group'
+Assert-True ([string]::IsNullOrEmpty($statusResume.group)) 'group defaults null'
+Assert-True ([string]::IsNullOrEmpty($statusResume.label)) 'label defaults null'
 Assert-Equal $statusResumeKeys[$statusResumeKeys.IndexOf('created_at') + 1] 'backend' 'backend key still immediately follows created_at after the parent_job_id addition'
 
 Write-Host "New-CcodexDebugObject"

@@ -64,12 +64,14 @@ function Invoke-CcodexWorker {
     $mainRepo = $status.main_repo
     $worktreeRepo = $status.worktree_repo
     $baseCommit = $status.base_commit
+    $group = $status.group
+    $label = $status.label
 
     $statusPath = Join-Path $jobDir 'status.json'
     $runningStatusObject = New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
         -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull `
-        -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit
+        -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label
 
     # The created->running transition is a status.json WRITE, so it goes through the
     # per-job lock like every other writer AND re-reads status under the lock before
@@ -91,7 +93,7 @@ function Invoke-CcodexWorker {
                 -Access $status.access -RepoRoot $status.repo -CreatedAt $status.created_at -Backend 'native' `
                 -BackendId $backendId -StartedAt $startedAt -ResultPath (Join-Path $jobDir 'result.md') `
                 -EventsPath (Join-Path $jobDir 'codex-events.jsonl') -StderrPath (Join-Path $jobDir 'stderr.log') `
-                -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit `
+                -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
                 -Message $startResult.Message
             return [pscustomobject]@{ WrapperExitCode = $failResult.WrapperExitCode; Message = $failResult.Message }
         }
@@ -117,7 +119,7 @@ function Invoke-CcodexWorker {
     $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
         -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
         -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
-        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit `
+        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
         -Model $Model -Effort $Effort
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }

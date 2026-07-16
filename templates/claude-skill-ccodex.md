@@ -81,10 +81,11 @@ ccodex review --repo <submodule-path> --range <base>..HEAD --path . --intent "..
 # Long-running: fire, keep working, collect later
 "Audit error handling across src/" | ccodex submit --mode review --repo <repo>   # prints <job_id>
 ccodex wait <job_id> --json --wait-timeout-sec 600                 # parse envelope; exit 20 = still running
+ccodex wait --all --group <g> [--label <l>] --json                 # gather tagged fan-out jobs once
 ccodex read <job_id> --json                                        # parse result/result_present anytime
 ccodex status <job_id> --json                                      # parse lifecycle state; do not scrape text
 ccodex list                                                        # enumerate jobs, newest first (all repos; --repo narrows)
-ccodex list --json --state running                                 # machine-readable {schema_version,count,jobs[]}, filtered by state
+ccodex list --json --state running --group <g> [--label <l>]       # machine-readable filtered jobs
                                                                    # read-only: does NOT reconcile a dead worker (a crashed job may
                                                                    # still show running/health=stale) - use `status <id>` for a verdict
 

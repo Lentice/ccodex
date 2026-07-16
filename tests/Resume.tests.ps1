@@ -112,6 +112,10 @@ $ccodexScriptPath = (Resolve-Path (Join-Path $PSScriptRoot '..\ccodex.ps1')).Pat
 
 Write-Host "Invoke-CcodexResume: happy path resumes a done parent, exits 0, prints only the result"
 New-CcodexTestParentJob -JobId 'cmd-parent-done' -Status 'done' -Mode 'brainstorm' -Access 'read-only' -Repo $realRepo -CodexThreadId 'thread-parent' -Root $cmdStateRoot | Out-Null
+$parentMetaRecord = Get-CcodexJobRecord -JobId 'cmd-parent-done' -Root $cmdStateRoot
+$parentMetaStatus = Read-CcodexStatusFile -JobDir $parentMetaRecord.JobDir
+$parentMetaStatus.group = 'inherited-group'; $parentMetaStatus.label = 'inherited-label'
+Write-CcodexJsonFileAtomic -Path (Join-Path $parentMetaRecord.JobDir 'status.json') -Object $parentMetaStatus
 $env:CCODEX_FAKE_EXIT_CODE = '0'
 $env:CCODEX_FAKE_RESULT = 'resumed answer text'
 $env:CCODEX_FAKE_THREAD_ID = 'child-thread-999'
@@ -129,6 +133,8 @@ Assert-Equal $childStatus.parent_job_id 'cmd-parent-done' 'child status carries 
 Assert-Equal $childStatus.mode 'brainstorm' 'child inherits the parent mode'
 Assert-Equal $childStatus.access 'read-only' 'child inherits the parent access'
 Assert-Equal $childStatus.repo $realRepo 'child inherits the parent repo'
+Assert-Equal $childStatus.group 'inherited-group' 'child inherits parent group'
+Assert-Equal $childStatus.label 'inherited-label' 'child inherits parent label'
 Assert-Equal $childStatus.codex_thread_id 'child-thread-999' 'child captures its OWN new thread id from events'
 
 $childPrompt = [System.IO.File]::ReadAllText((Join-Path $childDir 'prompt.md'))
@@ -238,6 +244,9 @@ Assert-True ((($rejMode -join "`n")) -like '*--mode*') 'resume --mode rejection 
 $rejAccess = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --access workspace --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
 Assert-Equal $LASTEXITCODE 2 'resume with --access exits 2'
 Assert-True ((($rejAccess -join "`n")) -like '*--access*') 'resume --access rejection names --access'
+
+$rejGroup = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject --group x --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
+Assert-Equal $LASTEXITCODE 2 'resume --group exits 2'
 
 $rejPositional = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath resume cmd-parent-reject extratext --state-root $cmdStateRoot --codex-path $fixtureCmd 2>&1
 Assert-Equal $LASTEXITCODE 2 'resume with an extra positional after the job id exits 2'

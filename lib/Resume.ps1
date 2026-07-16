@@ -48,6 +48,8 @@ function Get-CcodexResumeContext {
         Mode        = [string]$status.mode
         Access      = [string]$status.access
         Repo        = [string]$status.repo
+        Group       = $status.group
+        Label       = $status.label
     }
 }
 

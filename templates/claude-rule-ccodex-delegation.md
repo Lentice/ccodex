@@ -116,6 +116,9 @@ is separate from the job's recorded `wrapper_exit_code`; fields remain present w
 unavailable, and `wait`/`read` return content in `result`. A missing job id is still a human usage
 error (exit `2`).
 
+For fan-out/gather, submit jobs with a shared `--group <g>` (and optional `--label <l>`), then
+use `ccodex wait --all --group <g> --json` once instead of hand-written polling loops.
+
 React to the JSON `command_exit_code` and `status.json.failure_reason` without reading logs, per
 the README's failure-class table:
 

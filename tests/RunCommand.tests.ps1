@@ -72,6 +72,8 @@ $statusJson = Get-Content -LiteralPath (Join-Path $jobDir 'status.json') -Raw | 
 Assert-Equal $statusJson.status 'done' 'final status.json status is done'
 Assert-Equal $statusJson.codex_exit_code 0 'status.json records codex_exit_code separately'
 Assert-Equal $statusJson.wrapper_exit_code 0 'status.json records wrapper_exit_code separately'
+Assert-True ([string]::IsNullOrEmpty($statusJson.group)) 'run without --group records null group'
+Assert-True ([string]::IsNullOrEmpty($statusJson.label)) 'run without --label records null label'
 
 # Diagnostic timing: a sync run must populate started_at (stamped just before the codex launch)
 # so codex runtime (started_at -> finished_at) can be told apart from wrapper setup after the
@@ -273,6 +275,17 @@ try {
     $flagValueModelOut = "unused task text" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --model --effort high
     Assert-Equal $LASTEXITCODE 2 'run --model --effort high exits 2 (never forwards -m --effort to codex)'
     Assert-True ((($flagValueModelOut -join "`n")) -like '*--model*') 'usage error names the --model flag (flag-shaped value)'
+
+    $env:CCODEX_FAKE_EXIT_CODE = '0'; $env:CCODEX_FAKE_RESULT = 'metadata ok'
+    $metadataRun = Invoke-CcodexRunForTest -Overrides @{ Group = 'rg'; Label = 'rl' }
+    Assert-Equal $metadataRun.WrapperExitCode 0 'run with group/label exits 0'
+    $metaStatus = Get-Content -LiteralPath (Join-Path $metadataRun.JobDir 'status.json') -Raw | ConvertFrom-Json
+    Assert-Equal $metaStatus.group 'rg' 'run group survives terminal rewrite'
+    Assert-Equal $metaStatus.label 'rl' 'run label survives terminal rewrite'
+    $bareGroupOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --group
+    Assert-Equal $LASTEXITCODE 2 'run bare --group exits 2'
+    $bareLabelOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexScriptPath run --mode review --repo $repoRoot --label
+    Assert-Equal $LASTEXITCODE 2 'run bare --label exits 2'
 
     # Regression: --prompt-file has an internal hyphen, so PowerShell's -File binder cannot map it
     # onto the -PromptFile script parameter; it must be parsed out of $args instead. A non-existent
