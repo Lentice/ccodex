@@ -74,6 +74,29 @@ try {
     Assert-True ($resultGreen.Stdout -like '*ok worker prompt template:*') 'template-present check reports ok'
     Assert-True ($resultGreen.Stdout -like '*ok index/jobs consistency: dangling_indexes=*unindexed_job_dirs=*') 'index/jobs consistency check reports counts'
     Assert-True ($resultGreen.Stdout -like '*ok smoke test: skipped (--no-smoke)*') 'smoke check reports skipped under --no-smoke'
+    $greenHumanLines = @($resultGreen.Stdout -split "`n")
+    Assert-Equal $greenHumanLines.Count 6 'human doctor output still has exactly one line per check'
+    foreach ($humanLine in $greenHumanLines) {
+        Assert-True ($humanLine -match '^(ok|FAIL) [^:]+: .+$') "human doctor line keeps the established shape: $humanLine"
+    }
+
+    Write-Host "Invoke-CcodexDoctorCommand: healthy -Json result uses the ordered schema-v1 envelope"
+    $resultGreenJson = Invoke-CcodexDoctorCommand -NoSmoke $true -Json -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo
+    Assert-Equal $resultGreenJson.WrapperExitCode 0 'healthy JSON doctor exits 0'
+    Assert-Equal $resultGreenJson.Message $null 'healthy JSON doctor has no human Message'
+    $greenEnvelope = $resultGreenJson.Stdout | ConvertFrom-Json
+    Assert-Equal $greenEnvelope.schema_version 1 'doctor JSON schema_version is 1'
+    Assert-Equal $greenEnvelope.ok $true 'healthy doctor JSON ok is true'
+    Assert-Equal $greenEnvelope.env_failed $false 'healthy doctor JSON env_failed is false'
+    Assert-Equal $greenEnvelope.smoke_failed $false 'skipped smoke is not a smoke failure'
+    Assert-Equal $greenEnvelope.command_exit_code 0 'healthy doctor JSON embeds command exit 0'
+    Assert-Equal $greenEnvelope.checks.Count 6 'doctor JSON emits six checks'
+    Assert-Equal (($greenEnvelope.checks | ForEach-Object name) -join '|') 'codex resolvable|codex doctor|state root writable|worker prompt template|index/jobs consistency|smoke test' 'doctor JSON check order and human names are stable'
+    foreach ($check in $greenEnvelope.checks) {
+        Assert-Equal (($check.PSObject.Properties.Name) -join '|') 'name|status|detail|output' "check '$($check.name)' has every key in exact order"
+    }
+    Assert-Equal $greenEnvelope.checks[5].status 'skip' 'no-smoke check status is skip'
+    Assert-Equal $greenEnvelope.checks[5].output $null 'normal check output stays null'
 
     # ============================================================
     # (b) unwritable state root (points at a file, not a directory) -> FAIL + exit 12
@@ -88,6 +111,17 @@ try {
     Assert-True ($resultBadRoot.Message -like '*FAIL state root writable:*') 'unwritable state root produces a FAIL line'
     Assert-True ($resultBadRoot.Message -like '*ok codex resolvable:*') 'other checks still ran and reported ok'
     Assert-True ($resultBadRoot.Message -like '*ok worker prompt template:*') 'template check (independent of the bad state root) still reports ok'
+
+    Write-Host "Invoke-CcodexDoctorCommand: environment failure still returns JSON on Stdout"
+    $nonexistentCodex = Join-Path $tempRoot 'nonexistent-codex.exe'
+    $resultEnvJson = Invoke-CcodexDoctorCommand -NoSmoke $true -Json -CodexPath $nonexistentCodex -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo
+    Assert-Equal $resultEnvJson.WrapperExitCode 12 'environment-failure JSON doctor exits 12'
+    Assert-Equal $resultEnvJson.Message $null 'environment-failure JSON doctor has no human Message'
+    $envEnvelope = $resultEnvJson.Stdout | ConvertFrom-Json
+    Assert-Equal $envEnvelope.ok $false 'environment-failure JSON ok is false'
+    Assert-Equal $envEnvelope.env_failed $true 'environment-failure JSON env_failed is true'
+    Assert-Equal $envEnvelope.command_exit_code 12 'environment-failure JSON embeds command exit 12'
+    Assert-True (@($envEnvelope.checks | Where-Object status -eq 'fail').Count -gt 0) 'environment-failure JSON includes a failing check'
 
     # ============================================================
     # (c) live smoke through the normal run pipeline against the fixture -> exit 0 + OK
@@ -109,6 +143,11 @@ try {
     Assert-Equal $resultDoctorFail.WrapperExitCode 12 "'codex doctor' failure exits 12"
     Assert-True ($resultDoctorFail.Message -like '*FAIL codex doctor: exited 1*') "'codex doctor' FAIL line names its exit code"
     Assert-True ($resultDoctorFail.Message -like '*sandbox check: failed to spawn child process*') "'codex doctor' full output is surfaced, not swallowed"
+    $resultDoctorFailJson = Invoke-CcodexDoctorCommand -NoSmoke $true -Json -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride $targetRepo
+    $doctorFailEnvelope = $resultDoctorFailJson.Stdout | ConvertFrom-Json
+    $doctorFailCheck = $doctorFailEnvelope.checks | Where-Object name -eq 'codex doctor'
+    Assert-Equal $doctorFailCheck.status 'fail' 'failed delegated codex doctor has status=fail'
+    Assert-Equal $doctorFailCheck.output 'sandbox check: failed to spawn child process' 'failed delegated codex doctor stores its raw output block content'
 
     # ============================================================
     # (e) environment green but the live smoke fails -> FAIL line + exit 10
@@ -138,6 +177,10 @@ try {
     $resultConsistency = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $consistencyRoot -AppDataRoot $appData -RepoOverride $targetRepo
     Assert-Equal $resultConsistency.WrapperExitCode 0 'nonzero dangling/unindexed counts do not fail the doctor run'
     Assert-True ($resultConsistency.Stdout -like '*ok index/jobs consistency: dangling_indexes=1 unindexed_job_dirs=1*') 'the consistency check reports the exact dangling/unindexed counts'
+    $resultConsistencyJson = Invoke-CcodexDoctorCommand -NoSmoke $true -Json -CodexPath $fakeCmd -StateRoot $consistencyRoot -AppDataRoot $appData -RepoOverride $targetRepo
+    $consistencyEnvelope = $resultConsistencyJson.Stdout | ConvertFrom-Json
+    $consistencyCheck = $consistencyEnvelope.checks | Where-Object name -eq 'index/jobs consistency'
+    Assert-Equal $consistencyCheck.status 'warn' 'nonzero consistency counts map to warn in JSON'
 
     # ============================================================
     # (g) a bad --repo is a usage error (exit 2), same as run/review
@@ -146,6 +189,10 @@ try {
     $resultBadRepo = Invoke-CcodexDoctorCommand -NoSmoke $true -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride (Join-Path $tempRoot 'does-not-exist')
     Assert-Equal $resultBadRepo.WrapperExitCode 2 'a nonexistent --repo exits 2'
     Assert-True ($resultBadRepo.Message -like '*--repo*') 'the usage error names --repo'
+    $resultBadRepoJson = Invoke-CcodexDoctorCommand -NoSmoke $true -Json -CodexPath $fakeCmd -StateRoot $localAppData -AppDataRoot $appData -RepoOverride (Join-Path $tempRoot 'does-not-exist')
+    Assert-Equal $resultBadRepoJson.WrapperExitCode 2 'bad --repo with JSON requested still exits 2'
+    Assert-Equal $resultBadRepoJson.Stdout $null 'bad --repo with JSON requested returns human text, not JSON'
+    Assert-True ($resultBadRepoJson.Message -like '*--repo*') 'bad --repo JSON request keeps the human usage message'
 
     # ============================================================
     # (h) a hung 'codex --version' probe is bounded by ProbeTimeoutSec -> FAIL + exit 12
@@ -213,6 +260,24 @@ try {
     $shellGreenText = ($shellGreenOut -join "`n")
     Assert-True ($shellGreenText -like '*ok codex resolvable:*') 'shell-level output includes the codex-resolvable check'
     Assert-True ($shellGreenText -like '*ok smoke test: skipped*') 'shell-level output reflects --no-smoke'
+
+    Write-Host "shell-level: doctor --json emits parseable JSON on success and environment failure"
+    $shellJsonOut = & pwsh -NoLogo -NoProfile -File $ccodexPs doctor --json --no-smoke --codex-path $fakeCmd --state-root $localAppData --repo $targetRepo
+    Assert-Equal $LASTEXITCODE 0 'shell-level doctor --json success exits 0'
+    $shellJsonEnvelope = ($shellJsonOut -join "`n") | ConvertFrom-Json
+    Assert-Equal $shellJsonEnvelope.command_exit_code 0 'shell-level success JSON parses and embeds exit 0'
+    $shellJsonFailOut = & pwsh -NoLogo -NoProfile -File $ccodexPs doctor --json --no-smoke --codex-path (Join-Path $tempRoot 'missing-shell-codex.exe') --state-root $localAppData --repo $targetRepo
+    Assert-Equal $LASTEXITCODE 12 'shell-level doctor --json environment failure exits 12'
+    $shellJsonFailEnvelope = ($shellJsonFailOut -join "`n") | ConvertFrom-Json
+    Assert-Equal $shellJsonFailEnvelope.command_exit_code 12 'shell-level failure JSON still arrives on stdout'
+    Assert-Equal $shellJsonFailEnvelope.ok $false 'shell-level failure JSON marks ok false'
+
+    $shellBadRepoOut = & pwsh -NoLogo -NoProfile -File $ccodexPs doctor --json --no-smoke --codex-path $fakeCmd --state-root $localAppData --repo (Join-Path $tempRoot 'missing-shell-repo')
+    Assert-Equal $LASTEXITCODE 2 'shell-level bad --repo with --json exits 2'
+    Assert-True ((($shellBadRepoOut -join "`n")) -like '*--repo*') 'shell-level bad --repo with --json keeps human usage text'
+    $badRepoParsed = $true
+    try { $null = (($shellBadRepoOut -join "`n") | ConvertFrom-Json -ErrorAction Stop) } catch { $badRepoParsed = $false }
+    Assert-Equal $badRepoParsed $false 'shell-level bad --repo with --json is not a JSON envelope'
 
     Write-Host "shell-level: ccodex.ps1 doctor (smoke enabled by default) prints the fixture result OK, exits 0"
     $shellSmokeOut = & pwsh -NoLogo -NoProfile -File $ccodexPs doctor --codex-path $fakeCmd --state-root $localAppData --repo $targetRepo

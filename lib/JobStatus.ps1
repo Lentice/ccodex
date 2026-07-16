@@ -164,13 +164,14 @@ function Update-CcodexOrphanStatus {
     $verdict = Test-CcodexResult -CodexExitCode $codexExitCode -ResultPath $resultPath
 
     # Same diagnostics normal completion records (ccodex.ps1's Invoke-CcodexJobExecution):
-    # failure_reason only on a failure terminal status (never stamped for a successful
-    # run), codex_thread_id whenever present regardless of success/failure. Without this,
+    # failure_reason/failure only on a failure terminal status (never stamped for a
+    # successful run), codex_thread_id whenever present regardless of success/failure. Without this,
     # async crash recovery (this evidence-based reconciliation path) would silently lose
     # both compared to a worker that reached its own terminal status normally.
     $stderrPath = Join-Path $JobDir 'stderr.log'
     $eventsPath = Join-Path $JobDir 'codex-events.jsonl'
-    $failureReason = if ($verdict.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $failureSignal = if ($verdict.Status -eq 'failed') { Get-CcodexFailureSignal -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $failureReason = if ($failureSignal) { $failureSignal.reason } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
     $updated = [ordered]@{}
@@ -189,6 +190,7 @@ function Update-CcodexOrphanStatus {
     # Append-only: these keys may not exist on an older status.json (pre-dating failure
     # classification); the indexer assignment below adds them either way.
     $updated['failure_reason'] = $failureReason
+    $updated['failure'] = $failureSignal
     $updated['codex_thread_id'] = $codexThreadId
 
     if ($DryRun) {

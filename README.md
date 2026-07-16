@@ -238,6 +238,13 @@ ccodex cleanup --dry-run                             # preview only
 ccodex cleanup --older-than 7d --scrub-thread-ids    # delete aged jobs + blank old session ids
 ```
 
+**Diagnose the environment** before retrying auth, quota, sandbox, or wrapper-shaped failures:
+
+```powershell
+ccodex doctor --no-smoke         # human environment checks, no live Codex smoke
+ccodex doctor --json --no-smoke  # schema-v1 envelope for automation, including nonzero exits
+```
+
 ## Other key points
 
 ### Exit codes
@@ -263,7 +270,9 @@ On a failed job, `status.json.failure_reason` hints the reaction: `quota_or_rate
 it, never retry · `auth` → run `codex login` · `permission_or_sandbox` → narrow the scope (only
 `test`/`implement` may use `--access workspace`; a review stays read-only) · `network` → one retry
 is safe · `thread_expired` (resumed jobs only) → start a
-fresh `run`. When it's unclear, run `ccodex doctor` before retrying anything.
+fresh `run`. The adjacent structured `status.json.failure` object adds the matched signal,
+source, confidence, and HTTP code for automation. When it's unclear, run `ccodex doctor` before
+retrying anything.
 
 ### Delegation policy (`.ccodex/ccodex.json`)
 

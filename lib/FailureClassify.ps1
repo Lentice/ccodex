@@ -5,6 +5,33 @@
 # $null on missing/unreadable/unparseable input. `failure_reason` is never
 # stamped for a successful (exit 0) run.
 
+# Ordered signal table. Order IS precedence: first row whose literal pattern matches wins.
+# Class order and alternative order reproduce the legacy class-level alternation regexes.
+$script:CcodexFailureSignals = @(
+    [pscustomobject]@{ Class='thread_expired';        Pattern='session not found';      Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='thread_expired';        Pattern='thread not found';       Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='thread_expired';        Pattern='no session';             Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='thread_expired';        Pattern='conversation not found'; Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='usage limit';            Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='rate limit';             Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='quota';                  Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='429';                    Confidence='low';    HttpCode=429 },
+    [pscustomobject]@{ Class='auth';                  Pattern='login';                  Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='auth';                  Pattern='auth';                   Confidence='low';    HttpCode=$null },
+    [pscustomobject]@{ Class='auth';                  Pattern='401';                    Confidence='low';    HttpCode=401 },
+    [pscustomobject]@{ Class='auth';                  Pattern='unauthorized';           Confidence='high';   HttpCode=401 },
+    [pscustomobject]@{ Class='auth';                  Pattern='credential';             Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='sandbox';                Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='denied';                 Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='approval';               Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='permission';             Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='network';               Pattern='network';                Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='network';               Pattern='connection';             Confidence='medium'; HttpCode=$null },
+    [pscustomobject]@{ Class='network';               Pattern='dns';                    Confidence='high';   HttpCode=$null },
+    [pscustomobject]@{ Class='network';               Pattern='502';                    Confidence='low';    HttpCode=502 },
+    [pscustomobject]@{ Class='network';               Pattern='503';                    Confidence='low';    HttpCode=503 }
+)
+
 function Get-CcodexCodexThreadId {
     # thread_id of the first `thread.started` event in the raw Codex JSONL
     # events log, so a job's status.json can carry it for both success and
@@ -32,7 +59,7 @@ function Get-CcodexCodexThreadId {
     return $null
 }
 
-function Get-CcodexFailureReason {
+function Get-CcodexFailureSignal {
     # Conservative signature match over the LAST 8KB of stderr.log plus any
     # event lines that literally contain "error" (case-insensitive). $null
     # whenever $CodexExitCode is 0 (never classify a successful run) or when
@@ -43,45 +70,101 @@ function Get-CcodexFailureReason {
         [string]$StderrPath,
         [string]$EventsPath
     )
-    if ($CodexExitCode -eq 0) { return $null }
+    try {
+        if ($CodexExitCode -eq 0) { return $null }
 
-    $signalText = ''
+        $stderrText = ''
+        $eventsText = ''
 
-    if (-not [string]::IsNullOrEmpty($StderrPath) -and (Test-Path -LiteralPath $StderrPath -PathType Leaf)) {
         try {
-            $maxBytes = 8192
-            $bytes = [System.IO.File]::ReadAllBytes($StderrPath)
-            if ($bytes.Length -gt $maxBytes) {
-                $tail = New-Object byte[] $maxBytes
-                [Array]::Copy($bytes, $bytes.Length - $maxBytes, $tail, 0, $maxBytes)
-                $bytes = $tail
-            }
-            $signalText += [System.Text.Encoding]::UTF8.GetString($bytes)
-        } catch {
-            # unreadable stderr contributes no signal
-        }
-    }
-
-    if (-not [string]::IsNullOrEmpty($EventsPath) -and (Test-Path -LiteralPath $EventsPath -PathType Leaf)) {
-        try {
-            $lines = Get-Content -LiteralPath $EventsPath -ErrorAction Stop
-            foreach ($line in $lines) {
-                if ($line -match '(?i)error') {
-                    $signalText += "`n$line"
+            if (-not [string]::IsNullOrEmpty($StderrPath) -and (Test-Path -LiteralPath $StderrPath -PathType Leaf)) {
+                $maxBytes = 8192
+                $bytes = [System.IO.File]::ReadAllBytes($StderrPath)
+                if ($bytes.Length -gt $maxBytes) {
+                    $tail = New-Object byte[] $maxBytes
+                    [Array]::Copy($bytes, $bytes.Length - $maxBytes, $tail, 0, $maxBytes)
+                    $bytes = $tail
                 }
+                $stderrText = [System.Text.Encoding]::UTF8.GetString($bytes)
             }
         } catch {
-            # unreadable/unparseable events contribute no additional signal
+            # unreadable stderr contributes no signal; events remain independently usable
         }
+
+        try {
+            if (-not [string]::IsNullOrEmpty($EventsPath) -and (Test-Path -LiteralPath $EventsPath -PathType Leaf)) {
+                $matchingEventLines = New-Object System.Collections.Generic.List[string]
+                $lines = Get-Content -LiteralPath $EventsPath -ErrorAction Stop
+                foreach ($line in $lines) {
+                    if ($line -match '(?i)error') {
+                        $matchingEventLines.Add($line)
+                    }
+                }
+                $eventsText = [string]::Join("`n", $matchingEventLines)
+            }
+        } catch {
+            # unreadable events contribute no signal; stderr remains independently usable
+        }
+
+        if ([string]::IsNullOrEmpty($stderrText) -and [string]::IsNullOrEmpty($eventsText)) { return $null }
+
+        # Keep the legacy pooled-text shape: stderr, then one newline, then filtered events.
+        $signalText = $stderrText + "`n" + $eventsText
+        foreach ($row in $script:CcodexFailureSignals) {
+            $pattern = '(?i)' + [regex]::Escape([string]$row.Pattern)
+            if ($signalText -notmatch $pattern) { continue }
+
+            $stderrMatched = $stderrText -match $pattern
+            $eventsMatched = $eventsText -match $pattern
+            $source = if ($stderrMatched -and $eventsMatched) {
+                'both'
+            } elseif ($stderrMatched) {
+                'stderr'
+            } else {
+                'events'
+            }
+
+            $httpSourceText = if ($source -eq 'both') {
+                $stderrText + "`n" + $eventsText
+            } elseif ($source -eq 'stderr') {
+                $stderrText
+            } else {
+                $eventsText
+            }
+            $httpCode = $null
+            $httpMatch = [regex]::Match(
+                $httpSourceText,
+                '(?i)\b(?:http|status(?:\s+code)?|error)[\s:=]{0,3}(4\d\d|5\d\d)\b'
+            )
+            if ($httpMatch.Success) {
+                $httpCode = [int]$httpMatch.Groups[1].Value
+            } elseif ($null -ne $row.HttpCode) {
+                $httpCode = [int]$row.HttpCode
+            }
+
+            return [ordered]@{
+                reason         = [string]$row.Class
+                matched_signal = [string]$row.Pattern
+                source         = $source
+                confidence     = [string]$row.Confidence
+                http_code      = $httpCode
+            }
+        }
+        return $null
+    } catch {
+        return $null
     }
+}
 
-    if ([string]::IsNullOrEmpty($signalText)) { return $null }
-
-    if ($signalText -match '(?i)session not found|thread not found|no session|conversation not found') { return 'thread_expired' }
-    if ($signalText -match '(?i)usage limit|rate limit|quota|429') { return 'quota_or_rate_limit' }
-    if ($signalText -match '(?i)login|auth|401|unauthorized|credential') { return 'auth' }
-    if ($signalText -match '(?i)sandbox|denied|approval|permission') { return 'permission_or_sandbox' }
-    if ($signalText -match '(?i)network|connection|dns|502|503') { return 'network' }
+function Get-CcodexFailureReason {
+    # Compatibility wrapper: the existing string-or-null contract remains unchanged.
+    param(
+        [Nullable[int]]$CodexExitCode,
+        [string]$StderrPath,
+        [string]$EventsPath
+    )
+    $signal = Get-CcodexFailureSignal @PSBoundParameters
+    if ($signal) { return $signal.reason }
     return $null
 }
 

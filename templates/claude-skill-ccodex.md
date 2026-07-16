@@ -44,7 +44,8 @@ Hard rules (follow these exactly):
 3. Codex CLI itself must be installed and authenticated. If a call fails with
    `failure_reason: auth`, tell the user to run `codex login`; do not retry.
 4. If `doctor` is in the supported list, `ccodex doctor` is the one-shot health check
-   (`--no-smoke` skips the live Codex call).
+   (`--no-smoke` skips the live Codex call; add `--json` for a schema-v1 envelope on stdout even
+   when the environment or smoke check fails).
 
 Commands appear in the supported list as their phase is installed:
 
@@ -113,7 +114,9 @@ Notes:
   access: if a review fails with `failure_reason: permission_or_sandbox`, use `--embed-diff`
   and/or a narrower scope, or report the review as skipped.
 - Job artifacts live under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`; `status.json` there
-  is the durable source of truth (`failure_reason`, `codex_thread_id`, exit codes).
+  is the durable source of truth (`failure_reason`, structured `failure`, `codex_thread_id`, exit
+  codes). `failure` adds `matched_signal`, `source`, `confidence`, and `http_code`; treat a
+  `confidence: low` classification more skeptically while keeping exit codes authoritative.
 
 ## Standard post-change review recipe (the most common flow)
 

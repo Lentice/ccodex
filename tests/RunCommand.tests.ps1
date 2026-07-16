@@ -72,6 +72,8 @@ $statusJson = Get-Content -LiteralPath (Join-Path $jobDir 'status.json') -Raw | 
 Assert-Equal $statusJson.status 'done' 'final status.json status is done'
 Assert-Equal $statusJson.codex_exit_code 0 'status.json records codex_exit_code separately'
 Assert-Equal $statusJson.wrapper_exit_code 0 'status.json records wrapper_exit_code separately'
+Assert-True ($statusJson.PSObject.Properties.Name -contains 'failure') 'successful status.json includes the append-only failure key'
+Assert-True ($null -eq $statusJson.failure) 'successful status.json records failure as null'
 Assert-True ([string]::IsNullOrEmpty($statusJson.group)) 'run without --group records null group'
 Assert-True ([string]::IsNullOrEmpty($statusJson.label)) 'run without --label records null label'
 
@@ -143,12 +145,21 @@ Assert-True (Test-Path -LiteralPath (Join-Path $result4.JobDir 'artifacts') -Pat
 $promptContent = Get-Content -LiteralPath (Join-Path $result4.JobDir 'prompt.md') -Raw
 Assert-True ($promptContent -like "*$(Join-Path $result4.JobDir 'artifacts')*") 'prompt.md references the absolute artifact directory'
 
-Write-Host "codex exit nonzero -> wrapper exit code 10, worker-complete.json still written"
+Write-Host "codex exit nonzero -> wrapper exit 10 and structured failure metadata is persisted"
 $env:CCODEX_FAKE_EXIT_CODE = '3'
+$env:CCODEX_FAKE_STDERR = 'rate limit exceeded'
 Remove-Item Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 $result5 = Invoke-CcodexRunForTest
 Assert-Equal $result5.WrapperExitCode 10 'wrapper exit code is 10 when codex exits nonzero'
 Assert-True (Test-Path -LiteralPath (Join-Path $result5.JobDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json exists on the failure path too'
+$failedStatus = Get-Content -LiteralPath (Join-Path $result5.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $failedStatus.failure_reason 'quota_or_rate_limit' 'failed status.json keeps failure_reason compatibility field'
+Assert-Equal $failedStatus.failure.reason 'quota_or_rate_limit' 'failed status.json structured reason matches failure_reason'
+Assert-Equal $failedStatus.failure.matched_signal 'rate limit' 'failed status.json records matched_signal'
+Assert-Equal $failedStatus.failure.source 'stderr' 'failed status.json records source=stderr'
+Assert-Equal $failedStatus.failure.confidence 'high' 'failed status.json records confidence'
+Assert-True ($null -eq $failedStatus.failure.http_code) 'failed status.json records null http_code when absent'
+Remove-Item Env:\CCODEX_FAKE_STDERR -ErrorAction SilentlyContinue
 
 Write-Host "codex launch failure -> wrapper exit 12 with terminal failed status.json + worker-complete.json"
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
@@ -165,6 +176,21 @@ Assert-True ($null -eq $failStatus.codex_exit_code) 'launch-failure status.json 
 $failComplete = Get-Content -LiteralPath (Join-Path $failDir 'worker-complete.json') -Raw | ConvertFrom-Json
 Assert-Equal $failComplete.status_candidate 'failed' 'launch-failure worker-complete.json status_candidate is failed'
 Assert-Equal $failComplete.wrapper_exit_code 12 'launch-failure worker-complete.json records wrapper_exit_code 12'
+
+Write-Host "Complete-CcodexInternalFailure: stderr signal stamps both failure fields on exit 12"
+$internalJobId = 'internal-failure-signal'
+$internalJobDir = Join-Path $tempRoot $internalJobId
+New-Item -ItemType Directory -Path $internalJobDir -Force | Out-Null
+$internalCreatedAt = (Get-Date).ToString('o')
+Write-CcodexJsonFileAtomic -Path (Join-Path $internalJobDir 'status.json') -Object (New-CcodexStatusObject -JobId $internalJobId -Status 'running' -Mode 'review' -Access 'read-only' -Repo $repoRoot -CreatedAt $internalCreatedAt -Backend 'sync')
+$internalStderr = Join-Path $internalJobDir 'stderr.log'
+Write-CcodexTextFile -Path $internalStderr -Content 'status code: 503 network failure'
+$internalResult = Complete-CcodexInternalFailure -JobDir $internalJobDir -JobId $internalJobId -Mode 'review' -Access 'read-only' -RepoRoot $repoRoot -CreatedAt $internalCreatedAt -Message 'simulated internal failure' -StderrPath $internalStderr
+Assert-Equal $internalResult.WrapperExitCode 12 'internal failure result keeps wrapper exit 12'
+$internalStatus = Get-Content -LiteralPath (Join-Path $internalJobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $internalStatus.failure_reason 'network' 'internal failure status carries failure_reason'
+Assert-Equal $internalStatus.failure.reason 'network' 'internal failure status carries structured failure'
+Assert-Equal $internalStatus.failure.http_code 503 'internal failure extracts contextual http_code'
 
 Write-Host "run --hard-timeout-sec 1 against a sleeping fixture -> wrapper 24, terminal timed_out, codex_exit_code null"
 $env:CCODEX_FAKE_DELAY_MS = '8000'

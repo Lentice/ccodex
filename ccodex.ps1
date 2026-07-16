@@ -107,14 +107,15 @@ function Complete-CcodexInternalFailure {
         try { $resultPresent = Test-Path -LiteralPath $ResultPath -PathType Leaf } catch { $resultPresent = $false }
     }
 
-    $failureReason = Get-CcodexFailureReason -CodexExitCode $null -StderrPath $StderrPath -EventsPath $EventsPath
+    $failureSignal = Get-CcodexFailureSignal -CodexExitCode $null -StderrPath $StderrPath -EventsPath $EventsPath
+    $failureReason = if ($failureSignal) { $failureSignal.reason } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $EventsPath
     if ([string]::IsNullOrEmpty($codexThreadId) -and -not [string]::IsNullOrEmpty($FallbackCodexThreadId)) { $codexThreadId = $FallbackCodexThreadId }
     $hintLine = Get-CcodexFailureHintLine -FailureReason $failureReason
     $hintedMessage = if ($hintLine) { "$Message`n  $hintLine" } else { $Message }
 
     $completeObj = New-CcodexWorkerCompleteObject -JobId $JobId -StatusCandidate 'failed' -CodexExitCode $null -WrapperExitCode 12 -ResultPresent $resultPresent -CompletedAt $completedAt
-    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeFinalizeError $WorktreeFinalizeError -ParentJobId $ParentJobId -Group $Group -Label $Label
+    $statusObj = New-CcodexStatusObject -JobId $JobId -Status 'failed' -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -WrapperExitCode 12 -ErrorMessage $hintedMessage -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $completedAt -FailureReason $failureReason -Failure $failureSignal -CodexThreadId $codexThreadId -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeFinalizeError $WorktreeFinalizeError -ParentJobId $ParentJobId -Group $Group -Label $Label
 
     # Guard the terminal write behind the per-job lock, re-reading status first so a concurrent
     # cancel that already reached a terminal status is preserved instead of clobbered with
@@ -475,15 +476,16 @@ function Invoke-CcodexJobExecution {
     $finalComplete = New-CcodexWorkerCompleteObject -JobId $jobId -StatusCandidate $validation.Status -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -ResultPresent $validation.ResultPresent -CompletedAt $finishedAt
     Write-CcodexJsonFileAtomic -Path (Join-Path $JobDir 'worker-complete.json') -Object $finalComplete
 
-    # failure_reason is only ever stamped on a failure terminal status (never
-    # on a successful run); codex_thread_id is stamped whenever present,
+    # failure_reason/failure are only ever stamped on a failure terminal status
+    # (never on a successful run); codex_thread_id is stamped whenever present,
     # regardless of success/failure (design: "stamp codex_thread_id on BOTH
     # success and failure whenever present").
-    $failureReason = if ($validation.Status -eq 'failed') { Get-CcodexFailureReason -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $failureSignal = if ($validation.Status -eq 'failed') { Get-CcodexFailureSignal -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $failureReason = if ($failureSignal) { $failureSignal.reason } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
     if ([string]::IsNullOrEmpty($codexThreadId) -and -not [string]::IsNullOrEmpty($FallbackCodexThreadId)) { $codexThreadId = $FallbackCodexThreadId }
 
-    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId -Group $Group -Label $Label
+    $finalStatusObj = New-CcodexStatusObject -JobId $jobId -Status $validation.Status -Mode $Mode -Access $Access -Repo $RepoRoot -CreatedAt $CreatedAt -CodexExitCode $codexExitCode -WrapperExitCode $validation.WrapperExitCode -Backend $Backend -BackendId $BackendId -StartedAt $StartedAt -FinishedAt $finishedAt -FailureReason $failureReason -Failure $failureSignal -CodexThreadId $codexThreadId -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $MainRepo -WorktreeRepo $WorktreeRepo -BaseCommit $BaseCommit -WorktreeCommitted $worktreeCommitted -WorktreeFinalizeError $worktreeFinalizeError -ParentJobId $ParentJobId -Group $Group -Label $Label
     $finalWrite = Write-CcodexStatusUnderLock -JobDir $JobDir -CommandName $Backend -StatusPath (Join-Path $JobDir 'status.json') -StatusObject $finalStatusObj -RequireStatus 'running' -RequireBackendId $BackendId
     if (-not $finalWrite.LockAcquired) {
         return Complete-CcodexInternalFailure @internalFailureParams -WorktreeFinalizeError $worktreeFinalizeError -Message 'could not acquire the job lock to record the terminal status'
@@ -1043,6 +1045,25 @@ function New-CcodexReadJsonResult {
         result            = $Result
         health            = if ($Reconciliation.PossiblyStale) { 'possibly-stale' } else { $null }
         job_dir           = $JobDir
+        command_exit_code = $CommandExitCode
+    }
+    return [pscustomobject]@{ WrapperExitCode = $CommandExitCode; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
+}
+
+function New-CcodexDoctorJsonResult {
+    param(
+        [Parameter(Mandatory)][bool]$EnvFailed,
+        [Parameter(Mandatory)][bool]$SmokeFailed,
+        [Parameter(Mandatory)][object[]]$Checks,
+        [Parameter(Mandatory)][int]$CommandExitCode
+    )
+
+    $envelope = [ordered]@{
+        schema_version    = 1
+        ok                = ($CommandExitCode -eq 0)
+        env_failed        = $EnvFailed
+        smoke_failed      = $SmokeFailed
+        checks            = @($Checks)
         command_exit_code = $CommandExitCode
     }
     return [pscustomobject]@{ WrapperExitCode = $CommandExitCode; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
@@ -2145,6 +2166,7 @@ function Invoke-CcodexDoctorCommand {
     # bad --repo is a usage error (exit 2), matching `run`/`review`.
     param(
         [bool]$NoSmoke = $false,
+        [switch]$Json,
         [string]$CodexPath,
         [string]$StateRoot = $env:LOCALAPPDATA,
         [string]$AppDataRoot = $env:APPDATA,
@@ -2161,9 +2183,23 @@ function Invoke-CcodexDoctorCommand {
         return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $_.Exception.Message }
     }
 
-    $lines = New-Object System.Collections.Generic.List[string]
+    $checks = New-Object System.Collections.Generic.List[object]
     $extraBlocks = New-Object System.Collections.Generic.List[string]
     $envFailed = $false
+    $addDoctorCheck = {
+        param(
+            [Parameter(Mandatory)][string]$Name,
+            [Parameter(Mandatory)][ValidateSet('pass', 'fail', 'warn', 'skip')][string]$Status,
+            [Parameter(Mandatory)][AllowEmptyString()][string]$Detail,
+            [AllowNull()][object]$Output = $null
+        )
+        $checks.Add([ordered]@{
+            name   = $Name
+            status = $Status
+            detail = $Detail
+            output = $Output
+        })
+    }
 
     # --- Check 1: codex resolvable to a launchable .cmd/.exe + `codex --version` -----
     $resolvedCodexPath = $null
@@ -2171,7 +2207,7 @@ function Invoke-CcodexDoctorCommand {
         $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
     } catch {
         $envFailed = $true
-        $lines.Add("FAIL codex resolvable: $($_.Exception.Message)")
+        & $addDoctorCheck -Name 'codex resolvable' -Status 'fail' -Detail $_.Exception.Message
     }
 
     if ($resolvedCodexPath) {
@@ -2179,20 +2215,20 @@ function Invoke-CcodexDoctorCommand {
             $versionProbe = Invoke-CcodexDoctorProbe -CodexPath $resolvedCodexPath -Arguments @('--version') -TimeoutSec $ProbeTimeoutSec
             if ($versionProbe.TerminationFailed) {
                 $envFailed = $true
-                $lines.Add("FAIL codex resolvable: unable to terminate timed-out 'codex --version' probe after ${ProbeTimeoutSec}s")
+                & $addDoctorCheck -Name 'codex resolvable' -Status 'fail' -Detail "unable to terminate timed-out 'codex --version' probe after ${ProbeTimeoutSec}s"
             } elseif ($versionProbe.TimedOut) {
                 $envFailed = $true
-                $lines.Add("FAIL codex resolvable: 'codex --version' timed out after ${ProbeTimeoutSec}s")
+                & $addDoctorCheck -Name 'codex resolvable' -Status 'fail' -Detail "'codex --version' timed out after ${ProbeTimeoutSec}s"
             } elseif ($versionProbe.ExitCode -eq 0) {
                 $versionLine = ($versionProbe.Stdout -split "`r?`n" | Where-Object { $_ -ne '' } | Select-Object -First 1)
-                $lines.Add("ok codex resolvable: $resolvedCodexPath (version: $versionLine)")
+                & $addDoctorCheck -Name 'codex resolvable' -Status 'pass' -Detail "$resolvedCodexPath (version: $versionLine)"
             } else {
                 $envFailed = $true
-                $lines.Add("FAIL codex resolvable: 'codex --version' exited $($versionProbe.ExitCode)")
+                & $addDoctorCheck -Name 'codex resolvable' -Status 'fail' -Detail "'codex --version' exited $($versionProbe.ExitCode)"
             }
         } catch {
             $envFailed = $true
-            $lines.Add("FAIL codex resolvable: could not run 'codex --version': $($_.Exception.Message)")
+            & $addDoctorCheck -Name 'codex resolvable' -Status 'fail' -Detail "could not run 'codex --version': $($_.Exception.Message)"
         }
     }
 
@@ -2204,26 +2240,29 @@ function Invoke-CcodexDoctorCommand {
             $doctorLastLine = if ($doctorOutputLines.Count -gt 0) { $doctorOutputLines[$doctorOutputLines.Count - 1] } else { '(no output)' }
             if ($doctorProbe.TerminationFailed) {
                 $envFailed = $true
-                $lines.Add("FAIL codex doctor: unable to terminate timed-out probe after ${ProbeTimeoutSec}s")
+                & $addDoctorCheck -Name 'codex doctor' -Status 'fail' -Detail "unable to terminate timed-out probe after ${ProbeTimeoutSec}s"
             } elseif ($doctorProbe.TimedOut) {
                 $envFailed = $true
-                $lines.Add("FAIL codex doctor: timed out after ${ProbeTimeoutSec}s")
+                & $addDoctorCheck -Name 'codex doctor' -Status 'fail' -Detail "timed out after ${ProbeTimeoutSec}s"
             } elseif ($doctorProbe.ExitCode -eq 0) {
-                $lines.Add("ok codex doctor: $doctorLastLine")
+                & $addDoctorCheck -Name 'codex doctor' -Status 'pass' -Detail $doctorLastLine
             } else {
                 $envFailed = $true
-                $lines.Add("FAIL codex doctor: exited $($doctorProbe.ExitCode) ($doctorLastLine); see 'codex doctor' output below")
+                $doctorOutputParts = New-Object System.Collections.Generic.List[string]
+                if ($doctorProbe.Stdout) { $doctorOutputParts.Add($doctorProbe.Stdout.TrimEnd()) }
+                if ($doctorProbe.Stderr) { $doctorOutputParts.Add($doctorProbe.Stderr.TrimEnd()) }
+                $doctorRawOutput = [string]::Join("`n", $doctorOutputParts)
+                & $addDoctorCheck -Name 'codex doctor' -Status 'fail' -Detail "exited $($doctorProbe.ExitCode) ($doctorLastLine); see 'codex doctor' output below" -Output $doctorRawOutput
                 $extraBlocks.Add('== codex doctor output ==')
-                if ($doctorProbe.Stdout) { $extraBlocks.Add($doctorProbe.Stdout.TrimEnd()) }
-                if ($doctorProbe.Stderr) { $extraBlocks.Add($doctorProbe.Stderr.TrimEnd()) }
+                if ($doctorOutputParts.Count -gt 0) { $extraBlocks.AddRange([string[]]$doctorOutputParts.ToArray()) }
             }
         } catch {
             $envFailed = $true
-            $lines.Add("FAIL codex doctor: could not run 'codex doctor': $($_.Exception.Message)")
+            & $addDoctorCheck -Name 'codex doctor' -Status 'fail' -Detail "could not run 'codex doctor': $($_.Exception.Message)"
         }
     } else {
         $envFailed = $true
-        $lines.Add('FAIL codex doctor: skipped (codex not resolvable)')
+        & $addDoctorCheck -Name 'codex doctor' -Status 'fail' -Detail 'skipped (codex not resolvable)'
     }
 
     # --- Check 3a: state root writable (create+delete a probe file under jobs\) -------
@@ -2233,19 +2272,19 @@ function Invoke-CcodexDoctorCommand {
         New-Item -ItemType Directory -Path $jobsDir -Force -ErrorAction Stop | Out-Null
         Write-CcodexTextFile -Path $probeFile -Content 'doctor probe'
         Remove-Item -LiteralPath $probeFile -Force -ErrorAction Stop
-        $lines.Add("ok state root writable: $jobsDir")
+        & $addDoctorCheck -Name 'state root writable' -Status 'pass' -Detail $jobsDir
     } catch {
         $envFailed = $true
-        $lines.Add("FAIL state root writable: $jobsDir ($($_.Exception.Message))")
+        & $addDoctorCheck -Name 'state root writable' -Status 'fail' -Detail "$jobsDir ($($_.Exception.Message))"
     }
 
     # --- Check 3b: worker-prompt template present -------------------------------------
     $templatePath = Get-CcodexWorkerPromptTemplatePath -RepoRoot $repoRoot -AppDataRoot $AppDataRoot
     if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
-        $lines.Add("ok worker prompt template: $templatePath")
+        & $addDoctorCheck -Name 'worker prompt template' -Status 'pass' -Detail $templatePath
     } else {
         $envFailed = $true
-        $lines.Add("FAIL worker prompt template: not found at $templatePath")
+        & $addDoctorCheck -Name 'worker prompt template' -Status 'fail' -Detail "not found at $templatePath"
     }
 
     # --- Check 3c: index/jobs consistency (informational; counts never fail this) ----
@@ -2271,12 +2310,13 @@ function Invoke-CcodexDoctorCommand {
             }
         }
     }
-    $lines.Add("ok index/jobs consistency: dangling_indexes=$danglingIndexCount unindexed_job_dirs=$unindexedJobDirCount")
+    $consistencyStatus = if ($danglingIndexCount -eq 0 -and $unindexedJobDirCount -eq 0) { 'pass' } else { 'warn' }
+    & $addDoctorCheck -Name 'index/jobs consistency' -Status $consistencyStatus -Detail "dangling_indexes=$danglingIndexCount unindexed_job_dirs=$unindexedJobDirCount"
 
     # --- Check 4: live smoke through the normal run pipeline (unless -NoSmoke) --------
     $smokeFailed = $false
     if ($NoSmoke) {
-        $lines.Add('ok smoke test: skipped (--no-smoke)')
+        & $addDoctorCheck -Name 'smoke test' -Status 'skip' -Detail 'skipped (--no-smoke)'
     } else {
         $smokeParams = @{
             Mode             = 'review'
@@ -2298,23 +2338,33 @@ function Invoke-CcodexDoctorCommand {
         }
         $smokeResultText = if ($smokeResult.Stdout) { $smokeResult.Stdout.Trim() } else { $null }
         if ($smokeResult.WrapperExitCode -eq 0 -and $smokeResultText -eq 'OK') {
-            $lines.Add("ok smoke test: result '$smokeResultText'")
+            & $addDoctorCheck -Name 'smoke test' -Status 'pass' -Detail "result '$smokeResultText'"
         } else {
             $smokeFailed = $true
             $reportedResult = if ($smokeResultText) { $smokeResultText } else { '(none)' }
-            $lines.Add("FAIL smoke test: wrapper_exit_code=$($smokeResult.WrapperExitCode) result='$reportedResult'")
+            & $addDoctorCheck -Name 'smoke test' -Status 'fail' -Detail "wrapper_exit_code=$($smokeResult.WrapperExitCode) result='$reportedResult'"
         }
     }
 
+    $commandExitCode = if ($envFailed) { 12 } elseif ($smokeFailed) { 10 } else { 0 }
+    if ($Json) {
+        return New-CcodexDoctorJsonResult -EnvFailed $envFailed -SmokeFailed $smokeFailed -Checks $checks.ToArray() -CommandExitCode $commandExitCode
+    }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($check in $checks) {
+        $prefix = if ($check.status -eq 'fail') { 'FAIL' } else { 'ok' }
+        $lines.Add("$prefix $($check.name): $($check.detail)")
+    }
     $allLines = New-Object System.Collections.Generic.List[string]
     $allLines.AddRange([string[]]$lines.ToArray())
     if ($extraBlocks.Count -gt 0) { $allLines.AddRange([string[]]$extraBlocks.ToArray()) }
     $output = [string]::Join("`n", $allLines)
 
-    if ($envFailed) {
+    if ($commandExitCode -eq 12) {
         return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $output }
     }
-    if ($smokeFailed) {
+    if ($commandExitCode -eq 10) {
         return [pscustomobject]@{ WrapperExitCode = 10; Stdout = $null; Message = $output }
     }
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
@@ -3108,23 +3158,27 @@ try {
             $exitCode = $cleanupResult.WrapperExitCode
         }
         'doctor' {
-            # No positional job id. --no-smoke is a presence flag; --repo binds to $Repo;
+            # No positional job id. --no-smoke/--json are presence flags; --repo binds to $Repo;
             # --codex-path/--state-root are hidden test-support flags mirroring the other
             # subcommands (there is no --app-data-root flag — tests override $env:APPDATA
             # directly, same as ReviewCommand/RealInvocation).
             $doctorNoSmoke = ($args -contains '--no-smoke')
+            $doctorJson = ($args -contains '--json')
             $doctorStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $doctorCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
 
             $doctorParams = @{
                 NoSmoke      = $doctorNoSmoke
+                Json         = $doctorJson
                 RepoOverride = $Repo
             }
             if ($doctorStateRoot) { $doctorParams['StateRoot'] = $doctorStateRoot }
             if ($doctorCodexPath) { $doctorParams['CodexPath'] = $doctorCodexPath }
 
             $doctorResult = Invoke-CcodexDoctorCommand @doctorParams
-            if ($doctorResult.WrapperExitCode -eq 0) {
+            if ($doctorJson -and $null -ne $doctorResult.Stdout) {
+                Write-Output $doctorResult.Stdout
+            } elseif ($doctorResult.WrapperExitCode -eq 0) {
                 Write-Output $doctorResult.Stdout
             } else {
                 Write-Host $doctorResult.Message

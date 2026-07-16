@@ -121,6 +121,95 @@ Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrTailOn
 $stderrTailMatch = New-TestFile 'stderr-tail-match.log' ($padding + "rate limit exceeded")
 Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $stderrTailMatch -EventsPath $null) 'quota_or_rate_limit' 'a signature within the last 8KB is matched'
 
+# Table-driven regression corpus: every legacy alternative, adjacent-class precedence,
+# known-fragile substring behavior, and guards. Get-CcodexFailureSignal must agree exactly
+# with the compatibility Get-CcodexFailureReason result for every input.
+Write-Host "Get-CcodexFailureReason/Get-CcodexFailureSignal: full legacy regression corpus"
+$legacyCorpus = @(
+    @{ Name='session-not-found'; Text='session not found'; Exit=1; Expected='thread_expired' },
+    @{ Name='thread-not-found'; Text='thread not found'; Exit=1; Expected='thread_expired' },
+    @{ Name='no-session'; Text='no session'; Exit=1; Expected='thread_expired' },
+    @{ Name='conversation-not-found'; Text='conversation not found'; Exit=1; Expected='thread_expired' },
+    @{ Name='usage-limit'; Text="You've hit your usage limit"; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='rate-limit'; Text='rate limit exceeded'; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='quota'; Text='quota exhausted'; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='429'; Text='HTTP 429 Too Many Requests'; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='login'; Text='please login again'; Exit=1; Expected='auth' },
+    @{ Name='auth'; Text='auth token expired'; Exit=1; Expected='auth' },
+    @{ Name='401'; Text='got 401'; Exit=1; Expected='auth' },
+    @{ Name='unauthorized'; Text='stream error: unauthorized'; Exit=1; Expected='auth' },
+    @{ Name='credential'; Text='credential rejected'; Exit=1; Expected='auth' },
+    @{ Name='sandbox'; Text='sandbox blocked write'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='denied'; Text='write denied'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='approval'; Text='approval required'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='permission'; Text='permission missing'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='network'; Text='network unreachable'; Exit=1; Expected='network' },
+    @{ Name='connection'; Text='connection reset'; Exit=1; Expected='network' },
+    @{ Name='dns'; Text='dns lookup failed'; Exit=1; Expected='network' },
+    @{ Name='502'; Text='HTTP 502 Bad Gateway'; Exit=1; Expected='network' },
+    @{ Name='503'; Text='HTTP 503 Service Unavailable'; Exit=1; Expected='network' },
+    @{ Name='precedence-thread-quota'; Text='session not found; quota exhausted'; Exit=1; Expected='thread_expired' },
+    @{ Name='precedence-quota-auth'; Text='rate limit; login required'; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='precedence-auth-permission'; Text='login failed; sandbox denied'; Exit=1; Expected='auth' },
+    @{ Name='precedence-permission-network'; Text='permission denied; network connection lost'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='fragile-429-substring'; Text='unrelated number 1429007'; Exit=1; Expected='quota_or_rate_limit' },
+    @{ Name='fragile-connection-denied'; Text='connection denied'; Exit=1; Expected='permission_or_sandbox' },
+    @{ Name='exit-zero-guard'; Text='rate limit exceeded'; Exit=0; Expected=$null },
+    @{ Name='null-exit-classifies'; Text='rate limit exceeded'; Exit=$null; Expected='quota_or_rate_limit' },
+    @{ Name='no-signal'; Text='an unrelated failure'; Exit=1; Expected=$null }
+)
+foreach ($case in $legacyCorpus) {
+    $casePath = New-TestFile "corpus-$($case.Name).log" $case.Text
+    $reason = Get-CcodexFailureReason -CodexExitCode $case.Exit -StderrPath $casePath -EventsPath $null
+    $signal = Get-CcodexFailureSignal -CodexExitCode $case.Exit -StderrPath $casePath -EventsPath $null
+    Assert-Equal $reason $case.Expected "legacy corpus '$($case.Name)' keeps its failure_reason"
+    $signalReason = if ($null -ne $signal) { $signal.reason } else { $null }
+    Assert-Equal $signalReason $reason "structured signal agrees with failure_reason for '$($case.Name)'"
+}
+$missingCorpusPath = Join-Path $tempRoot 'corpus-missing.log'
+$missingReason = Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $missingCorpusPath -EventsPath $null
+$missingSignal = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $missingCorpusPath -EventsPath $null
+Assert-Equal $missingReason $null 'missing corpus file keeps failure_reason null'
+Assert-Equal $missingSignal $null 'missing corpus file keeps structured signal null'
+
+Write-Host "Get-CcodexFailureSignal: ordered metadata, source, and http_code extraction"
+$signalRatePath = New-TestFile 'signal-rate-stderr.log' 'rate limit exceeded'
+$signalRate = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalRatePath -EventsPath $null
+Assert-Equal $signalRate.matched_signal 'rate limit' 'stderr-only signal records the winning literal alternative'
+Assert-Equal $signalRate.source 'stderr' 'stderr-only signal records source=stderr'
+Assert-Equal $signalRate.confidence 'high' 'rate limit confidence is high'
+Assert-Equal $signalRate.http_code $null 'rate limit without an HTTP code leaves http_code null'
+
+$signalEventsPath = New-TestFile 'signal-events-only.jsonl' '{"type":"x","msg":"error: HTTP 429"}'
+$signalEvents = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $null -EventsPath $signalEventsPath
+Assert-Equal $signalEvents.reason 'quota_or_rate_limit' 'events-only HTTP 429 classifies as quota'
+Assert-Equal $signalEvents.matched_signal '429' 'events-only numeric signal records 429'
+Assert-Equal $signalEvents.source 'events' 'events-only signal records source=events'
+Assert-Equal $signalEvents.http_code 429 'events-only contextual HTTP code is extracted'
+
+$signalBothStderrPath = New-TestFile 'signal-both.log' 'rate limit in stderr'
+$signalBothEventsPath = New-TestFile 'signal-both.jsonl' '{"type":"error","msg":"rate limit in events"}'
+$signalBoth = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalBothStderrPath -EventsPath $signalBothEventsPath
+Assert-Equal $signalBoth.source 'both' 'winning signal present in both streams records source=both'
+
+$signalAlternativePath = New-TestFile 'signal-alternative-order.log' 'usage limit and rate limit'
+$signalAlternative = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalAlternativePath -EventsPath $null
+Assert-Equal $signalAlternative.matched_signal 'usage limit' 'first alternative in table order wins within a class'
+
+$signalContextPath = New-TestFile 'signal-context-code.log' 'quota exceeded, status: 503'
+$signalContext = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalContextPath -EventsPath $null
+Assert-Equal $signalContext.reason 'quota_or_rate_limit' 'quota wins even when a network code is present'
+Assert-Equal $signalContext.http_code 503 'contextual HTTP code beats the winning row static fallback'
+
+$signalStaticPath = New-TestFile 'signal-static-code.log' 'got 401'
+$signalStatic = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalStaticPath -EventsPath $null
+Assert-Equal $signalStatic.matched_signal '401' 'bare 401 selects the numeric auth row'
+Assert-Equal $signalStatic.http_code 401 'bare 401 uses the table static fallback'
+
+$signalNoCodePath = New-TestFile 'signal-no-code.log' 'login failed'
+$signalNoCode = Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $signalNoCodePath -EventsPath $null
+Assert-Equal $signalNoCode.http_code $null 'login without an HTTP code leaves http_code null'
+
 # --- Get-CcodexFailureHintLine ---
 
 Write-Host "Get-CcodexFailureHintLine: thread_expired hint"

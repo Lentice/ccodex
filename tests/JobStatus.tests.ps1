@@ -201,6 +201,8 @@ Assert-Equal $rewrittenSuccess.mode 'review' 'rewritten status.json preserves mo
 Assert-Equal $rewrittenSuccess.access 'read-only' 'rewritten status.json preserves access'
 Assert-Equal $rewrittenSuccess.repo 'D:\Repo' 'rewritten status.json preserves repo'
 Assert-Equal $rewrittenSuccess.failure_reason $null 'rewritten status.json failure_reason stays null on a successful reconciliation'
+Assert-True ($rewrittenSuccess.PSObject.Properties.Name -contains 'failure') 'successful reconciliation includes the failure key'
+Assert-Equal $rewrittenSuccess.failure $null 'successful reconciliation keeps failure null'
 Assert-Equal $rewrittenSuccess.codex_thread_id $null 'rewritten status.json codex_thread_id is null when no codex-events.jsonl is present'
 
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + exit_code.txt nonzero -> reconcile to failed with error"
@@ -222,6 +224,7 @@ Assert-Equal $rewrittenFailed.mode 'review' 'rewritten status.json preserves mod
 Assert-Equal $rewrittenFailed.access 'read-only' 'rewritten status.json preserves access on failure path'
 Assert-Equal $rewrittenFailed.repo 'D:\Repo' 'rewritten status.json preserves repo on failure path'
 Assert-Equal $rewrittenFailed.failure_reason $null 'rewritten status.json failure_reason stays null when no stderr/events evidence carries a signature'
+Assert-Equal $rewrittenFailed.failure $null 'rewritten status.json failure stays null when no signature is present'
 Assert-Equal $rewrittenFailed.codex_thread_id $null 'rewritten status.json codex_thread_id is null when no codex-events.jsonl is present'
 
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + failure evidence + stderr/events signatures -> reconciled status carries failure_reason and codex_thread_id"
@@ -229,7 +232,7 @@ $dirDeadEvidenceSignals = New-TestJobDir 'orphan-dead-evidence-signals'
 $deadEvidenceSignalsStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
 Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadEvidenceSignals 'status.json') -Object $deadEvidenceSignalsStatus
 Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'exit_code.txt') -Content '1'
-Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'stderr.log') -Content 'Rate limit exceeded (429)'
+Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'stderr.log') -Content 'Rate limit exceeded (HTTP 429)'
 Write-CcodexTextFile -Path (Join-Path $dirDeadEvidenceSignals 'codex-events.jsonl') -Content "{`"type`":`"thread.started`",`"thread_id`":`"thread-evidence-999`"}`n{`"type`":`"event`",`"msg`":`"other`"}"
 $resultDeadEvidenceSignals = Update-CcodexOrphanStatus -JobDir $dirDeadEvidenceSignals
 Assert-Equal $resultDeadEvidenceSignals.Status 'failed' 'dead worker w/ failure evidence + signatures reconciles to failed'
@@ -238,7 +241,17 @@ Assert-Equal $resultDeadEvidenceSignals.PossiblyStale $false 'reconciled failed 
 $rewrittenEvidenceSignals = Get-Content -LiteralPath (Join-Path $dirDeadEvidenceSignals 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $rewrittenEvidenceSignals.status 'failed' 'rewritten status.json status is failed (evidence + signatures)'
 Assert-Equal $rewrittenEvidenceSignals.failure_reason 'quota_or_rate_limit' 'rewritten status.json carries failure_reason derived from the stderr.log signature'
+Assert-Equal $rewrittenEvidenceSignals.failure.reason 'quota_or_rate_limit' 'rewritten status.json carries structured failure reason'
+Assert-Equal $rewrittenEvidenceSignals.failure.matched_signal 'rate limit' 'reconciled failure records the winning signal'
+Assert-Equal $rewrittenEvidenceSignals.failure.source 'stderr' 'reconciled failure records its source'
+Assert-Equal $rewrittenEvidenceSignals.failure.confidence 'high' 'reconciled failure records confidence'
+Assert-Equal $rewrittenEvidenceSignals.failure.http_code 429 'reconciled failure extracts the contextual code'
 Assert-Equal $rewrittenEvidenceSignals.codex_thread_id 'thread-evidence-999' 'rewritten status.json carries codex_thread_id derived from codex-events.jsonl'
+$secondEvidenceReconcile = Update-CcodexOrphanStatus -JobDir $dirDeadEvidenceSignals
+Assert-Equal $secondEvidenceReconcile.Reconciled $false 'second reconciliation leaves an already-terminal job untouched'
+$secondEvidenceStatus = Get-Content -LiteralPath (Join-Path $dirDeadEvidenceSignals 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $secondEvidenceStatus.failure_reason 'quota_or_rate_limit' 'second reconciliation preserves failure_reason'
+Assert-Equal $secondEvidenceStatus.failure.matched_signal 'rate limit' 'second reconciliation preserves structured failure'
 
 # --- Update-CcodexOrphanStatus: writer re-routing through the per-job lock ---
 

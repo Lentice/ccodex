@@ -145,7 +145,9 @@ conversation.
 
 8. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
    `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
-   react accordingly:
+   react accordingly. Its adjacent structured `failure` object supplies `matched_signal`,
+   `source`, `confidence`, and `http_code`; use those fields to judge borderline matches and be
+   more skeptical when `confidence` is `low`:
 
    | Signal | Reaction |
    | --- | --- |
@@ -159,7 +161,8 @@ conversation.
    | `23` | Backend/environment issue — inspect the job directory (`status.json`, `stderr.log`) before retrying. |
 
    When the failure looks environment-shaped rather than task-specific (auth, quota, sandbox
-   denial, or the `CreateProcessWithLogonW failed: 1385` signature), run `ccodex doctor` FIRST —
+   denial, or the `CreateProcessWithLogonW failed: 1385` signature), run `ccodex doctor` FIRST
+   (`ccodex doctor --json` for a programmatic schema-v1 result on stdout even on exit `10`/`12`) —
    it isolates whether Codex/the wrapper/the state root itself is broken before you touch the
    task again.
 

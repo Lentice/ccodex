@@ -128,6 +128,11 @@ use `ccodex wait --all --group <g> --json` once instead of hand-written polling 
 React to the JSON `command_exit_code` and `status.json.failure_reason` without reading logs, per
 the README's failure-class table:
 
+When `failure_reason` is present, inspect the adjacent structured `status.json.failure` object as
+well: `matched_signal`, `source`, `confidence`, and `http_code` help judge borderline
+classifications. In particular, treat `confidence: low` reasons with more skepticism while
+keeping the process/`command_exit_code` authoritative.
+
 | Signal | Reaction |
 | --- | --- |
 | exit `10` + `failure_reason: quota_or_rate_limit` | Note the limit to the user and continue the task without the review; never retry-loop. |
@@ -151,8 +156,10 @@ a note in your final report, not a reason to stop.
 **Environment-shaped failures first move:** when a failure looks environment-shaped rather than
 task-specific — `auth`, `quota_or_rate_limit`, `permission_or_sandbox`, or the
 `CreateProcessWithLogonW failed: 1385` signature — run `ccodex doctor` before retrying or trying a
-workaround. It isolates whether Codex itself, the wrapper, or the state root is the actual
-problem, so you react to the real cause instead of guessing.
+workaround. Use `ccodex doctor --json` for programmatic checks: it returns its schema-v1 envelope
+on stdout even when environment/smoke checks exit `12`/`10`. It isolates whether Codex itself,
+the wrapper, or the state root is the actual problem, so you react to the real cause instead of
+guessing.
 
 ## Delegated implementation: review the diff before applying
 

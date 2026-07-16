@@ -408,6 +408,41 @@ from `wrapper_exit_code`, which is the job's recorded wrapper exit in `status.js
   `status` is the current non-terminal state and `health` may be `possibly-stale`; the command does
   not modify `status.json`.
 
+**`doctor --json` envelope contract:**
+
+```json
+{
+  "schema_version": 1,
+  "ok": false,
+  "env_failed": true,
+  "smoke_failed": false,
+  "checks": [
+    {
+      "name": "codex resolvable",
+      "status": "fail",
+      "detail": "'codex --version' exited 1",
+      "output": null
+    }
+  ],
+  "command_exit_code": 12
+}
+```
+
+- Fields, in order: `schema_version`, `ok`, `env_failed`, `smoke_failed`, `checks`,
+  `command_exit_code`. `schema_version` is `1`; `ok` is true exactly when
+  `command_exit_code` is `0`.
+- `checks` contains one ordered object per human check, in emission order. Each object always has
+  `name`, `status`, `detail`, and `output`. `name` is the human line's name segment; `status` is
+  `pass`, `fail`, `warn`, or `skip`; and `detail` is the text after `<name>: `. `output` is
+  non-null only when delegated `codex doctor` exits nonzero, where it contains the raw text shown
+  under the human `== codex doctor output ==` block.
+- Nonzero index/jobs consistency counts map to `warn` (but remain human `ok` and never fail the
+  command); `--no-smoke` maps the smoke check to `skip`; other successful and failed checks map
+  to `pass` and `fail`.
+- The envelope is rendered with `ConvertTo-Json -Depth 10` and written to stdout on exits `0`,
+  `10`, and `12`. Exit precedence is unchanged. Usage errors such as a bad `--repo` remain exit
+  `2` human text even when `--json` was requested.
+
 For a resumed job created by either `ccodex resume` or `ccodex submit --resume`, `status`/`debug` append `parent=<parent_job_id>` /
 `parent: <parent_job_id>` to name the job it continued — see [resume](#resume) above.
 
@@ -516,7 +551,7 @@ ccodex cleanup --include-stalled --scrub-thread-ids # reconcile stalled jobs + s
 # -> cleanup: deleted=<n> reclaimed_kb=<n> dangling=<n> scrubbed=<n> skipped=<n> failed=<n> worktrees_swept=<n>
 ```
 
-**`ccodex doctor [--no-smoke] [--repo <path>]`** is the first move whenever a failure looks
+**`ccodex doctor [--json] [--no-smoke] [--repo <path>]`** is the first move whenever a failure looks
 environment-shaped rather than task-specific (auth, quota, sandbox denial, the
 `CreateProcessWithLogonW failed: 1385` signature) — it isolates whether Codex, the wrapper, or the
 state root itself is the problem before you retry anything. It runs, in order: `codex --version`
@@ -529,9 +564,14 @@ yields exit `12`, even if the smoke test also failed — a broken environment is
 fundamental problem. A smoke-test-only failure yields exit `10`. A bad `--repo` is a usage error
 (exit `2`), same as `run`/`review`.
 
+With `--json`, doctor emits the schema-version-1 envelope documented above on stdout regardless
+of a `0`, `10`, or `12` exit. Human output and all exit codes are unchanged without the flag;
+usage exit `2` intentionally remains human text.
+
 ```powershell
 ccodex doctor              # full check including the live smoke test
 ccodex doctor --no-smoke   # environment checks only, no real Codex call
+ccodex doctor --json --no-smoke # programmatic environment checks
 ```
 
 ## Configuration
@@ -643,8 +683,25 @@ treat `failure_reason` as a shortcut to the right reaction, not a guarantee:
 | `thread_expired` | Codex itself no longer recognizes the resumed thread id (signature: "session not found", "thread not found", "no session", "conversation not found"). Only seen on synchronous `resume` or a `submit --resume` child. | Start a fresh `ccodex run` — the session is gone, not retryable. |
 | *(absent)* | No recognized signature, or the run succeeded. | Fall back to the exit code and `error` message. |
 
-Classification precedence when multiple signatures are present in the same failure: thread_expired
-beats quota beats auth beats permission beats network. `status.json` also records
+Alongside that compatibility string, `status.json.failure` is non-null exactly when
+`failure_reason` is non-null and has this ordered shape:
+
+| `failure` field | Contract |
+| --- | --- |
+| `reason` | The same enum string as `failure_reason`; always identical to it. |
+| `matched_signal` | The single winning lowercase literal alternative (for example `rate limit`, `429`, or `session not found`). |
+| `source` | `stderr`, `events`, or `both`, according to which filtered input stream(s) contain the winning alternative. |
+| `confidence` | `high`, `medium`, or `low`, from the winning signal descriptor. |
+| `http_code` | A contextual HTTP 4xx/5xx code when present, otherwise the signal's static code where defined, otherwise `null`. |
+
+Classification is driven by one ordered signal-descriptor table; the first matching row wins.
+Its class order reproduces the legacy precedence exactly: thread_expired beats quota beats auth
+beats permission beats network, so `failure_reason` is unchanged for every prior input. Within a
+class, alternatives retain their former left-to-right order. Confidence is `high` for
+unambiguous domain phrases, `medium` for real words that may occur in unrelated prose, and `low`
+for bare numeric substrings plus the generic token `auth`.
+
+`status.json` also records
 `codex_thread_id` (the Codex `thread_id`, captured on both success and failure whenever the
 events log carries one) — this is exactly the value `ccodex resume <job_id>` uses to continue the
 session; `submit --resume` uses the same value asynchronously. See [resume](#resume) above.
@@ -674,7 +731,7 @@ Every job leaves behind `prompt.md`, `command.txt`, `debug.json`, `status.json`,
 on its own; a hard-timeout kill (exit `24`) leaves none. There is also an index entry at
 `%LOCALAPPDATA%\ccodex\index\<job_id>.json` that lets `status`/`wait`/`read` find the job from any
 directory. `status.json` additionally records `backend` (`sync` for `run`, `native` for
-`submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`,
+`submit`/`worker`), `backend_id`, `started_at`, `finished_at`, `failure_reason`, `failure`,
 `codex_thread_id`, `hard_timeout_sec`, `timeout_reason`, `terminated_at`, `cancelled_at`,
 `last_heartbeat_at`, `parent_job_id` (the parent's job id for a `resume`d job, `null` otherwise),
 `group`, and `label` (nullable strings, always present and inherited by resumed children),

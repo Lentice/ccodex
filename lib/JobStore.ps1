@@ -42,6 +42,7 @@ function New-CcodexStatusObject {
         [string]$StartedAt = $null,
         [string]$FinishedAt = $null,
         [string]$FailureReason = $null,
+        [AllowNull()][object]$Failure = $null,
         [string]$CodexThreadId = $null,
         [Nullable[int]]$HardTimeoutSec = $null,
         [string]$TimeoutReason = $null,
@@ -81,6 +82,7 @@ function New-CcodexStatusObject {
         wrapper_exit_code = $WrapperExitCode
         error             = $ErrorMessage
         failure_reason    = $FailureReason
+        failure           = $Failure
         codex_thread_id   = $CodexThreadId
         hard_timeout_sec  = $HardTimeoutSec
         timeout_reason    = $TimeoutReason
