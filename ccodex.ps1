@@ -675,6 +675,28 @@ function Invoke-CcodexRun {
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Stdout = $coreResult.Stdout; JobDir = $init.JobDir; Message = $coreResult.Message }
 }
 
+function Get-CcodexResumeContextOrFail {
+    param(
+        [Parameter(Mandatory)][string]$ParentJobId,
+        [Parameter(Mandatory)][string]$StateRoot
+    )
+
+    try {
+        $context = Get-CcodexResumeContext -ParentJobId $ParentJobId -StateRoot $StateRoot
+        return [pscustomobject]@{ Context = $context; WrapperExitCode = 0; Message = $null }
+    } catch {
+        $message = $_.Exception.Message
+        $exitCode = if ($message -like '*not found (no index entry)*' -or $message -like '*index entry exists but its job directory is missing*') {
+            3
+        } elseif ($message -like '*resume requires the parent job to be finished*') {
+            4
+        } else {
+            2
+        }
+        return [pscustomobject]@{ Context = $null; WrapperExitCode = $exitCode; Message = $message }
+    }
+}
+
 function Invoke-CcodexResume {
     # Phase 5 multi-turn advisor: continue a finished job's Codex thread with a follow-up.
     # ALWAYS creates a NEW job (new id, new job dir); the parent job dir and its status.json
@@ -709,19 +731,11 @@ function Invoke-CcodexResume {
     # the documented precondition exit codes by message shape: not-found (no index entry, or
     # a missing job dir) -> 3; still-running (non-terminal parent) -> 4; every other rejection
     # (worktree access, or an absent/scrubbed thread id) -> 2.
-    try {
-        $ctx = Get-CcodexResumeContext -ParentJobId $ParentJobId -StateRoot $LocalAppDataRoot
-    } catch {
-        $message = $_.Exception.Message
-        $exitCode = if ($message -like '*not found (no index entry)*' -or $message -like '*index entry exists but its job directory is missing*') {
-            3
-        } elseif ($message -like '*resume requires the parent job to be finished*') {
-            4
-        } else {
-            2
-        }
-        return [pscustomobject]@{ WrapperExitCode = $exitCode; Stdout = $null; JobDir = $null; JobId = $null; Message = $message }
+    $resumeContextResult = Get-CcodexResumeContextOrFail -ParentJobId $ParentJobId -StateRoot $LocalAppDataRoot
+    if ($resumeContextResult.WrapperExitCode -ne 0) {
+        return [pscustomobject]@{ WrapperExitCode = $resumeContextResult.WrapperExitCode; Stdout = $null; JobDir = $null; JobId = $null; Message = $resumeContextResult.Message }
     }
+    $ctx = $resumeContextResult.Context
 
     # Follow-up text via the standard prompt-source machinery; usage errors map to 2 with the
     # exact same messages as `run` (multiple sources, empty stdin, etc.).
@@ -821,12 +835,78 @@ function Invoke-CcodexSubmit {
         [string]$Model = $null,
         [string]$Effort = $null,
         [string]$Group = $null,
-        [string]$Label = $null
+        [string]$Label = $null,
+        [string]$ResumeParentJobId = $null
     )
 
-    $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
-        -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
-        -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'native' -HardTimeoutSec $HardTimeoutSec -Group $Group -Label $Label
+    $resumeContext = $null
+    if ($ResumeParentJobId) {
+        $resumeContextResult = Get-CcodexResumeContextOrFail -ParentJobId $ResumeParentJobId -StateRoot $LocalAppDataRoot
+        if ($resumeContextResult.WrapperExitCode -ne 0) {
+            return [pscustomobject]@{ WrapperExitCode = $resumeContextResult.WrapperExitCode; Stdout = $null; JobDir = $null; JobId = $null; Message = $resumeContextResult.Message }
+        }
+        $resumeContext = $resumeContextResult.Context
+
+        try {
+            $followUp = Get-CcodexPromptContent `
+                -ExpectingPipelineInput $PipelineExpected `
+                -PipelineObjects $PipelineObjects `
+                -PromptFile $PromptFile `
+                -PositionalTask $PositionalTask `
+                -StdinStream ([Console]::OpenStandardInput()) `
+                -StdinIsRedirected ([Console]::IsInputRedirected)
+        } catch {
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; JobDir = $null; JobId = $null; Message = $_.Exception.Message }
+        }
+
+        $repoRoot = $resumeContext.Repo
+        $repoKey = Get-CcodexRepoKey -RepoRoot $repoRoot
+        $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $resumeContext.Mode -Root $LocalAppDataRoot
+        $jobId = $reservation.JobId
+        $jobDir = $reservation.JobDir
+        $indexPath = Get-CcodexIndexPath -JobId $jobId -Root $LocalAppDataRoot
+        $createdAt = (Get-Date).ToString('o')
+
+        try {
+            New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
+            Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
+            Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $followUp
+            $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
+            Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status 'created' -Mode $resumeContext.Mode -Access $resumeContext.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'native' -HardTimeoutSec $hardTimeoutSecOrNull -CodexThreadId $resumeContext.ThreadId -ParentJobId $ResumeParentJobId -Group $resumeContext.Group -Label $resumeContext.Label)
+        } catch {
+            $initializationError = $_.Exception.Message
+            $failureRecorded = $false
+            try {
+                $failureStatus = New-CcodexStatusObject -JobId $jobId -Status 'failed' -Mode $resumeContext.Mode -Access $resumeContext.Access -Repo $repoRoot -CreatedAt $createdAt -Backend 'native' -CodexExitCode $null -WrapperExitCode 12 -CodexThreadId $resumeContext.ThreadId -ParentJobId $ResumeParentJobId -Group $resumeContext.Group -Label $resumeContext.Label
+                $failureStatus.finished_at = (Get-Date).ToString('o')
+                $failureStatus.error = "resume initialization failed: $initializationError"
+                Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object $failureStatus
+                Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'worker-complete.json') -Object ([ordered]@{ job_id = $jobId; status = 'failed'; wrapper_exit_code = 12; completed_at = (Get-Date).ToString('o'); error = $failureStatus.error })
+                $failureRecorded = $true
+            } catch { $failureRecorded = $false }
+            if (-not $failureRecorded) {
+                try { if (Test-Path -LiteralPath $indexPath) { Remove-Item -LiteralPath $indexPath -Force -ErrorAction Stop } } catch { }
+                try { if (Test-Path -LiteralPath $jobDir) { Remove-Item -LiteralPath $jobDir -Recurse -Force -ErrorAction Stop } } catch { }
+            }
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $(if ($failureRecorded) { $jobDir } else { $null }); JobId = $jobId; Message = "ccodex: resume initialization failed: $initializationError" }
+        }
+
+        $init = [pscustomobject]@{
+            WrapperExitCode = 0
+            JobId = $jobId
+            JobDir = $jobDir
+            RepoRoot = $repoRoot
+            ResolvedAccess = $resumeContext.Access
+            CreatedAt = $createdAt
+            MainRepo = $null
+            WorktreeRepo = $null
+            BaseCommit = $null
+        }
+    } else {
+        $init = Initialize-CcodexJob -Mode $Mode -Access $Access -RepoOverride $RepoOverride -PromptFile $PromptFile `
+            -PositionalTask $PositionalTask -PipelineExpected $PipelineExpected -PipelineObjects $PipelineObjects `
+            -LocalAppDataRoot $LocalAppDataRoot -AppDataRoot $AppDataRoot -InitialStatus 'created' -Backend 'native' -HardTimeoutSec $HardTimeoutSec -Group $Group -Label $Label
+    }
 
     if ($init.WrapperExitCode -ne 0) {
         return [pscustomobject]@{ WrapperExitCode = $init.WrapperExitCode; Stdout = $null; JobDir = $init.JobDir; JobId = $init.JobId; Message = $init.Message }
@@ -835,6 +915,9 @@ function Invoke-CcodexSubmit {
     $jobId = $init.JobId
     $jobDir = $init.JobDir
     $resultPath = Join-Path $jobDir 'result.md'
+    $submitMode = if ($resumeContext) { $resumeContext.Mode } else { $Mode }
+    $submitGroup = if ($resumeContext) { $resumeContext.Group } else { $Group }
+    $submitLabel = if ($resumeContext) { $resumeContext.Label } else { $Label }
 
     try {
         $resolvedCodexPath = if ($CodexPath) { $CodexPath } else { Resolve-CcodexCodexPath }
@@ -853,9 +936,16 @@ function Invoke-CcodexSubmit {
         # (status.json + worker-complete.json) before returning — submit is
         # the sole active writer for jobDir at this point (no worker has been
         # launched yet), so this is single-writer-safe.
-        $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $init.ResolvedAccess `
-            -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath `
-            -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit
+        if ($resumeContext) {
+            $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $submitMode -Access $init.ResolvedAccess `
+                -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath `
+                -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit `
+                -ParentJobId $ResumeParentJobId -FallbackCodexThreadId $resumeContext.ThreadId -Group $submitGroup -Label $submitLabel
+        } else {
+            $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $init.ResolvedAccess `
+                -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $_.Exception.Message -Backend 'native' -ResultPath $resultPath `
+                -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit
+        }
         $message = "$($failure.Message)`n  job:      $jobId"
         return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
     }
@@ -863,9 +953,13 @@ function Invoke-CcodexSubmit {
     # Pre-launch diagnostics only (the detached worker re-derives and overwrites both from
     # status.json). For a worktree job Codex targets the worktree, so reflect that here too.
     $submitCodexTargetRepo = if ($init.WorktreeRepo) { $init.WorktreeRepo } else { $init.RepoRoot }
-    $codexArgs = Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort
+    $codexArgs = if ($resumeContext) {
+        Build-CcodexResumeArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath -ThreadId $resumeContext.ThreadId -Model $Model -Effort $Effort
+    } else {
+        Build-CcodexCodexArgs -Access $init.ResolvedAccess -RepoRoot $submitCodexTargetRepo -ResultPath $resultPath -Model $Model -Effort $Effort
+    }
     Write-CcodexTextFile -Path (Join-Path $jobDir 'command.txt') -Content (ConvertTo-CcodexCommandLineText -Executable $resolvedCodexPath -Arguments $codexArgs)
-    Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $Mode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native' -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit)
+    Write-CcodexJsonFile -Path (Join-Path $jobDir 'debug.json') -Object (New-CcodexDebugObject -JobId $jobId -Repo $init.RepoRoot -JobDir $jobDir -Mode $submitMode -Access $init.ResolvedAccess -CodexPath $resolvedCodexPath -CodexArgs $codexArgs -Backend 'native' -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit)
 
     $stateRootOverride = if ($PSBoundParameters.ContainsKey('LocalAppDataRoot')) { $LocalAppDataRoot } else { $null }
     $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }
@@ -2420,15 +2514,28 @@ try {
             if (-not $submitPromptFile) { $submitPromptFile = $PromptFile }
             $submitModel = $null
             $submitEffortText = $null
+            $submitResumeParentJobId = $null
             try {
                 $submitModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
                 $submitEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
                 $submitGroup = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--group'
                 $submitLabel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--label'
+                $submitResumeParentJobId = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--resume'
             } catch {
                 Write-Host $_.Exception.Message
                 $exitCode = 2
                 break
+            }
+
+            if ($submitResumeParentJobId) {
+                $submitHasInheritedOverride = $Mode -or $Access -or $Repo `
+                    -or ($args -contains '--mode') -or ($args -contains '--access') -or ($args -contains '--repo') `
+                    -or ($args -contains '--group') -or ($args -contains '--label')
+                if ($submitHasInheritedOverride) {
+                    Write-Host 'ccodex: submit --resume inherits mode, access, repo, group, and label from the parent job.'
+                    $exitCode = 2
+                    break
+                }
             }
 
             $submitParams = @{
@@ -2455,6 +2562,7 @@ try {
             if ($submitModel) { $submitParams['Model'] = $submitModel }
             if ($null -ne $submitGroup) { $submitParams['Group'] = $submitGroup }
             if ($null -ne $submitLabel) { $submitParams['Label'] = $submitLabel }
+            if ($submitResumeParentJobId) { $submitParams['ResumeParentJobId'] = $submitResumeParentJobId }
             if ($submitEffortText) {
                 try {
                     $submitParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $submitEffortText

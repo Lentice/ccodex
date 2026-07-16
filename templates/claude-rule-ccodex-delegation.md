@@ -91,6 +91,7 @@ has no memory of the prior turn:
 
 ```powershell
 "<reply, or your pushback>" | ccodex resume <job_id>
+"<background reply>" | ccodex submit --resume <job_id>
 ```
 
 `resume` always creates a brand-new job — it never mutates the job you're resuming from — and
@@ -99,6 +100,11 @@ worktree access, or fails with `failure_reason: thread_expired`, the session is 
 fresh `run`/`review` instead of retrying `resume`. This does not count as a separate checkpoint —
 it is a continuation of whichever checkpoint (or explicit request) started the original call, and
 still counts toward `max_codex_calls_per_task`.
+
+Use `submit --resume` when the continuation should run in the background, then collect its new
+child id with `wait`/`read`. It shares the same preconditions and exit semantics, inherits the
+parent's mode/access/repo/group/label, and returns immediately; never override those inherited
+fields. `--model`/`--effort` remain valid per-follow-up knobs.
 
 ## Triage every finding
 
@@ -129,8 +135,8 @@ the README's failure-class table:
 | exit `10` + `failure_reason: permission_or_sandbox` | Note it; consider `--access workspace` or a narrower scope on a future attempt, but do not retry automatically now. |
 | exit `10` + `failure_reason: network` | One retry is safe; if it fails again, note it and continue. |
 | exit `10` with no `failure_reason` | Read `status.json.error`/stderr for context, then continue; use judgment, do not retry-loop. |
-| exit `10` + `failure_reason: thread_expired` (`resume` only) | Codex no longer recognizes the resumed session; start a fresh `run`/`review` instead of retrying `resume`. |
-| exit `2`/`3`/`4` on `resume` | Parent is a worktree job or has an absent/scrubbed thread id (`2`), doesn't exist (`3`), or hasn't finished yet (`4`); start a fresh call or wait, as appropriate. |
+| exit `10` + `failure_reason: thread_expired` (resumed job only) | Codex no longer recognizes the resumed session; start a fresh `run`/`review` instead of retrying the follow-up. |
+| exit `2`/`3`/`4` on `resume` or `submit --resume` | Parent is a worktree job or has an absent/scrubbed thread id (`2`), doesn't exist (`3`), or hasn't finished yet (`4`); start a fresh call or wait, as appropriate. |
 | exit `11` | Codex produced no usable result; note it and continue without the review. |
 | exit `20` | The job is still running; re-run `wait` rather than treating it as failed. |
 | exit `21` | The per-job lock could not be acquired within its timeout; retry the command once. |

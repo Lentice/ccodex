@@ -84,6 +84,7 @@ conversation.
 
    ```powershell
    "<reply to the clarifying question, or your pushback>" | ccodex resume <job_id>
+   "<background follow-up>" | ccodex submit --resume <job_id>
    ```
 
    `resume` always creates a brand-new job (new job id, new artifacts) — it never mutates the
@@ -91,6 +92,10 @@ conversation.
    or worktree access, or fails with `failure_reason: thread_expired`, the session is gone —
    start a fresh `run` instead of retrying `resume`. Chain follow-ups off the latest child's job
    id, not the original parent, if the conversation continues past one reply.
+
+   Use `submit --resume` for a background follow-up, then `wait`/`read` the returned child id.
+   It has the same parent preconditions and inherits mode/access/repo/group/label; do not pass
+   those flags. `--model`/`--effort` remain valid per-follow-up knobs.
 
 6. **For long-running or parallelizable work** (e.g. a test pass, or several independent reviews
    at once), submit it in the background instead of blocking on `run`:
@@ -125,9 +130,9 @@ conversation.
    | Exit code | Meaning |
    | --- | --- |
    | `0`  | Success — stdout is the final result. |
-   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure; also `resume` against a worktree parent or an absent/scrubbed thread id). |
-   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`/`resume`). |
-   | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`/`resume`) — use `wait` or check back later. |
+   | `2`  | Usage/validation error (bad flags, missing task, repo resolution failure; also `resume`/`submit --resume` against a worktree parent or an absent/scrubbed thread id). |
+   | `3`  | Job id not found (`status`/`wait`/`read`/`cancel`/`diff`/`apply`/`tail`/`debug`/`resume`/`submit --resume`). |
+   | `4`  | Job exists but is not finished yet (`read`/`diff`/`apply`/`resume`/`submit --resume`) — use `wait` or check back later. |
    | `10` | Codex itself exited non-zero. |
    | `11` | Codex exited zero but produced no usable result. |
    | `12` | Wrapper-internal error. |
@@ -147,7 +152,7 @@ conversation.
    | `10` + `failure_reason: quota_or_rate_limit` | Report the limit to the user; do not auto-retry. |
    | `10` + `failure_reason: auth` | Suggest the user run `codex login`. |
    | `10` + `failure_reason: network` | Safe to retry once. |
-   | `10` + `failure_reason: thread_expired` (`resume` only) | Codex no longer recognizes the session; start a fresh `run` instead of retrying `resume`. |
+   | `10` + `failure_reason: thread_expired` (resumed job only) | Codex no longer recognizes the session; start a fresh `run` instead of retrying the follow-up. |
    | `10` + `failure_reason` absent | Read `error` in `status.json` / stderr; use judgment. |
    | `24` (`timed_out`) | Raise `--hard-timeout-sec` or split the task into smaller pieces; don't just retry unchanged. |
    | `20` | The job is still running — re-run `wait` rather than treating it as failed. |

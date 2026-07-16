@@ -44,6 +44,37 @@ stdin stream, `--prompt-file <path>`, or a positional task argument. `run` sends
 non-interactively and blocks until it finishes; `submit` prepares the same job and hands it to a
 detached background worker, returning immediately (see [status, wait, and read](#status-wait-and-read)).
 
+`ccodex submit --resume <parent_job_id>` is the asynchronous follow-up form. Its task-text
+sources are identical to plain `submit` (stdin, `--prompt-file`, or positional task text), while
+the value following `--resume` names the finished parent job. It synchronously validates the
+parent, creates a new child carrying the inherited thread/context metadata, launches the same
+detached worker, and prints the child job id plus job directory immediately:
+
+```powershell
+"Continue with this additional constraint." | ccodex submit --resume <parent_job_id>
+# -> <child_job_id>
+#    <child_job_dir>
+```
+
+The async child inherits the parent's `mode`, `access`, `repo`, `group`, and `label`; supplying
+any of `--mode`/`--access`/`--repo`/`--group`/`--label` with `--resume` is a usage error (exit
+`2`). `--model`/`--effort`, `--hard-timeout-sec`, and the hidden test/support flags
+`--state-root`/`--codex-path`/`--detach-mechanism` remain per-invocation submit options.
+
+Parent validation happens before any child directory is reserved, in this order:
+
+| `submit --resume` precondition | Exit |
+| --- | ---: |
+| `--resume` is missing its required value, task text is absent/ambiguous, or an inherited-context flag is supplied | `2` |
+| Parent has no index entry, or its indexed job directory is missing | `3` |
+| Parent is not terminal (`done`/`failed`/`timed_out`/`cancelled`) | `4` |
+| Parent used worktree access | `2` |
+| Parent has no `codex_thread_id` (absent or scrubbed) | `2` |
+
+The last four messages are exactly the same as synchronous `resume`; worktree access is checked
+before thread-id presence. A launch/sentinel failure remains exit `23`, and success keeps plain
+submit's exact two-line output shape.
+
 ```powershell
 # Synchronous, read-only review or brainstorming (defaults to --access read-only)
 "Review this diff for correctness issues." | ccodex run --mode review
@@ -224,6 +255,11 @@ parent did (same placement rules: they land in the exec-level argv segment, befo
 `resume <thread-id>` token). It likewise rejects a second positional argument after the job id (exit `2`) — the
 follow-up text must come from stdin or `--prompt-file`, never a positional.
 
+For the asynchronous form, use `ccodex submit --resume <job_id>` instead. It accepts plain
+submit's full task-source set (including positional task text), returns the new child id and job
+directory immediately, and is collected later with `wait`/`read`; parent preconditions and
+failure classification are shared with synchronous `resume`.
+
 ```powershell
 "Reply with exactly SEED." | ccodex run --mode brainstorm
 # -> <job_id_1>
@@ -296,6 +332,7 @@ ccodex read <job_id> [--json]     # non-blocking result read; exits 4 if not fin
 ```
 
 Submit several jobs before waiting on any of them to run independent tasks in parallel.
+The same collection flow applies to a child returned by `submit --resume <parent_job_id>`.
 
 `wait --all` takes one snapshot of currently `created`/`running` jobs, optionally filtered by
 exact case-sensitive group, label, and repo. Later submissions are excluded. The timeout applies
@@ -371,7 +408,7 @@ from `wrapper_exit_code`, which is the job's recorded wrapper exit in `status.js
   `status` is the current non-terminal state and `health` may be `possibly-stale`; the command does
   not modify `status.json`.
 
-For a job created by `ccodex resume`, `status`/`debug` append `parent=<parent_job_id>` /
+For a resumed job created by either `ccodex resume` or `ccodex submit --resume`, `status`/`debug` append `parent=<parent_job_id>` /
 `parent: <parent_job_id>` to name the job it continued — see [resume](#resume) above.
 
 ### list
@@ -443,7 +480,7 @@ ccodex tail <job_id> --lines 80
 
 **`ccodex debug <job_id>`** prints a compact one-shot diagnosis: status (with `health=ok|stale`
 while running), mode/access/backend/repo, a `parent: <job_id>` line if the job was created by
-`ccodex resume`, every recorded timestamp, `backend_id` with a live/dead
+`ccodex resume` or `ccodex submit --resume`, every recorded timestamp, `backend_id` with a live/dead
 verdict, exit codes, `failure_reason` (with its hint line), `codex_thread_id` (or
 `absent/scrubbed`), whether `result.md` is present, the last 5 lines of `stderr.log`, the job
 directory, and a suggested next command (`ccodex wait`/`read`/`tail` depending on status).
@@ -585,7 +622,7 @@ repo/non-`done` job, and exit `4` for a job that hasn't finished yet — see
 `cleanup` additionally use exit `3` for an unknown job id (same as `status`/`wait`/`read`) and
 exit `12` for a wrapper-internal failure; `cleanup` and `doctor` are documented in full in
 [cancel, tail, debug, cleanup, and doctor](#cancel-tail-debug-cleanup-and-doctor) above. `resume`
-additionally uses exit `3` for an unknown parent job id, exit `4` for a parent that hasn't reached
+and `submit --resume` additionally use exit `3` for an unknown parent job id, exit `4` for a parent that hasn't reached
 a terminal status yet, and exit `2` for a worktree-access parent or a parent whose
 `codex_thread_id` is absent/scrubbed — see [resume](#resume) above.
 
@@ -603,14 +640,14 @@ treat `failure_reason` as a shortcut to the right reaction, not a guarantee:
 | `auth` | Codex auth/credential problem (signature: `login`, `auth`, `401`, `unauthorized`, `credential`). | Suggest running `codex login`. |
 | `permission_or_sandbox` | Sandbox or approval denial (signature: `sandbox`, `denied`, `approval`, `permission`). | Narrow the scope. Only `test`/`implement` may use `--access workspace`; keep `review`/`brainstorm` read-only. |
 | `network` | Transient network failure (signature: `network`, `connection`, `dns`, `502`, `503`). | One retry is safe. |
-| `thread_expired` | Codex itself no longer recognizes the resumed thread id (signature: "session not found", "thread not found", "no session", "conversation not found"). Only ever seen on `ccodex resume`. | Start a fresh `ccodex run` — the session is gone, not retryable. |
+| `thread_expired` | Codex itself no longer recognizes the resumed thread id (signature: "session not found", "thread not found", "no session", "conversation not found"). Only seen on synchronous `resume` or a `submit --resume` child. | Start a fresh `ccodex run` — the session is gone, not retryable. |
 | *(absent)* | No recognized signature, or the run succeeded. | Fall back to the exit code and `error` message. |
 
 Classification precedence when multiple signatures are present in the same failure: thread_expired
 beats quota beats auth beats permission beats network. `status.json` also records
 `codex_thread_id` (the Codex `thread_id`, captured on both success and failure whenever the
 events log carries one) — this is exactly the value `ccodex resume <job_id>` uses to continue the
-session; see [resume](#resume) above.
+session; `submit --resume` uses the same value asynchronously. See [resume](#resume) above.
 
 ## Hard timeout
 
@@ -651,6 +688,12 @@ thread-id scrub — serializes through a per-job lock (`<job_dir>\.lock\`) so tw
 never race each other; a lock that cannot be acquired within its timeout surfaces as wrapper exit
 `21` rather than corrupting the file.
 
+For `submit --resume`, `parent_job_id` and the inherited `codex_thread_id` are present from the
+initial `created` status. This status metadata is how the worker recognizes a resumed child and
+builds `codex exec … resume <thread-id> -`; no resume flag is added to the worker launch line.
+As with plain submit, only `--model`/`--effort` travel on that launch line and neither enters
+`status.json`.
+
 ## Repository layout
 
 ```text
@@ -681,6 +724,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   task; `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
   `--focus`, `--embed-diff`, and `--repo`; `resume <job_id>` accepts the same prompt sources as
   `run` (minus `--repo`, which is always inherited from the parent) plus `--hard-timeout-sec`;
+  `submit --resume <job_id>` is the detached async follow-up form, accepts plain submit's task
+  sources, and inherits the parent context;
   `run`/`submit`/`review`/`resume` all additionally accept the optional `--model`/`--effort`
   Codex knobs (see [run and submit](#run-and-submit));
   `diff`/`apply` take a worktree job id; `cancel`/`tail`/`debug` take a job id (`tail` also

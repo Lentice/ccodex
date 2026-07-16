@@ -12,6 +12,7 @@ clarifying question, or a finding deserves pushback/refinement with the prior co
 
 ```powershell
 "<follow-up, answer, or pushback>" | ccodex resume <job_id>
+"<background follow-up>" | ccodex submit --resume <job_id>
 ```
 
 Notes:
@@ -19,6 +20,8 @@ Notes:
 - `resume` creates a brand-new job (new id, `parent_job_id` lineage) and inherits the parent's
   mode/access/repo — never pass `--repo`/`--mode`/`--access` (exit `2`). `--model`/`--effort`
   are accepted per call.
+- Use `submit --resume` when the follow-up should run in the background, then `wait`/`read` its
+  returned child id. It also inherits group/label and shares `resume`'s parent preconditions.
 - Chain further follow-ups off the NEWEST child job id, not the original parent.
 - Exit `2` naming a scrubbed/absent thread id or worktree access, or a failure with
   `failure_reason: thread_expired`, means the session is gone — start a fresh

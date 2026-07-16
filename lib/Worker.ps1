@@ -66,12 +66,16 @@ function Invoke-CcodexWorker {
     $baseCommit = $status.base_commit
     $group = $status.group
     $label = $status.label
+    $parentJobId = $status.parent_job_id
+    $fallbackCodexThreadId = $status.codex_thread_id
+    $isResumedJob = -not [string]::IsNullOrEmpty($parentJobId) -and -not [string]::IsNullOrEmpty($fallbackCodexThreadId)
 
     $statusPath = Join-Path $jobDir 'status.json'
     $runningStatusObject = New-CcodexStatusObject `
         -JobId $JobId -Status 'running' -Mode $status.mode -Access $status.access -Repo $status.repo `
         -CreatedAt $status.created_at -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSecOrNull `
-        -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label
+        -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -CodexThreadId $fallbackCodexThreadId `
+        -ParentJobId $parentJobId -Group $group -Label $label
 
     # The created->running transition is a status.json WRITE, so it goes through the
     # per-job lock like every other writer AND re-reads status under the lock before
@@ -94,6 +98,7 @@ function Invoke-CcodexWorker {
                 -BackendId $backendId -StartedAt $startedAt -ResultPath (Join-Path $jobDir 'result.md') `
                 -EventsPath (Join-Path $jobDir 'codex-events.jsonl') -StderrPath (Join-Path $jobDir 'stderr.log') `
                 -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
+                -ParentJobId $parentJobId -FallbackCodexThreadId $fallbackCodexThreadId `
                 -Message $startResult.Message
             return [pscustomobject]@{ WrapperExitCode = $failResult.WrapperExitCode; Message = $failResult.Message }
         }
@@ -116,11 +121,21 @@ function Invoke-CcodexWorker {
     # SkipRunningWrite: the worker already stamped its own `running` status.json (with the
     # backend_id/started_at above) immediately before this call, so the execution core must
     # not overwrite it with a redundant second `running` write of the same content.
-    $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
-        -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
-        -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
-        -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
-        -Model $Model -Effort $Effort
+    if ($isResumedJob) {
+        $resumeArgs = Build-CcodexResumeArgs -RepoRoot $status.repo -ResultPath (Join-Path $jobDir 'result.md') `
+            -ThreadId $fallbackCodexThreadId -Access $status.access -Model $Model -Effort $Effort
+        $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
+            -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
+            -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
+            -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
+            -Model $Model -Effort $Effort -CodexArgs $resumeArgs -ParentJobId $parentJobId -FallbackCodexThreadId $fallbackCodexThreadId
+    } else {
+        $coreResult = Invoke-CcodexJobExecution -JobDir $jobDir -RepoRoot $status.repo -Mode $status.mode `
+            -Access $status.access -WorkerPrompt $workerPrompt -CodexPath $CodexPath -CreatedAt $status.created_at `
+            -Backend 'native' -BackendId $backendId -StartedAt $startedAt -HardTimeoutSec $hardTimeoutSec -SkipRunningWrite `
+            -OnHeartbeat $onHeartbeat -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $group -Label $label `
+            -Model $Model -Effort $Effort
+    }
 
     return [pscustomobject]@{ WrapperExitCode = $coreResult.WrapperExitCode; Message = $coreResult.Message }
 }

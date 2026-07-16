@@ -35,8 +35,9 @@ Two goals:
   later from any directory.
 - **Worktree-isolated implementation** (`--mode implement`): Codex's edits land in an isolated git
   worktree, never your working tree, until you explicitly review and `apply` them.
-- **Multi-turn follow-up** (`ccodex resume`): continue the same Codex session for a clarifying
-  question or pushback, instead of starting from scratch.
+- **Multi-turn follow-up** (`ccodex resume` / `ccodex submit --resume`): continue the same Codex
+  session synchronously or in the background for a clarifying question or pushback, instead of
+  starting from scratch.
 - **Debuggable by default**: every job leaves `prompt.md`, `status.json`, raw event/stderr logs,
   and the final result behind under a global state root.
 - **Job lifecycle management**: `cancel`, `tail`, `debug`, `cleanup` (with retention + stale
@@ -169,6 +170,17 @@ ccodex wait --all --group ci --json  # gather a snapshot of matching non-termina
 ccodex read <job_id> --json    # result state/content without scraping human text
 ```
 
+An existing finished session can also continue asynchronously. The child inherits the parent's
+mode, access, repo, group, and label, and `submit` returns its new child id immediately:
+
+```powershell
+"Continue the analysis with this constraint." | ccodex submit --resume <parent_job_id>
+# -> <child_job_id>
+#    <child_job_dir>
+ccodex wait <child_job_id>
+ccodex read <child_job_id>
+```
+
 `status`, `wait`, and `read` accept `--json` for a versioned lifecycle envelope whose
 `command_exit_code` matches the process exit code. Human text remains the default. Lifecycle
 fields stay present with `null` values when unavailable, so automation can parse a stable shape.
@@ -202,7 +214,12 @@ ccodex apply <job_id>    # lands the worker's snapshot commit onto the main repo
 
 ```powershell
 "Now say CONTINUED instead." | ccodex resume <job_id>
+"Investigate that follow-up in the background." | ccodex submit --resume <job_id>
 ```
+
+Use `resume` when you want the result now; use `submit --resume` for an async follow-up, then
+`wait`/`read` the returned child id. Both forms share the same parent preconditions and inherit
+the parent's context; `--model` and `--effort` may still be chosen per follow-up.
 
 **Pick a model or effort per call** (optional; omit both to use Codex's configured defaults) —
 `run`, `submit`, `review`, and `resume` all take `--model <model>` and
@@ -245,7 +262,7 @@ The full contract (including `12`/`21`/`22`/`23`) is in the
 On a failed job, `status.json.failure_reason` hints the reaction: `quota_or_rate_limit` → report
 it, never retry · `auth` → run `codex login` · `permission_or_sandbox` → narrow the scope (only
 `test`/`implement` may use `--access workspace`; a review stays read-only) · `network` → one retry
-is safe · `thread_expired` (`resume` only) → start a
+is safe · `thread_expired` (resumed jobs only) → start a
 fresh `run`. When it's unclear, run `ccodex doctor` before retrying anything.
 
 ### Delegation policy (`.ccodex/ccodex.json`)

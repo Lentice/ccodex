@@ -58,7 +58,7 @@ Commands appear in the supported list as their phase is installed:
 ## Core usage
 
 Prompts are piped on stdin (preferred), or passed via `--prompt-file <path>` or as a positional
-argument. `run` and `submit` REQUIRE `--mode` (`review`, `brainstorm`, or `test`; plus
+argument. `run` and plain `submit` REQUIRE `--mode` (`review`, `brainstorm`, or `test`; plus
 `implement` only where Phase 4 is installed) — omitting it exits 2. `--access` defaults per mode:
 `read-only` for `review`/`brainstorm`, `worktree` for `implement` (where Phase 4 is installed),
 and no default for `test` (`--access workspace` or `--access worktree` must be given explicitly —
@@ -173,6 +173,7 @@ the same Codex session instead of starting over:
 
 ```powershell
 "<your follow-up>" | ccodex resume <job_id>
+"<background follow-up>" | ccodex submit --resume <job_id>  # returns child id + dir immediately
 ```
 
 `resume` always creates a brand-new job (new job id/directory, `parent_job_id` lineage in its
@@ -183,6 +184,10 @@ names which). If it fails with `failure_reason: thread_expired` (Codex itself re
 session), the session is gone either way — start a fresh `run` instead of retrying `resume`.
 Chain follow-ups off the newest child's job id, not the original parent, if the exchange
 continues past one reply.
+
+Use `submit --resume` when the follow-up should run in the background, then collect the returned
+child with `wait`/`read`. It inherits mode/access/repo/group/label and shares synchronous
+`resume`'s parent checks and exit `2`/`3`/`4` semantics; never override those inherited fields.
 
 ## Exit codes and failure reactions
 

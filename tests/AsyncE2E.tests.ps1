@@ -83,6 +83,17 @@ function Wait-CcodexShimStatus {
     }
 }
 
+function New-CcodexAsyncResumeParent {
+    param([string]$ThreadId = 'thread-async-parent')
+    $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
+    $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode 'brainstorm' -Root $localAppData
+    $indexPath = Get-CcodexIndexPath -JobId $reservation.JobId -Root $localAppData
+    New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
+    Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $reservation.JobId; repo_key = $repoKey; job_dir = $reservation.JobDir })
+    Write-CcodexJsonFileAtomic -Path (Join-Path $reservation.JobDir 'status.json') -Object (New-CcodexStatusObject -JobId $reservation.JobId -Status 'done' -Mode 'brainstorm' -Access 'read-only' -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'sync' -CodexThreadId $ThreadId -Group 'async-group' -Label 'async-label')
+    return [pscustomobject]@{ JobId = $reservation.JobId; JobDir = $reservation.JobDir }
+}
+
 $savedPath = $env:PATH
 $savedAppData = $env:APPDATA
 $savedExit = $env:CCODEX_FAKE_EXIT_CODE
@@ -142,6 +153,52 @@ try {
     Assert-True (-not ($readResultAB.Stdout -like '*fake-codex ran*')) 'read stdout never carries raw JSONL'
 
     Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+    # ============================================================
+    # (a2) async follow-up: submit --resume -> wait -> read, with lineage in JSON status.
+    # ============================================================
+
+    Write-Host "shim: submit --resume -> wait/read preserves exact submit stdout and lineage"
+    $resumeParent = New-CcodexAsyncResumeParent
+    $env:CCODEX_FAKE_EXIT_CODE = '0'
+    $env:CCODEX_FAKE_RESULT = 'ASYNC FOLLOW-UP RESULT'
+    $submitResume = Invoke-CcodexShim -Arguments @('submit', 'continue this thread', '--resume', $resumeParent.JobId, '--model', 'gpt-5-codex', '--effort', 'high', '--state-root', $localAppData, '--detach-mechanism', 'startprocess')
+    Assert-Equal $submitResume.ExitCode 0 'submit --resume exits 0 after detached launch'
+    Assert-Equal $submitResume.Lines.Count 2 'submit --resume stdout is exactly child id plus child dir'
+    Assert-Equal @($submitResume.Stdout -split "`n").Count 2 'submit --resume raw stdout remains exactly two lines'
+    $resumeChildId = $submitResume.Lines[0]
+    $resumeChildDir = $submitResume.Lines[1]
+    Assert-True ($resumeChildId -ne $resumeParent.JobId) 'submit --resume creates a distinct child job id'
+    $waitResume = Invoke-CcodexShim -Arguments @('wait', $resumeChildId, '--state-root', $localAppData)
+    Assert-Equal $waitResume.ExitCode 0 'wait on async follow-up exits 0'
+    Assert-Equal $waitResume.Stdout 'ASYNC FOLLOW-UP RESULT' 'wait prints async follow-up result only'
+    $readResume = Invoke-CcodexShim -Arguments @('read', $resumeChildId, '--state-root', $localAppData)
+    Assert-Equal $readResume.ExitCode 0 'read on async follow-up exits 0'
+    Assert-Equal $readResume.Stdout 'ASYNC FOLLOW-UP RESULT' 'read prints the same async follow-up result'
+    $statusResumeJson = Invoke-CcodexShim -Arguments @('status', $resumeChildId, '--json', '--state-root', $localAppData)
+    Assert-Equal $statusResumeJson.ExitCode 0 'status --json on async follow-up exits 0'
+    $resumeEnvelope = $statusResumeJson.Stdout | ConvertFrom-Json
+    Assert-Equal $resumeEnvelope.parent_job_id $resumeParent.JobId 'status --json envelope exposes async parent_job_id'
+    $resumeChildStatus = Read-CcodexStatusFile -JobDir $resumeChildDir
+    Assert-Equal $resumeChildStatus.codex_thread_id 'thread-async-parent' 'async follow-up remains resumable using the inherited thread id fallback'
+    Assert-Equal $resumeChildStatus.group 'async-group' 'async follow-up preserves inherited group through terminal status'
+    Assert-Equal $resumeChildStatus.label 'async-label' 'async follow-up preserves inherited label through terminal status'
+    Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $resumeChildDir 'prompt.md'))) 'continue this thread' 'submit --resume accepts positional follow-up text like plain submit'
+    $resumeCommand = Get-Content -LiteralPath (Join-Path $resumeChildDir 'command.txt') -Raw
+    Assert-True ($resumeCommand -like '*-m gpt-5-codex -c model_reasoning_effort=high resume thread-async-parent -*') 'submit --resume accepts model/effort and the worker preserves resume argv ordering'
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+    Write-Host "shim: submit --resume Codex session-not-found failure -> wait 10, thread_expired"
+    $expiredParent = New-CcodexAsyncResumeParent -ThreadId 'thread-expired-parent'
+    $env:CCODEX_FAKE_EXIT_CODE = '1'
+    $env:CCODEX_FAKE_STDERR = 'session not found'
+    $submitExpired = Invoke-CcodexShim -Arguments @('submit', '--resume', $expiredParent.JobId, '--state-root', $localAppData, '--detach-mechanism', 'startprocess') -StdinText 'continue expired thread'
+    Assert-Equal $submitExpired.ExitCode 0 'thread-expired async submit still exits 0 after launch'
+    $waitExpired = Invoke-CcodexShim -Arguments @('wait', $submitExpired.Lines[0], '--state-root', $localAppData)
+    Assert-Equal $waitExpired.ExitCode 10 'wait on thread-expired async follow-up exits 10'
+    $expiredStatus = Read-CcodexStatusFile -JobDir $submitExpired.Lines[1]
+    Assert-Equal $expiredStatus.failure_reason 'thread_expired' 'async resumed worker classifies session-not-found as thread_expired'
+    Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_STDERR -ErrorAction SilentlyContinue
 
     # ============================================================
     # (c) still-sleeping job: read -> 4, timed wait -> 20 (lifecycle unchanged), then a

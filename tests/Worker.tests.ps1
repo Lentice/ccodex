@@ -29,7 +29,11 @@ function New-CcodexTestJob {
         [string]$Mode = 'review',
         [string]$Access = 'read-only',
         [string]$PromptContent = 'test worker prompt body',
-        [int]$HardTimeoutSec = 0
+        [int]$HardTimeoutSec = 0,
+        [string]$ParentJobId = $null,
+        [string]$CodexThreadId = $null,
+        [string]$Group = $null,
+        [string]$Label = $null
     )
     $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
     $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode $Mode -Root $localAppData
@@ -40,7 +44,7 @@ function New-CcodexTestJob {
     Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $jobId; repo_key = $repoKey; job_dir = $jobDir })
     $createdAt = (Get-Date).ToString('o')
     Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $PromptContent
-    $statusParams = @{ JobId = $jobId; Status = 'created'; Mode = $Mode; Access = $Access; Repo = $targetRepo; CreatedAt = $createdAt }
+    $statusParams = @{ JobId = $jobId; Status = 'created'; Mode = $Mode; Access = $Access; Repo = $targetRepo; CreatedAt = $createdAt; Backend = 'native'; ParentJobId = $ParentJobId; CodexThreadId = $CodexThreadId; Group = $Group; Label = $Label }
     if ($HardTimeoutSec -gt 0) { $statusParams['HardTimeoutSec'] = $HardTimeoutSec }
     Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject @statusParams)
     return [pscustomobject]@{ JobId = $jobId; JobDir = $jobDir }
@@ -65,6 +69,56 @@ Assert-True (-not [string]::IsNullOrEmpty($statusA.finished_at)) 'finished_at is
 
 $resultMdA = Get-Content -LiteralPath (Join-Path $jobA.JobDir 'result.md') -Raw
 Assert-True ($resultMdA -like '*WORKER RESULT OK*') 'result.md carries the fixture result content'
+
+# --- (a2) resumed-child worker uses status metadata to execute codex resume ---
+
+Write-Host "Invoke-CcodexWorker: resumed child metadata builds resume argv and preserves lineage"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'RESUMED WORKER RESULT'
+$jobResumed = New-CcodexTestJob -Mode 'brainstorm' -PromptContent 'follow-up only' -ParentJobId 'parent-worker-job' -CodexThreadId 'thread-worker-parent' -Group 'worker-group' -Label 'worker-label'
+$resultResumed = Invoke-CcodexWorker -JobId $jobResumed.JobId -StateRoot $localAppData -CodexPath $fixtureCmd -Model 'gpt-5-codex' -Effort 'high'
+Assert-Equal $resultResumed.WrapperExitCode 0 'resumed-child worker exits 0 on success'
+$statusResumed = Read-CcodexStatusFile -JobDir $jobResumed.JobDir
+Assert-Equal $statusResumed.status 'done' 'resumed-child worker reaches done'
+Assert-Equal $statusResumed.parent_job_id 'parent-worker-job' 'resumed-child terminal status preserves parent_job_id'
+Assert-Equal $statusResumed.codex_thread_id 'thread-worker-parent' 'resumed-child terminal status preserves fallback thread id when fixture emits no thread.started event'
+Assert-Equal $statusResumed.group 'worker-group' 'resumed-child terminal status preserves group'
+Assert-Equal $statusResumed.label 'worker-label' 'resumed-child terminal status preserves label'
+$resumedCommand = Get-Content -LiteralPath (Join-Path $jobResumed.JobDir 'command.txt') -Raw
+Assert-True ($resumedCommand -like '*-m gpt-5-codex -c model_reasoning_effort=high resume thread-worker-parent -*') 'worker command.txt uses resume argv ordering'
+$resumedDebug = Get-Content -LiteralPath (Join-Path $jobResumed.JobDir 'debug.json') -Raw | ConvertFrom-Json
+$resumedArgText = @($resumedDebug.codex_args) -join '|'
+Assert-True ($resumedArgText -like '*|resume|thread-worker-parent|-') 'debug.json records resume <thread-id> before trailing dash'
+
+Write-Host "Invoke-CcodexWorker: resumed child running status preserves lineage before terminal completion"
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'DELAYED RESUMED WORKER RESULT'
+$env:CCODEX_FAKE_DELAY_MS = '6000'
+$jobResumedRunning = New-CcodexTestJob -Mode 'brainstorm' -PromptContent 'delayed follow-up' -ParentJobId 'parent-running-observation' -CodexThreadId 'thread-running-observation' -Group 'running-group' -Label 'running-label'
+$workerArgs = @('-NoLogo', '-NoProfile', '-File', $ccodexPs, 'worker', '--job-id', $jobResumedRunning.JobId, '--state-root', $localAppData, '--codex-path', $fixtureCmd)
+$workerProcess = Start-Process -FilePath 'pwsh' -ArgumentList $workerArgs -PassThru -WindowStyle Hidden
+try {
+    $runningDeadline = (Get-Date).AddSeconds(20)
+    $observedRunningStatus = $null
+    while ((Get-Date) -lt $runningDeadline) {
+        $candidateStatus = Read-CcodexStatusFile -JobDir $jobResumedRunning.JobDir
+        if ($candidateStatus.status -eq 'running') { $observedRunningStatus = $candidateStatus; break }
+        if ($candidateStatus.status -in @('done', 'failed', 'timed_out', 'cancelled')) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-True ($null -ne $observedRunningStatus) 'resumed-child worker exposes a running status before terminal completion'
+    if ($observedRunningStatus) {
+        Assert-Equal $observedRunningStatus.parent_job_id 'parent-running-observation' 'running status preserves parent_job_id'
+        Assert-Equal $observedRunningStatus.codex_thread_id 'thread-running-observation' 'running status preserves codex_thread_id'
+        Assert-Equal $observedRunningStatus.group 'running-group' 'running status preserves group'
+        Assert-Equal $observedRunningStatus.label 'running-label' 'running status preserves label'
+    }
+    Assert-True ($workerProcess.WaitForExit(30000)) 'delayed resumed worker exits after the running-state observation'
+    Assert-Equal $workerProcess.ExitCode 0 'delayed resumed worker process exits 0'
+} finally {
+    if (-not $workerProcess.HasExited) { Stop-Process -Id $workerProcess.Id -Force -ErrorAction SilentlyContinue }
+}
+Remove-Item Env:\CCODEX_FAKE_DELAY_MS -ErrorAction SilentlyContinue
 
 # --- (b) fake codex exit 3 -> wrapper 10, terminal failed ---
 

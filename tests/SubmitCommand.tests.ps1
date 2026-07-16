@@ -61,6 +61,30 @@ function Wait-CcodexTestTerminalStatus {
     }
 }
 
+function New-CcodexSubmitResumeParent {
+    param(
+        [string]$Status = 'done',
+        [string]$Access = 'read-only',
+        [AllowNull()][string]$ThreadId = 'thread-submit-parent',
+        [string]$Group = 'parent-group',
+        [string]$Label = 'parent-label'
+    )
+    $repoKey = Get-CcodexRepoKey -RepoRoot $targetRepo
+    $reservation = Reserve-CcodexJobDir -RepoKey $repoKey -Mode 'brainstorm' -Root $localAppData
+    $indexPath = Get-CcodexIndexPath -JobId $reservation.JobId -Root $localAppData
+    New-Item -ItemType Directory -Path (Split-Path -Parent $indexPath) -Force | Out-Null
+    Write-CcodexJsonFileAtomic -Path $indexPath -Object ([ordered]@{ job_id = $reservation.JobId; repo_key = $repoKey; job_dir = $reservation.JobDir })
+    $statusObject = New-CcodexStatusObject -JobId $reservation.JobId -Status $Status -Mode 'brainstorm' -Access $Access -Repo $targetRepo -CreatedAt ((Get-Date).ToString('o')) -Backend 'sync' -CodexThreadId $ThreadId -Group $Group -Label $Label
+    Write-CcodexJsonFileAtomic -Path (Join-Path $reservation.JobDir 'status.json') -Object $statusObject
+    return [pscustomobject]@{ JobId = $reservation.JobId; JobDir = $reservation.JobDir }
+}
+
+function Get-CcodexSubmitJobDirCount {
+    $jobsRoot = Join-Path (Get-CcodexLocalAppDataRoot -Root $localAppData) 'jobs'
+    if (-not (Test-Path -LiteralPath $jobsRoot -PathType Container)) { return 0 }
+    return @(Get-ChildItem -LiteralPath $jobsRoot -Directory -Recurse | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'status.json') -PathType Leaf }).Count
+}
+
 # --- (a) success: submit returns immediately, worker finishes the job in the background ---
 
 Write-Host "Invoke-CcodexSubmit: success returns 0 with job id + job dir, worker completes in background"
@@ -233,6 +257,84 @@ $bareLabelOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mo
 Assert-Equal $LASTEXITCODE 2 'submit bare --label exits 2'
 $bareGroupOut = "unused" | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --mode review --repo $targetRepo --state-root $localAppData --group
 Assert-Equal $LASTEXITCODE 2 'submit bare --group exits 2'
+
+# --- (i) submit --resume validates synchronously and creates an inherited async child ---
+
+Write-Host "Invoke-CcodexSubmit: --resume parent preconditions fail synchronously before reserving a child"
+$beforeUnknown = Get-CcodexSubmitJobDirCount
+$unknownAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = 'missing-submit-parent' }
+Assert-Equal $unknownAsyncResume.WrapperExitCode 3 'submit --resume unknown parent exits 3'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeUnknown 'unknown parent creates no child job dir'
+
+$missingDirParent = New-CcodexSubmitResumeParent
+Remove-Item -LiteralPath $missingDirParent.JobDir -Recurse -Force
+$beforeMissingDir = Get-CcodexSubmitJobDirCount
+$missingDirAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $missingDirParent.JobId }
+Assert-Equal $missingDirAsyncResume.WrapperExitCode 3 'submit --resume indexed parent with a missing job dir exits 3'
+Assert-True ($missingDirAsyncResume.Message -like '*index entry exists but its job directory is missing*') 'missing-parent-dir message matches synchronous resume'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeMissingDir 'missing parent job dir creates no child job dir'
+
+$runningParent = New-CcodexSubmitResumeParent -Status 'running'
+$beforeRunning = Get-CcodexSubmitJobDirCount
+$runningAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $runningParent.JobId }
+Assert-Equal $runningAsyncResume.WrapperExitCode 4 'submit --resume non-terminal parent exits 4'
+Assert-True ($runningAsyncResume.Message -like "*$($runningParent.JobId)*running*") 'non-terminal message names the parent id and status'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeRunning 'non-terminal parent creates no child job dir'
+
+$worktreeParent = New-CcodexSubmitResumeParent -Access 'worktree'
+$beforeWorktree = Get-CcodexSubmitJobDirCount
+$worktreeAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $worktreeParent.JobId }
+Assert-Equal $worktreeAsyncResume.WrapperExitCode 2 'submit --resume worktree parent exits 2'
+Assert-True ($worktreeAsyncResume.Message -like '*resume is not supported for worktree jobs*') 'worktree rejection uses the resume precondition message'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeWorktree 'worktree parent creates no child job dir'
+
+$scrubbedParent = New-CcodexSubmitResumeParent -ThreadId $null
+$beforeScrubbed = Get-CcodexSubmitJobDirCount
+$scrubbedAsyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $scrubbedParent.JobId }
+Assert-Equal $scrubbedAsyncResume.WrapperExitCode 2 'submit --resume scrubbed parent exits 2'
+Assert-True ($scrubbedAsyncResume.Message -like '*no codex thread id (absent or scrubbed by cleanup)*') 'scrubbed-thread rejection uses the resume precondition message'
+Assert-Equal (Get-CcodexSubmitJobDirCount) $beforeScrubbed 'scrubbed parent creates no child job dir'
+
+Write-Host "Invoke-CcodexSubmit: --resume success returns the plain-submit shape and seeds inherited lineage metadata"
+$asyncParent = New-CcodexSubmitResumeParent
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'ASYNC RESUME SUBMIT OK'
+$asyncResume = Invoke-CcodexSubmitForTest -Overrides @{ ResumeParentJobId = $asyncParent.JobId; PositionalTask = 'follow-up text only'; Mode = $null; Access = $null; RepoOverride = $null }
+Assert-Equal $asyncResume.WrapperExitCode 0 'submit --resume successful launch exits 0'
+Assert-Equal @($asyncResume.Stdout -split "`n").Count 2 'submit --resume stdout is exactly two lines'
+$asyncResumeStatus = Read-CcodexStatusFile -JobDir $asyncResume.JobDir
+Assert-Equal $asyncResumeStatus.parent_job_id $asyncParent.JobId 'async child carries parent_job_id from creation onward'
+Assert-Equal $asyncResumeStatus.codex_thread_id 'thread-submit-parent' 'async child carries the parent thread id from creation onward'
+Assert-Equal $asyncResumeStatus.mode 'brainstorm' 'async child inherits parent mode'
+Assert-Equal $asyncResumeStatus.access 'read-only' 'async child inherits parent access'
+Assert-Equal $asyncResumeStatus.repo $targetRepo 'async child inherits parent repo'
+Assert-Equal $asyncResumeStatus.group 'parent-group' 'async child inherits parent group'
+Assert-Equal $asyncResumeStatus.label 'parent-label' 'async child inherits parent label'
+Assert-Equal $asyncResumeStatus.backend 'native' 'async child uses the native detached backend'
+Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $asyncResume.JobDir 'prompt.md'))) 'follow-up text only' 'async child prompt.md contains only the follow-up text'
+$asyncResumeCommand = Get-Content -LiteralPath (Join-Path $asyncResume.JobDir 'command.txt') -Raw
+Assert-True ($asyncResumeCommand -like '*resume thread-submit-parent -*') 'async child command.txt contains resume <thread-id> before trailing stdin dash'
+$asyncResumeTerminal = Wait-CcodexTestTerminalStatus -JobDir $asyncResume.JobDir -TimeoutSec 20
+Assert-Equal $asyncResumeTerminal.status 'done' 'async resumed child completes through the detached worker'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "shell-level: submit --resume requires a value and rejects inherited-context flags"
+$missingResumeValueOut = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexPs submit --resume --state-root $localAppData --codex-path $fixtureCmd --detach-mechanism startprocess 2>&1
+Assert-Equal $LASTEXITCODE 2 'submit --resume without a value exits 2'
+Assert-True ((($missingResumeValueOut -join "`n")) -like '*--resume*requires a value*') 'missing --resume value error names the flag'
+
+foreach ($flagCase in @(
+    @{ Flag = '--mode'; Value = 'review' },
+    @{ Flag = '--access'; Value = 'read-only' },
+    @{ Flag = '--repo'; Value = $targetRepo },
+    @{ Flag = '--group'; Value = 'override-group' },
+    @{ Flag = '--label'; Value = 'override-label' }
+)) {
+    $rejectArgs = @('submit', '--resume', $asyncParent.JobId, $flagCase.Flag, $flagCase.Value, '--state-root', $localAppData, '--codex-path', $fixtureCmd, '--detach-mechanism', 'startprocess')
+    $rejectOut = 'follow up' | & pwsh -NoLogo -NoProfile -File $ccodexPs @rejectArgs 2>&1
+    Assert-Equal $LASTEXITCODE 2 "submit --resume with $($flagCase.Flag) exits 2"
+    Assert-True ((($rejectOut -join "`n")) -like '*inherits mode, access, repo, group, and label from the parent job*') "submit --resume $($flagCase.Flag) rejection explains inheritance"
+}
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
