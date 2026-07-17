@@ -23,8 +23,8 @@ and the delegation-run issue record
 | F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
 | F1. `help` / `--help` / `-h` support (top level + per subcommand) | fdc58b8 |
 | F4. `apply --allow-untracked` (opt-in, overlap-safe) | 0ae6fbd |
-| 11. `diff --stat` / `--name-only` (mutually-exclusive scoped views) | PENDING_HASH |
-| 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | PENDING_HASH |
+| 11. `diff --stat` / `--name-only` (mutually-exclusive scoped views) | f669eec |
+| 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | f669eec |
 
 ## Open — curated backlog items (user picks)
 
