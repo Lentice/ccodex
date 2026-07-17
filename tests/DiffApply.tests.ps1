@@ -590,6 +590,122 @@ $applyAfterUnlock = Invoke-CcodexApplyCommand -JobId $statusApplyLocked.job_id -
 Assert-Equal $applyAfterUnlock.WrapperExitCode 0 'apply succeeds once the lock is released'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# ============================================================================
+# diff --stat / --name-only (#11)
+# ============================================================================
+
+Write-Host "diff --stat / --name-only: scoped views vs default stat+patch"
+$gitRepoDiffScoped = Join-Path $tempRoot 'gitrepo-diff-scoped'
+New-CcodexTestGitRepo -Path $gitRepoDiffScoped
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'scoped-change.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'scoped body line'
+$runDiffScoped = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoDiffScoped }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runDiffScoped.WrapperExitCode 0 'setup: scoped-diff implement run succeeds'
+$statusDiffScoped = Get-Content -LiteralPath (Join-Path $runDiffScoped.JobDir 'status.json') -Raw | ConvertFrom-Json
+
+$diffStat = Invoke-CcodexDiffCommand -JobId $statusDiffScoped.job_id -StateRoot $localAppData -Stat
+Assert-Equal $diffStat.WrapperExitCode 0 'diff --stat -> exit 0'
+Assert-True ($diffStat.Stdout -like '*scoped-change.txt*') 'diff --stat names the changed file'
+Assert-True ($diffStat.Stdout -notlike '*+scoped body line*') 'diff --stat omits the full patch body'
+
+$diffNameOnly = Invoke-CcodexDiffCommand -JobId $statusDiffScoped.job_id -StateRoot $localAppData -NameOnly
+Assert-Equal $diffNameOnly.WrapperExitCode 0 'diff --name-only -> exit 0'
+Assert-Equal $diffNameOnly.Stdout 'scoped-change.txt' 'diff --name-only prints just the changed path'
+Assert-True ($diffNameOnly.Stdout -notlike '*|*') 'diff --name-only omits the stat graph'
+
+$diffDefaultScoped = Invoke-CcodexDiffCommand -JobId $statusDiffScoped.job_id -StateRoot $localAppData
+Assert-True ($diffDefaultScoped.Stdout -like '*scoped-change.txt*' -and $diffDefaultScoped.Stdout -like '*+scoped body line*') 'default diff still emits stat + full patch'
+
+# Mutual exclusivity + flag-before-id recovery are enforced by the shell dispatcher.
+$diffBothOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') diff --stat --name-only $statusDiffScoped.job_id --state-root $localAppData
+Assert-Equal $LASTEXITCODE 2 'diff --stat --name-only together -> exit 2'
+Assert-True (($diffBothOutput -join "`n") -like '*mutually exclusive*') 'exit-2 message names the mutual exclusivity'
+
+$diffFlagFirstOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') diff --stat $statusDiffScoped.job_id --state-root $localAppData
+Assert-Equal $LASTEXITCODE 0 'diff --stat before the job id -> exit 0 (dispatcher recovers the id)'
+Assert-True (($diffFlagFirstOutput -join "`n") -like '*scoped-change.txt*') 'flag-first diff --stat still resolves the job'
+
+Write-Host "diff --stat: empty-change job -> shared no-changes message"
+$diffStatEmpty = Invoke-CcodexDiffCommand -JobId $statusEmpty.job_id -StateRoot $localAppData -Stat
+Assert-Equal $diffStatEmpty.WrapperExitCode 0 'diff --stat on an empty-change job -> exit 0'
+Assert-True ($diffStatEmpty.Stdout -like '*no changes*') 'diff --stat empty-change reuses the no-changes message'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# ============================================================================
+# apply --message / --reset-author (#12)
+# ============================================================================
+
+Write-Host "apply --reset-author / --message: land with operator identity in one step"
+$gitRepoApplyIdent = Join-Path $tempRoot 'gitrepo-apply-identity'
+New-CcodexTestGitRepo -Path $gitRepoApplyIdent
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'identity-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'identity content'
+$runApplyIdent = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyIdent }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyIdent.WrapperExitCode 0 'setup: identity-case implement run succeeds'
+$statusApplyIdent = Get-Content -LiteralPath (Join-Path $runApplyIdent.JobDir 'status.json') -Raw | ConvertFrom-Json
+
+$applyIdent = Invoke-CcodexApplyCommand -JobId $statusApplyIdent.job_id -StateRoot $localAppData -ResetAuthor -Message 'feat: land via ccodex apply'
+Assert-Equal $applyIdent.WrapperExitCode 0 'apply --reset-author --message -> exit 0'
+Assert-True (Test-Path -LiteralPath (Join-Path $gitRepoApplyIdent 'identity-file.txt')) 'apply still lands the worker content'
+$identAuthor = (& git -C $gitRepoApplyIdent log -1 --format='%an <%ae>').Trim()
+Assert-Equal $identAuthor 'ccodex test <test@example.com>' '--reset-author reauthors to the main repo git identity'
+$identSubject = (& git -C $gitRepoApplyIdent log -1 --format='%s').Trim()
+Assert-Equal $identSubject 'feat: land via ccodex apply' '--message sets the landed commit subject'
+Assert-True ($applyIdent.Stdout -like "*$((& git -C $gitRepoApplyIdent rev-parse HEAD).Trim())*") 'stdout reports the amended HEAD'
+
+Write-Host "apply --reset-author only: message preserved, author reset"
+$gitRepoApplyResetOnly = Join-Path $tempRoot 'gitrepo-apply-reset-only'
+New-CcodexTestGitRepo -Path $gitRepoApplyResetOnly
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'reset-only.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'reset only content'
+$runApplyResetOnly = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyResetOnly }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+$statusApplyResetOnly = Get-Content -LiteralPath (Join-Path $runApplyResetOnly.JobDir 'status.json') -Raw | ConvertFrom-Json
+# Exercise the shell dispatcher with the flag before the job id.
+$applyResetOnlyOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') apply --reset-author $statusApplyResetOnly.job_id --state-root $localAppData
+Assert-Equal $LASTEXITCODE 0 'shell apply --reset-author before the id -> exit 0'
+Assert-True (($applyResetOnlyOutput -join "`n") -like '*applied job*') 'shell dispatcher prints the applied line'
+$resetOnlyAuthor = (& git -C $gitRepoApplyResetOnly log -1 --format='%an <%ae>').Trim()
+Assert-Equal $resetOnlyAuthor 'ccodex test <test@example.com>' '--reset-author alone reauthors the landed commit'
+$resetOnlySubject = (& git -C $gitRepoApplyResetOnly log -1 --format='%s').Trim()
+Assert-Equal $resetOnlySubject "ccodex: worker output $($statusApplyResetOnly.job_id)" '--reset-author alone preserves the worker commit message'
+
+Write-Host "apply --message on a multi-commit series -> exit 2 before mutation"
+$gitRepoApplyMulti = Join-Path $tempRoot 'gitrepo-apply-multi'
+New-CcodexTestGitRepo -Path $gitRepoApplyMulti
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'multi-first.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'multi first'
+$runApplyMulti = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyMulti }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+$statusApplyMulti = Get-Content -LiteralPath (Join-Path $runApplyMulti.JobDir 'status.json') -Raw | ConvertFrom-Json
+# Add a second worker-side commit and drop the frozen snapshot so the range spans both commits.
+[System.IO.File]::WriteAllText((Join-Path $statusApplyMulti.worktree_repo 'multi-second.txt'), "multi second`n", $utf8NoBomTest)
+& git -C $statusApplyMulti.worktree_repo add multi-second.txt | Out-Null
+& git -C $statusApplyMulti.worktree_repo commit -q -m 'second worker commit' | Out-Null
+$statusApplyMulti.snapshot_commit = $null
+Write-CcodexJsonFileAtomic -Path (Join-Path $runApplyMulti.JobDir 'status.json') -Object $statusApplyMulti
+$preHeadMulti = (& git -C $gitRepoApplyMulti rev-parse HEAD).Trim()
+
+$applyMulti = Invoke-CcodexApplyCommand -JobId $statusApplyMulti.job_id -StateRoot $localAppData -Message 'should be rejected'
+Assert-Equal $applyMulti.WrapperExitCode 2 'apply --message on a 2-commit series -> exit 2'
+Assert-True ($applyMulti.Message -like '*single-commit apply*') 'exit-2 message explains the single-commit restriction'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyMulti 'multi-first.txt'))) 'rejected multi-commit apply did not mutate the main repo'
+$postHeadMulti = (& git -C $gitRepoApplyMulti rev-parse HEAD).Trim()
+Assert-Equal $postHeadMulti $preHeadMulti 'rejected multi-commit apply leaves main repo HEAD unchanged'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Complete-CcodexTests

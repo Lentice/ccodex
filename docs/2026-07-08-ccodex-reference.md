@@ -241,20 +241,25 @@ base commit — a no-op worker leaves the worktree at its base commit instead (`
 and `base_commit` for a worktree job (`null` for non-worktree jobs); a resumed worktree child
 also records `series_base_commit`, the original main-repo base inherited through the lineage.
 
-**`ccodex diff <job_id>`** — read-only inspection of a worktree job's changes. Its range base is
-`series_base_commit` when present, otherwise `base_commit`; its endpoint is `snapshot_commit`
-when present, otherwise live worktree `HEAD` for pre-F3 jobs. It prints `git diff --stat
-<range_base>..<endpoint>` followed by the full diff. An empty change set prints an informational
-"no changes to diff" line instead
+**`ccodex diff <job_id> [--stat | --name-only]`** — read-only inspection of a worktree job's
+changes. Its range base is `series_base_commit` when present, otherwise `base_commit`; its
+endpoint is `snapshot_commit` when present, otherwise live worktree `HEAD` for pre-F3 jobs. By
+default it prints `git diff --stat <range_base>..<endpoint>` followed by the full diff.
+`--stat` prints only the diffstat block; `--name-only` prints only the changed file paths — both
+let a reviewer size a diff before pulling the whole patch, and they are mutually exclusive
+(passing both is exit `2`). An empty change set prints an informational
+"no changes to diff" line instead in every mode
 (still exit `0`). Exit `3` for an unknown job id or a worktree already removed by `cleanup`
 ("worktree removed; artifacts remain at `<job_dir>`"); exit `4` if the job hasn't finished yet;
 exit `2` if the job wasn't run with `--access worktree` in the first place.
 
 ```powershell
-ccodex diff <job_id>
+ccodex diff <job_id>              # stat + full patch
+ccodex diff <job_id> --stat       # diffstat only (size before loading the patch)
+ccodex diff <job_id> --name-only  # changed paths only
 ```
 
-**`ccodex apply [--allow-untracked] <job_id>`** — explicitly lands a **done** worktree job's resolved cumulative
+**`ccodex apply [--allow-untracked] [--message <msg>] [--reset-author] <job_id>`** — explicitly lands a **done** worktree job's resolved cumulative
 range onto the main repo: `git format-patch <range_base>..<endpoint> --stdout` from the worktree, piped to
 `git am --3way` in the main repo. By default the main repo's working tree must be fully clean
 (exit `2`, naming the dirty files, otherwise). `--allow-untracked` permits a tree whose only
@@ -270,6 +275,16 @@ naming the conflicting files and pointing at `ccodex diff <job_id>`. The main re
 mutated except by a genuinely successful apply; with `--allow-untracked`, the pre-existing
 untracked files are preserved and do not make a successful rollback look incomplete.
 
+By default the landed commit keeps the worker's synthetic identity (author `ccodex-worker
+<ccodex@local>`, message `ccodex: worker output <job_id>`). `--reset-author` reauthors it to the
+main repo's configured git user; `--message <msg>` sets its commit message — landing with operator
+identity in one step instead of a manual `git commit --amend --reset-author`. Both amend the single
+landed commit after a successful `am`; because a resumed cumulative series applies more than one
+commit (where a single message/author would be ambiguous), either flag on a multi-commit range is
+rejected up front with exit `2` **before** the main repo is touched. If the post-`am` amend itself
+fails (e.g. no git identity is configured for `--reset-author`), the main repo is restored to its
+pre-apply `HEAD` and the command exits `12`.
+
 For a resumed implement series, apply only the newest accepted descendant. Its range is already
 cumulative (parent + child work); never apply an ancestor and then its cumulative descendant.
 The existing failed-apply restore path handles that misuse safely as exit `25`, but it is still
@@ -279,6 +294,8 @@ an operator error.
 ccodex diff <job_id>    # ALWAYS review before applying — never auto-apply
 ccodex apply <job_id>
 ccodex apply --allow-untracked <job_id>  # only for non-overlapping untracked files
+ccodex apply --reset-author <job_id>     # land under your git identity, worker message kept
+ccodex apply --reset-author --message 'feat: ...' <job_id>  # identity + message in one step
 # -> ccodex: applied job <job_id> to <main_repo>
 #      range: <base_commit>..<new_head>
 ```
@@ -709,8 +726,10 @@ Callers can rely on these wrapper exit codes:
 | `24` | The job hit `--hard-timeout-sec` before Codex exited; the process tree was killed and the job is terminal `timed_out`. Raise the timeout or split the task before retrying. |
 | `25` | `ccodex apply <job_id>` failed or conflicted; `git am --abort` ran and the main repo was force-restored to its pre-apply `HEAD` (never left mutated). Review `ccodex diff <job_id>`, resolve by hand, and re-run `apply`. |
 
-`diff` and `apply` additionally use exit `2` for a non-worktree job or (for `apply`) a non-`done`
-job, tracked-dirty main repo, default-mode untracked file, or `--allow-untracked` path overlap;
+`diff` and `apply` additionally use exit `2` for a non-worktree job, (for `diff`) both `--stat`
+and `--name-only` at once, or (for `apply`) a non-`done`
+job, tracked-dirty main repo, default-mode untracked file, `--allow-untracked` path overlap, or
+`--message`/`--reset-author` on a multi-commit series;
 they use exit `4` for a job that hasn't finished yet — see
 [implement, diff, and apply](#implement-diff-and-apply) above. `cancel`, `tail`, `debug`, and
 `cleanup` additionally use exit `3` for an unknown job id (same as `status`/`wait`/`read`) and
@@ -841,7 +860,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   sources, and inherits the parent context;
   `run`/`submit`/`review`/`resume` all additionally accept the optional `--model`/`--effort`
   Codex knobs (see [run and submit](#run-and-submit));
-  `diff`/`apply` take a worktree job id; `cancel`/`tail`/`debug` take a job id (`tail` also
+  `diff`/`apply` take a worktree job id (`diff` also `--stat`/`--name-only`; `apply` also
+  `--allow-untracked`/`--message`/`--reset-author`); `cancel`/`tail`/`debug` take a job id (`tail` also
   accepts `--lines`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
   accepts `--no-smoke` and `--repo`

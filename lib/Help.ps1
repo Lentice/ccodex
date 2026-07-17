@@ -106,20 +106,24 @@ $script:CcodexHelpCommands = [ordered]@{
     }
     diff = [ordered]@{
         Summary = 'Inspect the cumulative changes from a worktree job.'
-        Usage   = 'ccodex diff <job_id>'
+        Usage   = 'ccodex diff <job_id> [--stat | --name-only]'
         Flags   = @(
+            [ordered]@{ Flag = '--stat'; Desc = 'Print only the diffstat (size a diff before pulling the full patch).' }
+            [ordered]@{ Flag = '--name-only'; Desc = 'Print only the changed file paths. Mutually exclusive with --stat.' }
             [ordered]@{ Flag = '--state-root <path>'; Desc = 'Override the state root (test/support use).' }
         )
         Example = 'ccodex diff <implement_job_id>'
     }
     apply = [ordered]@{
         Summary = 'Apply a done worktree job to its main repository.'
-        Usage   = 'ccodex apply <job_id> [--allow-untracked]'
+        Usage   = 'ccodex apply <job_id> [--allow-untracked] [--message <msg>] [--reset-author]'
         Flags   = @(
             [ordered]@{ Flag = '--allow-untracked'; Desc = 'Allow non-overlapping untracked files; tracked dirt still blocks.' }
+            [ordered]@{ Flag = '--message <msg>'; Desc = 'Set the landed commit message (single-commit apply only).' }
+            [ordered]@{ Flag = '--reset-author'; Desc = 'Reauthor the landed commit to your git identity (single-commit apply only).' }
             [ordered]@{ Flag = '--state-root <path>'; Desc = 'Override the state root (test/support use).' }
         )
-        Example = 'ccodex apply <implement_job_id>'
+        Example = 'ccodex apply <implement_job_id> --reset-author'
     }
     tail = [ordered]@{
         Summary = 'Print the tail of a job stderr and Codex event logs.'

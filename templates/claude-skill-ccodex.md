@@ -162,13 +162,22 @@ Scrubbed thread ids make old jobs non-resumable — that is the point.
 repo is never touched. Then:
 
 ```powershell
-ccodex diff <job_id>    # inspect what the worker changed (git diff base..snapshot)
-ccodex apply <job_id>   # apply those changes (requires a clean tree by default)
+ccodex diff <job_id>              # inspect what the worker changed (git diff base..snapshot)
+ccodex diff <job_id> --stat       # or --name-only: size the change before pulling the full patch
+ccodex apply <job_id>             # apply those changes (requires a clean tree by default)
+ccodex apply --reset-author --message 'feat: ...' <job_id>  # land under your identity in one step
 ```
 
 If the only main-repo dirt is unrelated untracked files, `ccodex apply --allow-untracked
 <job_id>` is the opt-in override. It still rejects tracked dirt and any untracked path touched by
 the patch (exit `2`), and preserves the pre-existing untracked files during rollback.
+
+`diff --stat` / `--name-only` are mutually-exclusive scoped views (exit `2` if both) — use them to
+size a diff before loading the whole patch into context. By default `apply` lands the worker's
+synthetic commit (author `ccodex-worker`, message `ccodex: worker output <id>`); `--reset-author`
+reauthors it to your git identity and `--message <msg>` sets its message, removing the manual `git
+commit --amend --reset-author` after landing. Both rewrite the single landed commit; on a resumed
+cumulative (multi-commit) series they exit `2` up front, before the main repo is touched.
 
 `apply` exits **25** on conflict and leaves the main repo untouched — report the conflict, do
 not force it. Review the diff before applying; you own what gets applied.

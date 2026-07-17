@@ -73,8 +73,10 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
    Then **always** inspect before integrating — never auto-apply:
 
    ```powershell
-   ccodex diff <job_id>     # review every change yourself before deciding anything
-   ccodex apply <job_id>    # only after you've reviewed the diff and want it landed
+   ccodex diff <job_id>              # review every change yourself before deciding anything
+   ccodex diff <job_id> --stat       # or --name-only: size the change before loading the full patch
+   ccodex apply <job_id>             # only after you've reviewed the diff and want it landed
+   ccodex apply --reset-author --message 'feat: ...' <job_id>  # land under your identity in one step
    ```
 
    `apply` requires a clean main-repo working tree by default and only applies a `done` job. If
@@ -82,7 +84,10 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
    tracked dirt or any patch-path overlap still exits `2`. On conflict it exits `25` and leaves
    the main repo (including pre-existing untracked files) untouched — report the conflict rather than
    retrying blindly. Treat the diff exactly like a human PR you're about to merge: read it, decide,
-   then act.
+   then act. `diff --stat`/`--name-only` (mutually exclusive) size a change before you pull the whole
+   patch; `apply --reset-author`/`--message <msg>` land the single commit under your git identity and
+   message in one step (a multi-commit resumed series with either flag exits `2` before touching the
+   repo).
 
 5. **When Codex's answer is a clarifying question, or a finding needs pushback or refinement**,
    continue the *same* Codex session instead of starting a fresh `run` (which has no memory of

@@ -36,6 +36,9 @@ $submitHelp = Get-CcodexCommandHelpText -Command 'submit'
 Assert-True ($submitHelp -like '*review/brainstorm: read-only (default)*test: workspace or worktree (required)*implement: worktree (default)*') 'submit help includes mode/access defaults'
 $applyHelp = Get-CcodexCommandHelpText -Command 'apply'
 Assert-True ($applyHelp -like '*--allow-untracked*') 'apply help names the opt-in untracked-file override'
+Assert-True ($applyHelp -like '*--message*' -and $applyHelp -like '*--reset-author*') 'apply help names the operator-identity flags'
+$diffHelp = Get-CcodexCommandHelpText -Command 'diff'
+Assert-True ($diffHelp -like '*--stat*' -and $diffHelp -like '*--name-only*') 'diff help names the scoped-view flags'
 Assert-True ($null -eq (Get-CcodexCommandHelpText -Command 'bogus')) 'unknown command returns null'
 
 if ($IncludeDispatch) {

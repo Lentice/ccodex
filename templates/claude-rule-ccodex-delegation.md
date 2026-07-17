@@ -171,18 +171,29 @@ isolated, detached git worktree under the state root, so the working tree you're
 never touched by the job itself. Then, always in this order:
 
 ```powershell
-ccodex diff <job_id>     # review every change yourself — treat it like a PR you're about to merge
-ccodex apply <job_id>    # only once you've reviewed it and decided to land it
+ccodex diff <job_id>              # review every change yourself — treat it like a PR you're about to merge
+ccodex diff <job_id> --stat       # or --name-only: size the change before loading the full patch
+ccodex apply <job_id>             # only once you've reviewed it and decided to land it
+ccodex apply --reset-author --message '<intent>' <job_id>  # land under operator identity in one step
 ```
 
 **Never auto-apply.** `apply` is the one command in this policy that must never be run
 automatically at a checkpoint or unattended — always inspect `ccodex diff <job_id>` first and make
-an explicit adopt/reject decision, exactly as with a review finding. `apply` requires a clean main
+an explicit adopt/reject decision, exactly as with a review finding. To scope a large diff before
+loading it into context, `diff --stat` and `diff --name-only` (mutually exclusive; both together
+exit `2`) print only the stat or the changed paths. `apply` requires a clean main
 repo working tree by default and only accepts a `done` job. If the only dirt is unrelated untracked
 files, `apply --allow-untracked <job_id>` is an opt-in override; tracked dirt and any path overlap
 still exit `2`, and pre-existing untracked files are preserved. On conflict it exits `25` and leaves
 the main repo untouched — report the conflict and let the user decide how to resolve it rather than
 retrying blindly.
+
+By default `apply` lands the worker's synthetic commit (author `ccodex-worker`, message `ccodex:
+worker output <id>`), so operators normally amend it afterward. `apply --reset-author` reauthors the
+landed commit to the current git identity and `apply --message <msg>` sets its message — landing
+with operator identity in one step instead of the manual `git commit --amend --reset-author` dance.
+Both rewrite the single landed commit; on a resumed cumulative (multi-commit) series either flag
+exits `2` up front, before the main repo is touched, so apply without them and amend by hand there.
 
 When review feedback continues an implement job, resume it and review the newest child's
 cumulative diff. Apply only that newest accepted descendant; never apply the ancestor first.

@@ -23,6 +23,8 @@ and the delegation-run issue record
 | F3. Worktree-job continuation: snapshot-seeded child worktree + cumulative diff/apply | 07a8a51 |
 | F1. `help` / `--help` / `-h` support (top level + per subcommand) | fdc58b8 |
 | F4. `apply --allow-untracked` (opt-in, overlap-safe) | 0ae6fbd |
+| 11. `diff --stat` / `--name-only` (mutually-exclusive scoped views) | PENDING_HASH |
+| 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | PENDING_HASH |
 
 ## Open — curated backlog items (user picks)
 
@@ -33,9 +35,13 @@ and the delegation-run issue record
 | 8 | `apply --check` (transactional preview) | 3 | validate the patch applies to the clean main repo before mutating |
 | 9 | `review --include-untracked` | 3 | review new/untracked files, not just tracked diffs |
 | 10 | Review profiles + `capabilities --json` | 3 | deterministic prompt presets; capability manifest consumed by skill/commands |
-| 11 | `diff --stat` / `--name-only` (scoped diff sizing) | 2 | delegation-run friction (2026-07-16 s2): `diff` always emits stat + full patch, so a reviewer must pull the whole patch just to size it. A stat/name-only mode lets the review agent scope before loading the full diff. |
-| 12 | `apply --message <msg>` / `--reset-author` (land with operator identity in one step) | 2 | delegation-run friction (2026-07-16 s2): every landed item needs a manual `git commit --amend --reset-author` + message rewrite because `apply` lands the worker's synthetic `ccodex-worker` commit with message `ccodex: worker output <id>`. Optional flags to set author/message at apply time remove the per-item dance. |
 | 13 | `tail --summary` / truncate `aggregated_output` | 3 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. |
+
+> **Codex review pending for #11 and #12.** Both landed 2026-07-17 with the full local suite green
+> and self-review only — Codex delegation was skipped because the Codex usage quota was near its
+> limit. Request a scoped `ccodex review` of the #11/#12 diffs (`ccodex.ps1` diff/apply arms + the
+> `Invoke-CcodexDiffCommand`/`Invoke-CcodexApplyCommand` changes) once quota recovers, and triage
+> any findings.
 | 14 | Dispatcher → data-driven command registry (refactor / enabler) | 1 | **Enabler for 6–12.** `ccodex.ps1` is one ~3200-line `switch ($Command)` where every arm re-parses `$args` ad hoc; adding a flag/command has a large blast radius (F3 was +305 lines threaded through the monolith). Converge on a registry: one spec object per command (`name`, declared flags/args schema, handler ref, help metadata), a thin router that parses/validates args from the schema, dispatches to the handler, and maps its result → exit code. F1's `Get-CcodexCommandNames`/`lib/Help.ps1` is the seed — extend it to be the single source for the `default`-arm list, help, AND flag parsing. Constraints: pure refactor, NO behavior change — exact exit codes, the non-`CmdletBinding` `param()` (stdin), the `-ImportOnly` guard, and every command's current behavior stay byte-identical; migrate command-by-command (each move guarded by the existing per-command tests) rather than big-bang. Payoff: 6–12 each become small, localized additions instead of monolith surgery. |
 
 ## Open — issues from the 2026-07-16 delegation run (user picks)

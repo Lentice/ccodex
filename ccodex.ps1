@@ -1674,10 +1674,16 @@ function Invoke-CcodexDiffCommand {
     # Task 4). Precondition chain (unknown/non-terminal/no-worktree/worktree-removed) lives
     # in Resolve-CcodexWorktreeJobContext, shared with `apply`. On success prints
     # `git diff --stat <base>..HEAD` followed by the full `git diff <base>..HEAD`; an empty
-    # change set prints an informational line instead (still exit 0).
+    # change set prints an informational line instead (still exit 0). The optional scoped-view
+    # switches let a reviewer size a diff before pulling the whole patch: -Stat emits only the
+    # `--stat` block, -NameOnly emits only the changed path list (`git diff --name-only`). They
+    # are mutually exclusive (the dispatcher rejects both at once); neither preserves the default
+    # stat+patch output byte-for-byte. The empty-change-set short-circuit is shared by all modes.
     param(
         [Parameter(Mandatory)][string]$JobId,
-        [string]$StateRoot = $env:LOCALAPPDATA
+        [string]$StateRoot = $env:LOCALAPPDATA,
+        [switch]$Stat,
+        [switch]$NameOnly
     )
 
     $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
@@ -1699,6 +1705,23 @@ function Invoke-CcodexDiffCommand {
 
     if ([string]::IsNullOrWhiteSpace($statOutput)) {
         return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to diff for job $JobId ($range is empty)."; Message = $null }
+    }
+
+    # Scoped views for sizing a diff without loading the full patch. --stat reuses the block
+    # already computed above; --name-only re-runs git for the bare path list (same plumbing
+    # `apply` uses for its overlap check).
+    if ($NameOnly) {
+        $nameOutput = (& git -c core.quotepath=false -C $worktreePath diff --name-only $range 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            $message = "ccodex: internal error: git diff --name-only failed in worktree '$worktreePath': $nameOutput"
+            return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+        }
+        $nameOutput = $nameOutput.TrimEnd("`r", "`n")
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $nameOutput; Message = $null }
+    }
+
+    if ($Stat) {
+        return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $statOutput; Message = $null }
     }
 
     $diffOutput = (& git -C $worktreePath diff $range 2>&1 | Out-String)
@@ -1733,7 +1756,15 @@ function Invoke-CcodexApplyCommand {
         # for tests; production callers keep the default. A timeout yields exit 21, matching the
         # lock-timeout contract `cancel` already uses.
         [int]$LockTimeoutSec = 30,
-        [switch]$AllowUntracked
+        [switch]$AllowUntracked,
+        # Land with operator identity in one step instead of the manual post-apply
+        # `git commit --amend --reset-author` + message rewrite. -Message sets the landed commit
+        # message; -ResetAuthor reauthors it to the main repo's configured git user. Both only
+        # rewrite a SINGLE landed commit; a resumed cumulative series (>1 commit) with either flag
+        # is rejected up front (exit 2) before the main repo is touched. Named-only params kept
+        # after -AllowUntracked so the third positional slot stays LockTimeoutSec.
+        [string]$Message,
+        [switch]$ResetAuthor
     )
 
     $context = Resolve-CcodexWorktreeJobContext -JobId $JobId -StateRoot $StateRoot
@@ -1845,8 +1876,17 @@ function Invoke-CcodexApplyCommand {
             $message = "ccodex: internal error: git rev-list $range failed in worktree '$worktreePath': $($revList -join "`n")"
             return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
         }
-        if (@($revList | Where-Object { $_ -and $_.ToString().Trim() -ne '' }).Count -eq 0) {
+        $rangeCommitCount = @($revList | Where-Object { $_ -and $_.ToString().Trim() -ne '' }).Count
+        if ($rangeCommitCount -eq 0) {
             return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "ccodex: no changes to apply for job $JobId ($range is empty); main repo unchanged."; Message = $null }
+        }
+
+        # --message/--reset-author rewrite exactly one landed commit. A resumed cumulative series
+        # applies >1 commit, where a single message/author would be ambiguous, so reject before
+        # mutating the main repo (the caller can apply without the flags and amend manually).
+        if (($ResetAuthor -or -not [string]::IsNullOrEmpty($Message)) -and $rangeCommitCount -gt 1) {
+            $message = "ccodex: apply --message/--reset-author only support a single-commit apply; job $JobId would apply $rangeCommitCount commits (a resumed series).`n  Apply without these flags, then amend manually."
+            return [pscustomobject]@{ WrapperExitCode = 2; Stdout = $null; Message = $message }
         }
 
         $preHead = (& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)
@@ -1868,6 +1908,23 @@ function Invoke-CcodexApplyCommand {
 
         if ($amExit -eq 0 -and $postHead -ne $preHead) {
             # A new commit landed: the patch genuinely applied.
+            # Optionally reauthor/relabel the single landed commit with operator identity. The
+            # >1-commit case was already rejected before mutating, so amending HEAD rewrites the
+            # one applied commit. On amend failure (e.g. no git identity for --reset-author) roll
+            # the main repo back to its pre-apply HEAD so the "never left mutated except by a
+            # successful apply" contract holds, and surface exit 12.
+            if ($ResetAuthor -or -not [string]::IsNullOrEmpty($Message)) {
+                $amendArgs = @('commit', '--amend')
+                if ($ResetAuthor) { $amendArgs += '--reset-author' }
+                if (-not [string]::IsNullOrEmpty($Message)) { $amendArgs += @('-m', $Message) } else { $amendArgs += '--no-edit' }
+                $amendOutput = (& git -c "core.hooksPath=$emptyHooksDir" -C $mainRepo @amendArgs 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) {
+                    & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
+                    $message = "ccodex: applied job $JobId but could not rewrite the landed commit (git commit --amend failed); main repo restored to its pre-apply state.`n  git output: $($amendOutput.TrimEnd())"
+                    return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
+                }
+                $postHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
+            }
             $stdout = "ccodex: applied job $JobId to $mainRepo`n  range: $baseCommit..$postHead"
             return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $stdout; Message = $null }
         }
@@ -3042,6 +3099,24 @@ try {
             # test-support flag.
             $diffJobId = $PositionalTask
             $diffStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
+            $diffStat = ($args -contains '--stat')
+            $diffNameOnly = ($args -contains '--name-only')
+            if (-not $diffJobId -and ($diffStat -or $diffNameOnly)) {
+                # A scoped-view flag before the id leaves the id in $args rather than
+                # $PositionalTask (same quirk apply handles for --allow-untracked). Recover the
+                # first non-flag token, skipping the value-bearing --state-root.
+                for ($i = 0; $i -lt $args.Count; $i++) {
+                    $token = [string]$args[$i]
+                    if ($token -eq '--stat' -or $token -eq '--name-only') { continue }
+                    if ($token -eq '--state-root') { $i++; continue }
+                    if (-not $token.StartsWith('--')) { $diffJobId = $token; break }
+                }
+            }
+            if ($diffStat -and $diffNameOnly) {
+                Write-Host "ccodex: diff --stat and --name-only are mutually exclusive."
+                $exitCode = 2
+                break
+            }
             if (-not $diffJobId) {
                 Write-Host "ccodex: diff requires a job id."
                 $exitCode = 2
@@ -3049,6 +3124,8 @@ try {
             }
             $diffParams = @{ JobId = $diffJobId }
             if ($diffStateRoot) { $diffParams['StateRoot'] = $diffStateRoot }
+            if ($diffStat) { $diffParams['Stat'] = $true }
+            if ($diffNameOnly) { $diffParams['NameOnly'] = $true }
             $diffResult = Invoke-CcodexDiffCommand @diffParams
             if ($diffResult.WrapperExitCode -eq 0) {
                 Write-Output $diffResult.Stdout
@@ -3063,15 +3140,17 @@ try {
             # hidden test-support flag.
             $applyStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
             $applyAllowUntracked = ($args -contains '--allow-untracked')
+            $applyMessage = Get-CcodexArgValue -ArgumentList $args -FlagName '--message'
+            $applyResetAuthor = ($args -contains '--reset-author')
             $applyJobId = $PositionalTask
-            if (-not $applyJobId -and $applyAllowUntracked) {
-                # With the public flag before the job id, PowerShell leaves the remaining tokens
+            if (-not $applyJobId -and ($applyAllowUntracked -or $applyResetAuthor -or $applyMessage)) {
+                # With a public flag before the job id, PowerShell leaves the remaining tokens
                 # in $args instead of binding the id to $PositionalTask. Remove apply's flags and
                 # recover the first positional token so both documented argument orders work.
                 for ($i = 0; $i -lt $args.Count; $i++) {
                     $token = [string]$args[$i]
-                    if ($token -eq '--allow-untracked') { continue }
-                    if ($token -eq '--state-root') { $i++; continue }
+                    if ($token -eq '--allow-untracked' -or $token -eq '--reset-author') { continue }
+                    if ($token -eq '--state-root' -or $token -eq '--message') { $i++; continue }
                     if (-not $token.StartsWith('--')) { $applyJobId = $token; break }
                 }
             }
@@ -3083,6 +3162,8 @@ try {
             $applyParams = @{ JobId = $applyJobId }
             if ($applyStateRoot) { $applyParams['StateRoot'] = $applyStateRoot }
             if ($applyAllowUntracked) { $applyParams['AllowUntracked'] = $true }
+            if ($applyMessage) { $applyParams['Message'] = $applyMessage }
+            if ($applyResetAuthor) { $applyParams['ResetAuthor'] = $true }
             $applyResult = Invoke-CcodexApplyCommand @applyParams
             if ($applyResult.WrapperExitCode -eq 0) {
                 Write-Output $applyResult.Stdout
