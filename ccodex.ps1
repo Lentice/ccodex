@@ -2836,6 +2836,273 @@ function Invoke-CcodexListDispatch {
     $ExitCode.Value = $listResult.WrapperExitCode
 }
 
+function Invoke-CcodexWaitDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    $cmdArgs = $Context.Args
+    $PositionalTask = $Context.PositionalTask
+    $Repo = $Context.Repo
+    if ($cmdArgs -contains '--all') {
+        if ($PositionalTask) {
+            Write-Host 'ccodex: wait --all does not accept a job id.'
+            $ExitCode.Value = 2
+            return
+        }
+        try {
+            $waitAllGroup = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--group'
+            $waitAllLabel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--label'
+            $valueFlags = @('--group', '--label', '--wait-timeout-sec', '--state-root')
+            for ($i = 0; $i -lt $cmdArgs.Count; $i++) {
+                $token = [string]$cmdArgs[$i]
+                if ($token -in @('--all', '--json')) { continue }
+                if ($token -in $valueFlags) {
+                    if ($i + 1 -ge $cmdArgs.Count -or ([string]$cmdArgs[$i + 1]).StartsWith('--')) { throw "ccodex: $token requires a value." }
+                    $i++; continue
+                }
+                if (-not $token.StartsWith('--')) { throw 'ccodex: wait --all does not accept a job id.' }
+                throw "ccodex: unknown wait --all option '$token'."
+            }
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+        $waitAllStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+        $waitAllTimeout = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--wait-timeout-sec'
+        $waitAllParams = @{ Json = ($cmdArgs -contains '--json') }
+        if (-not ($cmdArgs -contains '--json')) {
+            $waitAllParams.OnHumanLine = { param($line) [Console]::Out.WriteLine($line) }
+        }
+        if ($waitAllStateRoot) { $waitAllParams.StateRoot = $waitAllStateRoot }
+        if ($waitAllTimeout) { $waitAllParams.WaitTimeoutSec = [int]$waitAllTimeout }
+        if ($Repo) { $waitAllParams.RepoOverride = $Repo }
+        if ($null -ne $waitAllGroup) { $waitAllParams.Group = $waitAllGroup }
+        if ($null -ne $waitAllLabel) { $waitAllParams.Label = $waitAllLabel }
+        $waitAllResult = Invoke-CcodexWaitAllCommand @waitAllParams
+        if ($null -ne $waitAllResult.Stdout) { Write-Output $waitAllResult.Stdout }
+        elseif ($waitAllResult.Message) { Write-Host $waitAllResult.Message }
+        $ExitCode.Value = $waitAllResult.WrapperExitCode
+        return
+    }
+    if (($cmdArgs -contains '--group') -or ($cmdArgs -contains '--label')) {
+        Write-Host 'ccodex: wait --group/--label require --all.'
+        $ExitCode.Value = 2
+        return
+    }
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status` use). --wait-timeout-sec/--state-root are flags.
+    $waitJobId = $PositionalTask
+    $waitStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $waitTimeoutSecText = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--wait-timeout-sec'
+    $waitJson = ($cmdArgs -contains '--json')
+    if (-not $waitJobId) {
+        Write-Host "ccodex: wait requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $waitParams = @{ JobId = $waitJobId }
+    if ($waitStateRoot) { $waitParams['StateRoot'] = $waitStateRoot }
+    if ($waitTimeoutSecText) { $waitParams['WaitTimeoutSec'] = [int]$waitTimeoutSecText }
+    if ($waitJson) { $waitParams['Json'] = $true }
+    $waitResult = Invoke-CcodexWaitCommand @waitParams
+    if ($waitJson) {
+        Write-Output $waitResult.Stdout
+    } elseif ($waitResult.WrapperExitCode -eq 0) {
+        Write-Output $waitResult.Stdout
+    } else {
+        Write-Host $waitResult.Message
+    }
+    $ExitCode.Value = $waitResult.WrapperExitCode
+}
+
+function Invoke-CcodexDiffDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --state-root is a hidden
+    # test-support flag.
+    $cmdArgs = $Context.Args
+    $diffJobId = $Context.PositionalTask
+    $diffStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $diffStat = ($cmdArgs -contains '--stat')
+    $diffNameOnly = ($cmdArgs -contains '--name-only')
+    if (-not $diffJobId -and ($diffStat -or $diffNameOnly)) {
+        # A scoped-view flag before the id leaves the id in $cmdArgs rather than
+        # $PositionalTask (same quirk apply handles for --allow-untracked). Recover the
+        # first non-flag token, skipping the value-bearing --state-root.
+        for ($i = 0; $i -lt $cmdArgs.Count; $i++) {
+            $token = [string]$cmdArgs[$i]
+            if ($token -eq '--stat' -or $token -eq '--name-only') { continue }
+            if ($token -eq '--state-root') { $i++; continue }
+            if (-not $token.StartsWith('--')) { $diffJobId = $token; break }
+        }
+    }
+    if ($diffStat -and $diffNameOnly) {
+        Write-Host "ccodex: diff --stat and --name-only are mutually exclusive."
+        $ExitCode.Value = 2
+        return
+    }
+    if (-not $diffJobId) {
+        Write-Host "ccodex: diff requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $diffParams = @{ JobId = $diffJobId }
+    if ($diffStateRoot) { $diffParams['StateRoot'] = $diffStateRoot }
+    if ($diffStat) { $diffParams['Stat'] = $true }
+    if ($diffNameOnly) { $diffParams['NameOnly'] = $true }
+    $diffResult = Invoke-CcodexDiffCommand @diffParams
+    if ($diffResult.WrapperExitCode -eq 0) {
+        Write-Output $diffResult.Stdout
+    } else {
+        Write-Host $diffResult.Message
+    }
+    $ExitCode.Value = $diffResult.WrapperExitCode
+}
+
+function Invoke-CcodexApplyDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`diff` use). --state-root is a
+    # hidden test-support flag.
+    $cmdArgs = $Context.Args
+    $applyStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $applyAllowUntracked = ($cmdArgs -contains '--allow-untracked')
+    $applyMessage = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--message'
+    $applyResetAuthor = ($cmdArgs -contains '--reset-author')
+    $applyJobId = $Context.PositionalTask
+    if (-not $applyJobId -and ($applyAllowUntracked -or $applyResetAuthor -or $applyMessage)) {
+        # With a public flag before the job id, PowerShell leaves the remaining tokens
+        # in $cmdArgs instead of binding the id to $PositionalTask. Remove apply's flags and
+        # recover the first positional token so both documented argument orders work.
+        for ($i = 0; $i -lt $cmdArgs.Count; $i++) {
+            $token = [string]$cmdArgs[$i]
+            if ($token -eq '--allow-untracked' -or $token -eq '--reset-author') { continue }
+            if ($token -eq '--state-root' -or $token -eq '--message') { $i++; continue }
+            if (-not $token.StartsWith('--')) { $applyJobId = $token; break }
+        }
+    }
+    if (-not $applyJobId) {
+        Write-Host "ccodex: apply requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $applyParams = @{ JobId = $applyJobId }
+    if ($applyStateRoot) { $applyParams['StateRoot'] = $applyStateRoot }
+    if ($applyAllowUntracked) { $applyParams['AllowUntracked'] = $true }
+    if ($applyMessage) { $applyParams['Message'] = $applyMessage }
+    if ($applyResetAuthor) { $applyParams['ResetAuthor'] = $true }
+    $applyResult = Invoke-CcodexApplyCommand @applyParams
+    if ($applyResult.WrapperExitCode -eq 0) {
+        Write-Output $applyResult.Stdout
+    } else {
+        Write-Host $applyResult.Message
+    }
+    $ExitCode.Value = $applyResult.WrapperExitCode
+}
+
+function Invoke-CcodexCleanupDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
+    # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
+    # --dry-run/--include-stalled/--scrub-thread-ids are presence flags; --state-root
+    # is a hidden test-support flag. Bad --older-than/--thread-ttl syntax is a usage
+    # error (exit 2). Otherwise the engine is best-effort: exit 0, or 12 if any
+    # individual delete/scrub failed.
+    $cmdArgs = $Context.Args
+    $Repo = $Context.Repo
+    $cleanupStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    # Require a real value when the flag is present: a bare `--older-than` (or one followed
+    # by another `--flag`) must be a usage error, NOT silently fall back to the configured
+    # default retention and delete jobs the caller never asked to delete. Absent flag ->
+    # $null (unchanged).
+    try {
+        $cleanupOlderThan = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--older-than'
+        $cleanupThreadTtl = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--thread-ttl'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+
+    $cleanupParams = @{
+        RepoFilter     = $Repo
+        DryRun         = ($cmdArgs -contains '--dry-run')
+        IncludeStalled = ($cmdArgs -contains '--include-stalled')
+        ScrubThreadIds = ($cmdArgs -contains '--scrub-thread-ids')
+    }
+    if ($cleanupStateRoot) { $cleanupParams['StateRoot'] = $cleanupStateRoot }
+
+    if ($cleanupOlderThan) {
+        if ($cleanupOlderThan -notmatch '^\d+[dh]$') {
+            Write-Host "ccodex: --older-than must be <Nd|Nh> (e.g. 14d or 12h); got '$cleanupOlderThan'."
+            $ExitCode.Value = 2
+            return
+        }
+        $olderNum = 0
+        # TryParse (not a bare [int] cast): a regex-valid but oversized value like
+        # 99999999999d must be a usage error (exit 2), not an [int] OverflowException that
+        # surfaces as an internal error (exit 12).
+        if (-not [int]::TryParse(($cleanupOlderThan -replace '(?i)[dh]$', ''), [ref]$olderNum)) {
+            Write-Host "ccodex: --older-than numeric value is out of range; got '$cleanupOlderThan'."
+            $ExitCode.Value = 2
+            return
+        }
+        # h -> fractional days; d -> whole days. Match the suffix case-INSENSITIVELY: the
+        # validation regex above accepts `12H`, and String.EndsWith('h') is case-sensitive,
+        # so `.EndsWith('h')` would misread `12H` as 12 DAYS instead of 12 hours.
+        $cleanupParams['OlderThanDays'] = if ($cleanupOlderThan -match '(?i)h$') { $olderNum / 24.0 } else { $olderNum }
+    }
+    if ($cleanupThreadTtl) {
+        if ($cleanupThreadTtl -notmatch '^\d+d?$') {
+            Write-Host "ccodex: --thread-ttl must be <Nd> (e.g. 30d); got '$cleanupThreadTtl'."
+            $ExitCode.Value = 2
+            return
+        }
+        $ttlNum = 0
+        if (-not [int]::TryParse(($cleanupThreadTtl -replace 'd$', ''), [ref]$ttlNum)) {
+            Write-Host "ccodex: --thread-ttl numeric value is out of range; got '$cleanupThreadTtl'."
+            $ExitCode.Value = 2
+            return
+        }
+        $cleanupParams['ThreadTtlDays'] = $ttlNum
+    }
+
+    $cleanupResult = Invoke-CcodexCleanup @cleanupParams
+    Write-Output $cleanupResult.Stdout
+    $ExitCode.Value = $cleanupResult.WrapperExitCode
+}
+
+function Invoke-CcodexDoctorDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # No positional job id. --no-smoke/--json are presence flags; --repo binds to $Repo;
+    # --codex-path/--state-root are hidden test-support flags mirroring the other
+    # subcommands (there is no --app-data-root flag — tests override $env:APPDATA
+    # directly, same as ReviewCommand/RealInvocation).
+    $cmdArgs = $Context.Args
+    $Repo = $Context.Repo
+    $doctorNoSmoke = ($cmdArgs -contains '--no-smoke')
+    $doctorJson = ($cmdArgs -contains '--json')
+    $doctorStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $doctorCodexPath = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--codex-path'
+
+    $doctorParams = @{
+        NoSmoke      = $doctorNoSmoke
+        Json         = $doctorJson
+        RepoOverride = $Repo
+    }
+    if ($doctorStateRoot) { $doctorParams['StateRoot'] = $doctorStateRoot }
+    if ($doctorCodexPath) { $doctorParams['CodexPath'] = $doctorCodexPath }
+
+    $doctorResult = Invoke-CcodexDoctorCommand @doctorParams
+    if ($doctorJson -and $null -ne $doctorResult.Stdout) {
+        Write-Output $doctorResult.Stdout
+    } elseif ($doctorResult.WrapperExitCode -eq 0) {
+        Write-Output $doctorResult.Stdout
+    } else {
+        Write-Host $doctorResult.Message
+    }
+    $ExitCode.Value = $doctorResult.WrapperExitCode
+}
+
 if ($ImportOnly) { return }
 
 $exitCode = 12
@@ -3164,158 +3431,6 @@ try {
             }
             $exitCode = $workerResult.WrapperExitCode
         }
-        'wait' {
-            if ($args -contains '--all') {
-                if ($PositionalTask) {
-                    Write-Host 'ccodex: wait --all does not accept a job id.'
-                    $exitCode = 2
-                    break
-                }
-                try {
-                    $waitAllGroup = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--group'
-                    $waitAllLabel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--label'
-                    $valueFlags = @('--group', '--label', '--wait-timeout-sec', '--state-root')
-                    for ($i = 0; $i -lt $args.Count; $i++) {
-                        $token = [string]$args[$i]
-                        if ($token -in @('--all', '--json')) { continue }
-                        if ($token -in $valueFlags) {
-                            if ($i + 1 -ge $args.Count -or ([string]$args[$i + 1]).StartsWith('--')) { throw "ccodex: $token requires a value." }
-                            $i++; continue
-                        }
-                        if (-not $token.StartsWith('--')) { throw 'ccodex: wait --all does not accept a job id.' }
-                        throw "ccodex: unknown wait --all option '$token'."
-                    }
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-                $waitAllStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-                $waitAllTimeout = Get-CcodexArgValue -ArgumentList $args -FlagName '--wait-timeout-sec'
-                $waitAllParams = @{ Json = ($args -contains '--json') }
-                if (-not ($args -contains '--json')) {
-                    $waitAllParams.OnHumanLine = { param($line) [Console]::Out.WriteLine($line) }
-                }
-                if ($waitAllStateRoot) { $waitAllParams.StateRoot = $waitAllStateRoot }
-                if ($waitAllTimeout) { $waitAllParams.WaitTimeoutSec = [int]$waitAllTimeout }
-                if ($Repo) { $waitAllParams.RepoOverride = $Repo }
-                if ($null -ne $waitAllGroup) { $waitAllParams.Group = $waitAllGroup }
-                if ($null -ne $waitAllLabel) { $waitAllParams.Label = $waitAllLabel }
-                $waitAllResult = Invoke-CcodexWaitAllCommand @waitAllParams
-                if ($null -ne $waitAllResult.Stdout) { Write-Output $waitAllResult.Stdout }
-                elseif ($waitAllResult.Message) { Write-Host $waitAllResult.Message }
-                $exitCode = $waitAllResult.WrapperExitCode
-                break
-            }
-            if (($args -contains '--group') -or ($args -contains '--label')) {
-                Write-Host 'ccodex: wait --group/--label require --all.'
-                $exitCode = 2
-                break
-            }
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status` use). --wait-timeout-sec/--state-root are flags.
-            $waitJobId = $PositionalTask
-            $waitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $waitTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--wait-timeout-sec'
-            $waitJson = ($args -contains '--json')
-            if (-not $waitJobId) {
-                Write-Host "ccodex: wait requires a job id."
-                $exitCode = 2
-                break
-            }
-            $waitParams = @{ JobId = $waitJobId }
-            if ($waitStateRoot) { $waitParams['StateRoot'] = $waitStateRoot }
-            if ($waitTimeoutSecText) { $waitParams['WaitTimeoutSec'] = [int]$waitTimeoutSecText }
-            if ($waitJson) { $waitParams['Json'] = $true }
-            $waitResult = Invoke-CcodexWaitCommand @waitParams
-            if ($waitJson) {
-                Write-Output $waitResult.Stdout
-            } elseif ($waitResult.WrapperExitCode -eq 0) {
-                Write-Output $waitResult.Stdout
-            } else {
-                Write-Host $waitResult.Message
-            }
-            $exitCode = $waitResult.WrapperExitCode
-        }
-        'diff' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --state-root is a hidden
-            # test-support flag.
-            $diffJobId = $PositionalTask
-            $diffStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $diffStat = ($args -contains '--stat')
-            $diffNameOnly = ($args -contains '--name-only')
-            if (-not $diffJobId -and ($diffStat -or $diffNameOnly)) {
-                # A scoped-view flag before the id leaves the id in $args rather than
-                # $PositionalTask (same quirk apply handles for --allow-untracked). Recover the
-                # first non-flag token, skipping the value-bearing --state-root.
-                for ($i = 0; $i -lt $args.Count; $i++) {
-                    $token = [string]$args[$i]
-                    if ($token -eq '--stat' -or $token -eq '--name-only') { continue }
-                    if ($token -eq '--state-root') { $i++; continue }
-                    if (-not $token.StartsWith('--')) { $diffJobId = $token; break }
-                }
-            }
-            if ($diffStat -and $diffNameOnly) {
-                Write-Host "ccodex: diff --stat and --name-only are mutually exclusive."
-                $exitCode = 2
-                break
-            }
-            if (-not $diffJobId) {
-                Write-Host "ccodex: diff requires a job id."
-                $exitCode = 2
-                break
-            }
-            $diffParams = @{ JobId = $diffJobId }
-            if ($diffStateRoot) { $diffParams['StateRoot'] = $diffStateRoot }
-            if ($diffStat) { $diffParams['Stat'] = $true }
-            if ($diffNameOnly) { $diffParams['NameOnly'] = $true }
-            $diffResult = Invoke-CcodexDiffCommand @diffParams
-            if ($diffResult.WrapperExitCode -eq 0) {
-                Write-Output $diffResult.Stdout
-            } else {
-                Write-Host $diffResult.Message
-            }
-            $exitCode = $diffResult.WrapperExitCode
-        }
-        'apply' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`diff` use). --state-root is a
-            # hidden test-support flag.
-            $applyStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $applyAllowUntracked = ($args -contains '--allow-untracked')
-            $applyMessage = Get-CcodexArgValue -ArgumentList $args -FlagName '--message'
-            $applyResetAuthor = ($args -contains '--reset-author')
-            $applyJobId = $PositionalTask
-            if (-not $applyJobId -and ($applyAllowUntracked -or $applyResetAuthor -or $applyMessage)) {
-                # With a public flag before the job id, PowerShell leaves the remaining tokens
-                # in $args instead of binding the id to $PositionalTask. Remove apply's flags and
-                # recover the first positional token so both documented argument orders work.
-                for ($i = 0; $i -lt $args.Count; $i++) {
-                    $token = [string]$args[$i]
-                    if ($token -eq '--allow-untracked' -or $token -eq '--reset-author') { continue }
-                    if ($token -eq '--state-root' -or $token -eq '--message') { $i++; continue }
-                    if (-not $token.StartsWith('--')) { $applyJobId = $token; break }
-                }
-            }
-            if (-not $applyJobId) {
-                Write-Host "ccodex: apply requires a job id."
-                $exitCode = 2
-                break
-            }
-            $applyParams = @{ JobId = $applyJobId }
-            if ($applyStateRoot) { $applyParams['StateRoot'] = $applyStateRoot }
-            if ($applyAllowUntracked) { $applyParams['AllowUntracked'] = $true }
-            if ($applyMessage) { $applyParams['Message'] = $applyMessage }
-            if ($applyResetAuthor) { $applyParams['ResetAuthor'] = $true }
-            $applyResult = Invoke-CcodexApplyCommand @applyParams
-            if ($applyResult.WrapperExitCode -eq 0) {
-                Write-Output $applyResult.Stdout
-            } else {
-                Write-Host $applyResult.Message
-            }
-            $exitCode = $applyResult.WrapperExitCode
-        }
         'review' {
             # Sugar over the `run` pipeline (mode review, access read-only): compose a
             # scoped-review prompt from the diff selector/paths, then hand the composed
@@ -3392,102 +3507,6 @@ try {
                 Write-Host $reviewResult.Message
             }
             $exitCode = $reviewResult.WrapperExitCode
-        }
-        'cleanup' {
-            # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the
-            # user-config thresholds; --repo binds to $Repo (narrows to that repo's key);
-            # --dry-run/--include-stalled/--scrub-thread-ids are presence flags; --state-root
-            # is a hidden test-support flag. Bad --older-than/--thread-ttl syntax is a usage
-            # error (exit 2). Otherwise the engine is best-effort: exit 0, or 12 if any
-            # individual delete/scrub failed.
-            $cleanupStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            # Require a real value when the flag is present: a bare `--older-than` (or one followed
-            # by another `--flag`) must be a usage error, NOT silently fall back to the configured
-            # default retention and delete jobs the caller never asked to delete. Absent flag ->
-            # $null (unchanged).
-            try {
-                $cleanupOlderThan = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--older-than'
-                $cleanupThreadTtl = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--thread-ttl'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-
-            $cleanupParams = @{
-                RepoFilter     = $Repo
-                DryRun         = ($args -contains '--dry-run')
-                IncludeStalled = ($args -contains '--include-stalled')
-                ScrubThreadIds = ($args -contains '--scrub-thread-ids')
-            }
-            if ($cleanupStateRoot) { $cleanupParams['StateRoot'] = $cleanupStateRoot }
-
-            if ($cleanupOlderThan) {
-                if ($cleanupOlderThan -notmatch '^\d+[dh]$') {
-                    Write-Host "ccodex: --older-than must be <Nd|Nh> (e.g. 14d or 12h); got '$cleanupOlderThan'."
-                    $exitCode = 2
-                    break
-                }
-                $olderNum = 0
-                # TryParse (not a bare [int] cast): a regex-valid but oversized value like
-                # 99999999999d must be a usage error (exit 2), not an [int] OverflowException that
-                # surfaces as an internal error (exit 12).
-                if (-not [int]::TryParse(($cleanupOlderThan -replace '(?i)[dh]$', ''), [ref]$olderNum)) {
-                    Write-Host "ccodex: --older-than numeric value is out of range; got '$cleanupOlderThan'."
-                    $exitCode = 2
-                    break
-                }
-                # h -> fractional days; d -> whole days. Match the suffix case-INSENSITIVELY: the
-                # validation regex above accepts `12H`, and String.EndsWith('h') is case-sensitive,
-                # so `.EndsWith('h')` would misread `12H` as 12 DAYS instead of 12 hours.
-                $cleanupParams['OlderThanDays'] = if ($cleanupOlderThan -match '(?i)h$') { $olderNum / 24.0 } else { $olderNum }
-            }
-            if ($cleanupThreadTtl) {
-                if ($cleanupThreadTtl -notmatch '^\d+d?$') {
-                    Write-Host "ccodex: --thread-ttl must be <Nd> (e.g. 30d); got '$cleanupThreadTtl'."
-                    $exitCode = 2
-                    break
-                }
-                $ttlNum = 0
-                if (-not [int]::TryParse(($cleanupThreadTtl -replace 'd$', ''), [ref]$ttlNum)) {
-                    Write-Host "ccodex: --thread-ttl numeric value is out of range; got '$cleanupThreadTtl'."
-                    $exitCode = 2
-                    break
-                }
-                $cleanupParams['ThreadTtlDays'] = $ttlNum
-            }
-
-            $cleanupResult = Invoke-CcodexCleanup @cleanupParams
-            Write-Output $cleanupResult.Stdout
-            $exitCode = $cleanupResult.WrapperExitCode
-        }
-        'doctor' {
-            # No positional job id. --no-smoke/--json are presence flags; --repo binds to $Repo;
-            # --codex-path/--state-root are hidden test-support flags mirroring the other
-            # subcommands (there is no --app-data-root flag — tests override $env:APPDATA
-            # directly, same as ReviewCommand/RealInvocation).
-            $doctorNoSmoke = ($args -contains '--no-smoke')
-            $doctorJson = ($args -contains '--json')
-            $doctorStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $doctorCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-
-            $doctorParams = @{
-                NoSmoke      = $doctorNoSmoke
-                Json         = $doctorJson
-                RepoOverride = $Repo
-            }
-            if ($doctorStateRoot) { $doctorParams['StateRoot'] = $doctorStateRoot }
-            if ($doctorCodexPath) { $doctorParams['CodexPath'] = $doctorCodexPath }
-
-            $doctorResult = Invoke-CcodexDoctorCommand @doctorParams
-            if ($doctorJson -and $null -ne $doctorResult.Stdout) {
-                Write-Output $doctorResult.Stdout
-            } elseif ($doctorResult.WrapperExitCode -eq 0) {
-                Write-Output $doctorResult.Stdout
-            } else {
-                Write-Host $doctorResult.Message
-            }
-            $exitCode = $doctorResult.WrapperExitCode
         }
         default {
             Write-Host (Get-CcodexUnknownCommandText -Command $Command)

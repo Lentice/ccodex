@@ -50,6 +50,12 @@ $script:CcodexCommandHandlers = @{
     tail   = 'Invoke-CcodexTailDispatch'
     debug  = 'Invoke-CcodexDebugDispatch'
     list   = 'Invoke-CcodexListDispatch'
+    # Lifecycle-wait + worktree diff/apply + retention + diagnostics batch (migrated).
+    wait    = 'Invoke-CcodexWaitDispatch'
+    diff    = 'Invoke-CcodexDiffDispatch'
+    apply   = 'Invoke-CcodexApplyDispatch'
+    cleanup = 'Invoke-CcodexCleanupDispatch'
+    doctor  = 'Invoke-CcodexDoctorDispatch'
     # (remaining commands are added as they are migrated; absent => legacy switch owns them)
 }
 

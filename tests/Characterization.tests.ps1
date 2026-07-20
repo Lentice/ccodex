@@ -132,5 +132,52 @@ Assert-Equal $tailPlain.ExitCode 0 'tail on a done job exits 0'
 Assert-Equal $tailBogus.ExitCode $tailPlain.ExitCode 'tail: unknown flag does not change exit code'
 Assert-Equal $tailBogus.Text $tailPlain.Text 'tail: unknown flag does not change output'
 
+# ============================================================
+# Second batch: wait (single), diff, apply, cleanup
+# ============================================================
+
+Write-Host 'characterization/wait: single-wait on a done job prints result; unknown flag ignored'
+$waitPlain = Invoke-CcodexShell -Arguments @('wait', $doneJob.JobId, '--state-root', $localAppData)
+$waitBogus = Invoke-CcodexShell -Arguments @('wait', $doneJob.JobId, '--bogus-unknown-flag', '--state-root', $localAppData)
+Assert-Equal $waitPlain.ExitCode 0 'wait on a done job exits 0'
+Assert-Equal $waitBogus.ExitCode $waitPlain.ExitCode 'wait: unknown flag does not change exit code'
+Assert-Equal $waitBogus.Text $waitPlain.Text 'wait: unknown flag does not change output'
+
+Write-Host 'characterization/wait: --group/--label without --all is a usage error (exact message)'
+$waitGroupNoAll = Invoke-CcodexShell -Arguments @('wait', $doneJob.JobId, '--group', 'g', '--state-root', $localAppData)
+Assert-Equal $waitGroupNoAll.ExitCode 2 'wait --group without --all exits 2'
+Assert-Equal $waitGroupNoAll.Text 'ccodex: wait --group/--label require --all.' 'wait --group without --all message is exact'
+
+Write-Host 'characterization/diff: flag-before-id recovers the same id as flag-after-id (identical result)'
+$diffAfter = Invoke-CcodexShell -Arguments @('diff', $doneJob.JobId, '--stat', '--state-root', $localAppData)
+$diffBefore = Invoke-CcodexShell -Arguments @('diff', '--stat', $doneJob.JobId, '--state-root', $localAppData)
+Assert-Equal $diffBefore.ExitCode $diffAfter.ExitCode 'diff: --stat before the id gives the same exit code as after'
+Assert-Equal $diffBefore.Text $diffAfter.Text 'diff: --stat before the id gives the same output as after'
+
+Write-Host 'characterization/diff: missing id and mutually-exclusive views are exact usage errors'
+$diffNoId = Invoke-CcodexShell -Arguments @('diff', '--state-root', $localAppData)
+Assert-Equal $diffNoId.ExitCode 2 'diff with no id exits 2'
+Assert-Equal $diffNoId.Text 'ccodex: diff requires a job id.' 'diff missing-id message is exact'
+$diffBoth = Invoke-CcodexShell -Arguments @('diff', $doneJob.JobId, '--stat', '--name-only', '--state-root', $localAppData)
+Assert-Equal $diffBoth.ExitCode 2 'diff --stat + --name-only exits 2'
+Assert-Equal $diffBoth.Text 'ccodex: diff --stat and --name-only are mutually exclusive.' 'diff mutual-exclusion message is exact'
+
+Write-Host 'characterization/apply: flag-before-id recovers the same id as flag-after-id (identical result)'
+$applyAfter = Invoke-CcodexShell -Arguments @('apply', $doneJob.JobId, '--reset-author', '--state-root', $localAppData)
+$applyBefore = Invoke-CcodexShell -Arguments @('apply', '--reset-author', $doneJob.JobId, '--state-root', $localAppData)
+Assert-Equal $applyBefore.ExitCode $applyAfter.ExitCode 'apply: --reset-author before the id gives the same exit code as after'
+Assert-Equal $applyBefore.Text $applyAfter.Text 'apply: --reset-author before the id gives the same output as after'
+
+Write-Host 'characterization/apply: missing id is an exact usage error'
+$applyNoId = Invoke-CcodexShell -Arguments @('apply', '--state-root', $localAppData)
+Assert-Equal $applyNoId.ExitCode 2 'apply with no id exits 2'
+Assert-Equal $applyNoId.Text 'ccodex: apply requires a job id.' 'apply missing-id message is exact'
+
+Write-Host 'characterization/cleanup: --dry-run output is stable and an unknown flag is ignored'
+$cleanupPlain = Invoke-CcodexShell -Arguments @('cleanup', '--dry-run', '--repo', $targetRepo, '--state-root', $localAppData)
+$cleanupBogus = Invoke-CcodexShell -Arguments @('cleanup', '--dry-run', '--bogus-unknown-flag', '--repo', $targetRepo, '--state-root', $localAppData)
+Assert-Equal $cleanupBogus.ExitCode $cleanupPlain.ExitCode 'cleanup: unknown flag does not change exit code'
+Assert-Equal $cleanupBogus.Text $cleanupPlain.Text 'cleanup: unknown flag does not change output'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
