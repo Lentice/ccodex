@@ -34,6 +34,9 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'lib\Paths.ps1')
 . (Join-Path $PSScriptRoot 'lib\Help.ps1')
+# CommandRegistry derives its visible inventory from Help.ps1's Get-CcodexCommandNames, so it must
+# be dot-sourced AFTER lib\Help.ps1 (backlog #14: single data-driven dispatch inventory).
+. (Join-Path $PSScriptRoot 'lib\CommandRegistry.ps1')
 . (Join-Path $PSScriptRoot 'lib\Repo.ps1')
 . (Join-Path $PSScriptRoot 'lib\JobId.ps1')
 . (Join-Path $PSScriptRoot 'lib\StdinTimeout.ps1')
@@ -2683,6 +2686,32 @@ try {
         }
         Write-Host $commandHelp
         exit 0
+    }
+
+    # Data-driven dispatch (backlog #14). The registry (lib/CommandRegistry.ps1) is the single
+    # source of truth for which commands exist and which are router-dispatched. For a migrated
+    # command we resolve its handler and invoke it INLINE and UNCAPTURED so the handler's
+    # Write-Output flows straight to the real stdout (byte-identical to the legacy arm's
+    # Write-Output); the exit code comes back through a [ref], never the success stream (see the
+    # handler contract in lib/CommandRegistry.ps1). Commands not yet migrated fall through to the
+    # legacy `switch` below. As each arm moves into a handler, its `switch` case is removed and the
+    # registry gains its handler entry; this hybrid state is safe to pause at any commit. The
+    # dispatch path does NOT parse arguments or reject unknown flags — each handler keeps the exact
+    # parsing (and permissiveness) its arm had.
+    $ccodexDispatchContext = [pscustomobject]@{
+        Command        = $Command
+        PositionalTask = $PositionalTask
+        Mode           = $Mode
+        Access         = $Access
+        Repo           = $Repo
+        PromptFile     = $PromptFile
+        Args           = $args
+    }
+    if (Test-CcodexRegistryCommandRouted -Command $Command) {
+        $ccodexHandlerExit = 0
+        $ccodexHandlerName = Get-CcodexRegistryHandlerName -Command $Command
+        & (Get-Command -Name $ccodexHandlerName) -Context $ccodexDispatchContext -ExitCode ([ref]$ccodexHandlerExit)
+        exit $ccodexHandlerExit
     }
 
     switch ($Command) {

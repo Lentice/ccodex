@@ -16,6 +16,7 @@ param(
     [string[]]$SlowFiles = @(
         'AsyncE2E.tests.ps1',
         'CancelCommand.tests.ps1',
+        'Characterization.tests.ps1',
         'Cleanup.tests.ps1',
         'DiffApply.tests.ps1',
         'Doctor.tests.ps1',
