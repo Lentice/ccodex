@@ -162,8 +162,10 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
 8. **React to failure classes without reading logs.** On exit `10`, check `status.json`'s
    `failure_reason` (a best-effort hint, not a guarantee — exit codes remain authoritative) and
    react accordingly. Its adjacent structured `failure` object supplies `matched_signal`,
-   `source`, `confidence`, and `http_code`; use those fields to judge borderline matches and be
-   more skeptical when `confidence` is `low`:
+   `source`, `confidence`, and `http_code`; use those fields to judge borderline matches. New jobs
+   emit only `confidence: high`/`medium` (bare-token signatures like `429`/`401`/`502` were dropped
+   and no longer classify — an unmatched failure leaves `failure_reason` null; fall back to the exit
+   code and recorded error). A historical `confidence: low` from an older job stays a weak signal:
 
    | Signal | Reaction |
    | --- | --- |

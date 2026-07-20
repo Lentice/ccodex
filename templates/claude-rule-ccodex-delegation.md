@@ -146,8 +146,12 @@ the README's failure-class table:
 
 When `failure_reason` is present, inspect the adjacent structured `status.json.failure` object as
 well: `matched_signal`, `source`, `confidence`, and `http_code` help judge borderline
-classifications. In particular, treat `confidence: low` reasons with more skepticism while
-keeping the process/`command_exit_code` authoritative.
+classifications. New jobs emit only `confidence: high`/`medium` — the low-confidence bare-token
+signatures (`429`/`401`/`502`/`503`/bare `auth`) were dropped, so a failure matching none of the
+surviving phrases leaves `failure_reason` null; treat that as the "exit `10` with no
+`failure_reason`" row (read the recorded error, use judgment, don't retry-loop). A historical
+`confidence: low` from an older job remains a weak signal; the process/`command_exit_code` stays
+authoritative.
 
 | Signal | Reaction |
 | --- | --- |

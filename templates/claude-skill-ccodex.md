@@ -121,8 +121,11 @@ Notes:
   and/or a narrower scope, or report the review as skipped.
 - Job artifacts live under `%LOCALAPPDATA%\ccodex\jobs\<repo_key>\<job_id>\`; `status.json` there
   is the durable source of truth (`failure_reason`, structured `failure`, `codex_thread_id`, exit
-  codes). `failure` adds `matched_signal`, `source`, `confidence`, and `http_code`; treat a
-  `confidence: low` classification more skeptically while keeping exit codes authoritative.
+  codes). `failure` adds `matched_signal`, `source`, `confidence`, and `http_code`. New jobs emit
+  only `confidence: high`/`medium`; bare-token signatures (`429`/`401`/`502`/`503`/bare `auth`) were
+  dropped, so a failure matching none leaves `failure_reason` null — fall back to the exit code and
+  recorded error. A historical `confidence: low` from an older job is a weak signal; exit codes stay
+  authoritative.
 
 ## Standard post-change review recipe (the most common flow)
 
