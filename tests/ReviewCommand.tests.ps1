@@ -24,6 +24,14 @@ Assert-True ($selfDiff -like '*file:line*') 'findings are instructed to carry fi
 Assert-True ($selfDiff -like '*verdict*') 'a one-line verdict is instructed'
 Assert-True ($selfDiff -like '*omission*' -or $selfDiff -like '*edge case*') 'hunting for omissions/edge cases is instructed'
 
+Write-Host "self-diff form carries the structured findings-appendix instruction (marker + schema), as an appendix after the prose"
+Assert-True ($selfDiff -like '*<!-- ccodex:findings -->*') 'self-diff form instructs the exact findings marker line'
+Assert-True ($selfDiff -like '*```json*') 'self-diff form instructs a json fenced block for the appendix'
+Assert-True ($selfDiff -like '*"severity"*' -and $selfDiff -like '*"suggested_fix"*' -and $selfDiff -like '*"items"*') 'self-diff appendix names the required findings schema keys'
+$selfProseIdx = $selfDiff.IndexOf('one-line verdict')
+$selfMarkerIdx = $selfDiff.IndexOf('<!-- ccodex:findings -->')
+Assert-True ($selfProseIdx -ge 0 -and $selfMarkerIdx -gt $selfProseIdx) 'the findings appendix instruction comes AFTER the prose review instructions (appendix is last)'
+
 Write-Host "intent/focus omitted when not provided"
 $noMeta = Build-CcodexReviewPrompt -Range 'abc..def' -Staged $false -Working $false -Paths @() -Intent $null -Focus $null -EmbedDiff $false -RepoRoot 'C:\repo'
 Assert-True (-not ($noMeta -like '*Change intent:*')) 'no Change intent line when intent is absent'
@@ -91,6 +99,15 @@ try {
     # now runs actually succeeds; a pathspec that matches nothing is an empty diff, exit 0).
     $embedSpace = Build-CcodexReviewPrompt -Range $null -Staged $false -Working $true -Paths @('lib/My File.ps1') -Intent $null -Focus $null -EmbedDiff $true -RepoRoot $gitRepo
     Assert-True ($embedSpace -like '*produced by: git diff -- "lib/My File.ps1"*') 'embed form quotes the whitespace-bearing path in the produced-by line'
+
+    Write-Host "embed-diff form carries the IDENTICAL findings-appendix instruction (shared block cannot drift, amendment #9)"
+    Assert-True ($embed -like '*<!-- ccodex:findings -->*') 'embed form instructs the same findings marker line'
+    Assert-True ($embed -like '*"severity"*' -and $embed -like '*"suggested_fix"*' -and $embed -like '*"items"*') 'embed appendix names the required findings schema keys'
+    # Prove the two forms share one definition: the substring from the marker to end must be
+    # byte-identical across the self-diff and embed forms.
+    $selfAppendix = $selfDiff.Substring($selfDiff.IndexOf('<!-- ccodex:findings -->'))
+    $embedAppendix = $embed.Substring($embed.IndexOf('<!-- ccodex:findings -->'))
+    Assert-Equal $embedAppendix $selfAppendix 'the appendix instruction is identical in both forms (single shared definition)'
 
     # New contract: the embed form checks git's exit code and throws (usage error) instead of
     # embedding an empty diff when the range/pathspec is invalid — a nonexistent ref that still
