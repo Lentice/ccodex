@@ -111,6 +111,27 @@ foreach ($badLine in @('0', '-3', '42.5', '"42"')) {
     Assert-Equal $f.items[0].line $null "line '$badLine' -> null"
 }
 
+Write-Host "Get-CcodexReviewFindings: line above Int32.MaxValue -> line null, item kept, appendix survives"
+# Regression (Codex review of #5): [int] cast of a >Int32 line threw, and the outer catch turned
+# that into a null for the WHOLE appendix, discarding unrelated valid findings.
+$bigLine = @'
+{ "verdict": "v", "items": [ { "severity": "critical", "claim": "kept despite huge line", "line": 2147483648 } ] }
+'@
+$f = Get-CcodexReviewFindings -ResultContent (New-FindingsResult -Json $bigLine)
+Assert-True ($null -ne $f) 'huge line does not null the whole appendix'
+Assert-Equal $f.items.Count 1 'item with out-of-range line is kept'
+Assert-Equal $f.items[0].line $null 'out-of-range line degraded to null'
+
+Write-Host "Get-CcodexReviewFindings: literal triple-backtick inside a JSON string does not truncate the block"
+# Regression (Codex review of #5): the closing-fence match treated an inline ``` as the fence
+# terminator, truncating the JSON body so a valid finding parsed as malformed and was discarded.
+$innerFence = 'see the fenced snippet ```code``` in context'
+$withFence = "{ ""items"": [ { ""severity"": ""minor"", ""claim"": ""c"", ""evidence"": ""$innerFence"" } ] }"
+$f = Get-CcodexReviewFindings -ResultContent (New-FindingsResult -Json $withFence)
+Assert-True ($null -ne $f) 'inline triple-backtick does not break parsing'
+Assert-Equal $f.items.Count 1 'finding with inline fence in evidence is kept'
+Assert-Equal $f.items[0].evidence $innerFence 'evidence with inline fence preserved intact'
+
 Write-Host "Get-CcodexReviewFindings: required-field violations drop the item"
 $viol = @'
 { "items": [

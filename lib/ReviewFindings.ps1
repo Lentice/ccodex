@@ -33,15 +33,19 @@ function ConvertTo-CcodexFindingItem {
     $claim = $Item.claim
     if ($claim -isnot [string] -or [string]::IsNullOrWhiteSpace($claim)) { return $null }
 
-    # line: positive integer else null. Only true numeric types are accepted (a string "42" is
-    # "wrong-typed" and becomes null); a non-integral double is rejected too.
+    # line: positive integer within Int32 range else null. Only true numeric types are accepted (a
+    # string "42" is "wrong-typed" and becomes null); a non-integral double is rejected too. The
+    # range is checked BEFORE any [int] cast: a JSON integer above Int32.MaxValue parses as [long]
+    # and would throw on [int] conversion, which the outer catch would turn into a null for the
+    # WHOLE appendix — dropping unrelated valid findings. Out-of-range degrades only `line`.
     $line = $null
     $lineRaw = $Item.line
     if ($lineRaw -is [int] -or $lineRaw -is [long]) {
-        if ([long]$lineRaw -gt 0) { $line = [int]$lineRaw }
+        $l = [long]$lineRaw
+        if ($l -ge 1 -and $l -le [int]::MaxValue) { $line = [int]$l }
     } elseif ($lineRaw -is [double] -or $lineRaw -is [decimal]) {
         $d = [double]$lineRaw
-        if ($d -gt 0 -and [math]::Floor($d) -eq $d) { $line = [int]$d }
+        if ([math]::Floor($d) -eq $d -and $d -ge 1 -and $d -le [int]::MaxValue) { $line = [int]$d }
     }
 
     # Nullable string fields: kept when a string, otherwise null.
@@ -68,10 +72,13 @@ function Get-CcodexReviewFindings {
     if ([string]::IsNullOrEmpty($ResultContent)) { return $null }
 
     try {
-        # (?s): dot matches newlines so the JSON body can span lines. Marker tolerates internal
-        # and surrounding whitespace; \s* between marker, fence, body, and closing fence absorbs
-        # CRLF/LF and padding. Lazy (.*?) stops at the first closing fence for each block.
-        $pattern = '(?s)<!--\s*ccodex:findings\s*-->\s*```json\s*(.*?)```'
+        # (?sm): s = dot matches newlines so the JSON body can span lines; m = ^/$ are line
+        # anchors. Marker tolerates internal and surrounding whitespace. The CLOSING fence is
+        # line-anchored (its own line, optional indent + trailing spaces) so a literal ``` INSIDE
+        # a JSON string value is not mistaken for the terminator — an inline ``` truncated the
+        # body and made valid findings parse as malformed. Lazy (.*?) still stops at the first
+        # line-anchored closing fence for each block.
+        $pattern = '(?sm)<!--\s*ccodex:findings\s*-->\s*```json\s*\r?\n(.*?)\r?\n[ \t]*```[ \t]*$'
         $matches = [regex]::Matches($ResultContent, $pattern)
         if ($matches.Count -eq 0) { return $null }
 
