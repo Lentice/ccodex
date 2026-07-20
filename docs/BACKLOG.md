@@ -25,6 +25,7 @@ and the delegation-run issue record
 | F4. `apply --allow-untracked` (opt-in, overlap-safe) | 0ae6fbd |
 | 11. `diff --stat` / `--name-only` (mutually-exclusive scoped views) | f669eec |
 | 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | f669eec |
+| 14. Dispatcher → data-driven command registry (enabler for #6–#13) | 246d5f3 / 025ccd1 / 27200bb / 5e89a7e |
 
 ## Open — curated backlog items (user picks)
 
@@ -35,14 +36,18 @@ and the delegation-run issue record
 | 8 | `apply --check` (transactional preview) | 3 | validate the patch applies to the clean main repo before mutating |
 | 9 | `review --include-untracked` | 3 | review new/untracked files, not just tracked diffs |
 | 10 | Review profiles + `capabilities --json` | 3 | deterministic prompt presets; capability manifest consumed by skill/commands |
-| 13 | `tail --summary` / truncate `aggregated_output` | 2 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. **Re-tiered 3→2 (2026-07-20):** health-checking long jobs is a high-frequency agent operation; also the natural first new registry flag to validate #14 once it lands. |
+| 13 | `tail --summary` / truncate `aggregated_output` | 2 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. **Re-tiered 3→2 (2026-07-20):** health-checking long jobs is a high-frequency agent operation; also the natural first new registry flag to validate #14 (now landed) — add it as a `tail` handler flag + registry entry in `lib/CommandRegistry.ps1`. |
+
+> **#14 landed (2026-07-20, commits 246d5f3 / 025ccd1 / 27200bb / 5e89a7e).** The dispatcher is now
+> a data-driven registry (`lib/CommandRegistry.ps1`); items #6–#13 are each a new
+> `Invoke-Ccodex*Dispatch` handler + registry entry rather than switch surgery. See the reference's
+> module section and the dev-notes "Command registry / dispatch" section.
 
 > **Codex review pending for #11 and #12.** Both landed 2026-07-17 with the full local suite green
 > and self-review only — Codex delegation was skipped because the Codex usage quota was near its
 > limit. Request a scoped `ccodex review` of the #11/#12 diffs (`ccodex.ps1` diff/apply arms + the
 > `Invoke-CcodexDiffCommand`/`Invoke-CcodexApplyCommand` changes) once quota recovers, and triage
 > any findings.
-| 14 | Dispatcher → data-driven command registry (refactor / enabler) | 1 | **Enabler for 6–12.** `ccodex.ps1` is one ~3200-line `switch ($Command)` where every arm re-parses `$args` ad hoc; adding a flag/command has a large blast radius (F3 was +305 lines threaded through the monolith). Converge on a registry: one spec object per command (`name`, declared flags/args schema, handler ref, help metadata), a thin router that parses/validates args from the schema, dispatches to the handler, and maps its result → exit code. F1's `Get-CcodexCommandNames`/`lib/Help.ps1` is the seed — extend it to be the single source for the `default`-arm list, help, AND flag parsing. Constraints: pure refactor, NO behavior change — exact exit codes, the non-`CmdletBinding` `param()` (stdin), the `-ImportOnly` guard, and every command's current behavior stay byte-identical; migrate command-by-command (each move guarded by the existing per-command tests) rather than big-bang. Payoff: 6–12 each become small, localized additions instead of monolith surgery. |
 
 ## Open — speed/stability review items (2026-07-20 assessment, user picks)
 

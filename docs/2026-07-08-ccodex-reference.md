@@ -828,8 +828,9 @@ As with plain submit, only `--model`/`--effort` travel on that launch line and n
 ## Repository layout
 
 ```text
-ccodex.ps1          # dispatcher: parses args, intercepts help, and implements run/submit/status/
-                    #   wait/read/review/resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker
+ccodex.ps1          # dispatcher: intercepts help, then routes via the command registry to a
+                    #   per-command Invoke-Ccodex*Dispatch handler (run/submit/status/wait/read/
+                    #   review/resume/cancel/diff/apply/tail/debug/cleanup/doctor/worker)
 ccodex.cmd          # PATH shim: forwards to `pwsh -File ccodex.ps1`
 install.ps1         # installs to %USERPROFILE%\.local\bin\ccodex\, ~\.claude\commands\ccodex.md,
                     #   ~\.claude\commands\ccodex\<name>.md (the /ccodex:<name> commands),
@@ -839,6 +840,7 @@ templates/          # worker-prompt contract, the /ccodex Claude command, the pe
                     #   :doctor, :cleanup), the delegation rule template, and the agent skill
 lib/                # single-responsibility PowerShell modules, dot-sourced by ccodex.ps1
                     #   (includes lib/Help.ps1 as the command/help inventory,
+                    #   lib/CommandRegistry.ps1 as the data-driven dispatch inventory/router,
                     #   lib/Worktree.ps1 for --access worktree jobs, and
                     #   lib/Resume.ps1 for ccodex resume)
 tests/              # plain PowerShell assertion scripts (no Pester — see the Phase 1 plan)
@@ -851,7 +853,13 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
 
 - `ccodex.ps1` — dispatcher for `run`, `submit`, `status`, `wait`, `read`, `review`, `resume`,
   `cancel`, `diff`, `apply`, `tail`, `debug`, `cleanup`, `doctor`, and the internal `worker`
-  subcommand; `run`/`submit` accept `--mode` (including `implement`), `--access` (including
+  subcommand. Dispatch is data-driven (backlog #14): after intercepting help, the script builds a
+  context object from the pre-bound `param()` + `$args` leftovers and asks `lib/CommandRegistry.ps1`
+  to route it. Each command is one `Invoke-Ccodex*Dispatch` handler (defined above the `-ImportOnly`
+  guard) that owns its own argument parsing and output and returns its exit code via a `[ref]`; a
+  command absent from the registry inventory is the unknown-command case. **To add a command or a
+  flag, edit the relevant handler and register it in `lib/CommandRegistry.ps1` — do not reintroduce
+  a `switch`.** Argument surface unchanged by the refactor: `run`/`submit` accept `--mode` (including `implement`), `--access` (including
   `worktree`), `--repo`, `--prompt-file`, a positional task argument, or a piped/redirected-stdin
   task; `review` accepts a diff selector (`--range`/`--staged`/`--working`), `--path`, `--intent`,
   `--focus`, `--embed-diff`, and `--repo`; `resume <job_id>` accepts the same prompt sources as
@@ -867,6 +875,13 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   accepts `--no-smoke` and `--repo`
 - `lib/Help.ps1` — canonical ordered command metadata plus top-level/per-command help rendering;
   also supplies the unknown-command inventory used by the dispatcher
+- `lib/CommandRegistry.ps1` — the data-driven dispatch inventory and router (backlog #14). Derives
+  its help-visible command set from `lib/Help.ps1`'s `Get-CcodexCommandNames` (so the two never
+  drift) and adds the internal, help-hidden `worker`. Maps each command to its
+  `Invoke-Ccodex*Dispatch` handler; exposes `Get-CcodexRegistryEntry`,
+  `Test-CcodexRegistryCommandRouted`, and `Get-CcodexRegistryHandlerName` for the dispatcher.
+  Handlers are invoked inline/uncaptured with a `[ref]` exit code (a returned value would conflate
+  the handler's stdout with the exit code), so per-command output policy stays byte-identical
 - `ccodex.cmd` — `PATH` shim that forwards to `pwsh -File ccodex.ps1`
 - `install.ps1` — copies `ccodex.ps1` + `lib/` to `%USERPROFILE%\.local\bin\ccodex\`, writes the
   `ccodex.cmd` shim there, installs the default worker-prompt template to

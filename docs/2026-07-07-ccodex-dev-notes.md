@@ -236,6 +236,35 @@ only a live call validates flag placement against the real CLI.
   and then the descendant. Merge commits remain a documented limitation because `format-patch`
   omits them; the ancestor check rejects clearly broken histories but does not linearize merges.
 
+## Command registry / dispatch (backlog #14, 2026-07-20)
+
+The `switch ($Command)` dispatcher was replaced by a data-driven registry. Know this before adding
+or changing a command:
+
+- **Adding a command or flag = edit one handler + one registry line.** Each command is an
+  `Invoke-Ccodex*Dispatch` function in `ccodex.ps1` (grouped above the `-ImportOnly` guard so tests
+  can dot-source and resolve them). `lib/CommandRegistry.ps1`'s `$script:CcodexCommandHandlers` maps
+  the command name to that function. Do NOT reintroduce a `switch` — the registry is the single
+  dispatch inventory and the seed for backlog #6–#13.
+- **Handler contract:** `param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)`.
+  Read pre-bound params from `$Context` (`.Command/.PositionalTask/.Mode/.Access/.Repo/.PromptFile`)
+  and leftover flags from `$Context.Args` via the existing `Get-CcodexArgValue*`/`ConvertTo-Ccodex*`
+  helpers. Write stdout/stderr with `Write-Output`/`Write-Host` exactly as before; set
+  `$ExitCode.Value` and `return`.
+- **Why `[ref]`, not a return value (load-bearing):** the dispatcher invokes the handler INLINE and
+  UNCAPTURED (`& (Get-Command $name) -Context $ctx -ExitCode ([ref]$e)`) so `Write-Output` flows
+  straight to the real stdout, byte-identically to the old arm. A handler that returned its exit
+  code would merge it into the success stream; any caller assigning the call would then capture the
+  handler's stdout together with the int — swallowing the output and corrupting the exit code
+  (verified). Never wrap handler invocation in a value-returning function.
+- **`worker` is in the registry but help-hidden** (`Internal=$true`/`VisibleInHelp=$false`), so it
+  dispatches while staying out of help and the unknown-command "Supported commands" list. That list
+  is still `Get-CcodexCommandNames` (visible only); the registry inventory is a superset.
+- **The router does not parse args or reject unknown flags.** Per-command permissiveness (unknown
+  flags ignored, extra positionals absorbed, flag-before-id recovery in diff/apply) lives in each
+  handler and is pinned by `tests/Characterization.tests.ps1`. `tests/Registry.tests.ps1` guards the
+  inventory/metadata/handler-signature contract.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them
