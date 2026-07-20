@@ -44,6 +44,18 @@ and the delegation-run issue record
 > any findings.
 | 14 | Dispatcher → data-driven command registry (refactor / enabler) | 1 | **Enabler for 6–12.** `ccodex.ps1` is one ~3200-line `switch ($Command)` where every arm re-parses `$args` ad hoc; adding a flag/command has a large blast radius (F3 was +305 lines threaded through the monolith). Converge on a registry: one spec object per command (`name`, declared flags/args schema, handler ref, help metadata), a thin router that parses/validates args from the schema, dispatches to the handler, and maps its result → exit code. F1's `Get-CcodexCommandNames`/`lib/Help.ps1` is the seed — extend it to be the single source for the `default`-arm list, help, AND flag parsing. Constraints: pure refactor, NO behavior change — exact exit codes, the non-`CmdletBinding` `param()` (stdin), the `-ImportOnly` guard, and every command's current behavior stay byte-identical; migrate command-by-command (each move guarded by the existing per-command tests) rather than big-bang. Payoff: 6–12 each become small, localized additions instead of monolith surgery. |
 
+## Open — speed/stability review items (2026-07-20 assessment, user picks)
+
+From a Claude review of which features are near-redundant or hurt speed/stability. #14 (dispatcher
+registry) is the same review's top speed item but was already listed above.
+
+| # | Item | Tier | Notes |
+|---|---|---|---|
+| 15 | Converge `FailureClassify` low-confidence scraping | 2 | The 229-line heuristic matches Codex stderr prose, which breaks on every Codex CLI upgrade (hence `codex-upgrade-check`). Instead of growing the signal table, collapse `confidence: low` cases to "no classification, exit code + raw `status.json.error` only" — the installed rule already handles unclassified exit 10. Fewer misclassifications; smaller upgrade blast radius. |
+| 16 | Lock-free read-only paths (`status`/`read`/`list`) | 2 | Read-only commands currently take the per-job lock, adding fixed latency and exposing them to exit-21 lock-timeout flakes. If `status.json` writes are (made) atomic-rename, readers need no lock at all — removes an entire failure class from the hottest polling paths. |
+| 17 | Flip `--embed-diff` off by default in review flow docs/templates | 3 | embed-diff existed for the `CreateProcessWithLogonW 1385` sandbox-spawn quirk, lifted as of codex 0.144.1. Wrapper-side `git diff` + size-capped embedding adds latency and can truncate the diff Codex sees. Keep the flag, but make self-diff the documented default and embed-diff the fallback (rule/skill/README updates). |
+| 18 | Simplify or drop `cleanup --scrub-thread-ids` | 3 | Scrubbing exists only to make old jobs non-resumable; an age check on the `resume` path achieves the same with far less destructive-path code in the largest lib module (`Cleanup.ps1`, 403 lines). Contract note: keep the flag accepted (append-only contract) even if it becomes a no-op alias for the age policy. |
+
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 
 Priority order per the Codex-confirmed triage:
