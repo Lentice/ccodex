@@ -48,6 +48,38 @@ try {
     Assert-Equal $listJson.jobs[0].label 'ok'
     Remove-Item Env:\CCODEX_FAKE_DELAY_MS, Env:\CCODEX_FAKE_RESULT, Env:\CCODEX_FAKE_EXIT_CODE -ErrorAction SilentlyContinue
 
+    Write-Host 'wait --all per-job reconciliation never blocks on a held lock; it honors its wait budget and converges once released (backlog #16)'
+    # Reconcilable orphan (running + dead backend + parsable exit-code evidence) with its per-job
+    # lock held by THIS live process, so wait --all's per-job reconciliation attempt is genuinely
+    # contended (issue #2 amendment 1 + 6). Under the zero-wait contract each poll's reconcile is
+    # instant, so the batch returns at its own wait budget (exit 20) instead of stalling on the lock.
+    $fabricatedDeadBackendId = '999999;2020-01-01T00:00:00.0000000Z'
+    $contendedDir = Add-WaitJob '20260716T000009Z-99999999-test' running 0 contend x
+    $contendedStatus = Get-Content -LiteralPath (Join-Path $contendedDir status.json) -Raw | ConvertFrom-Json
+    $contendedStatus.backend_id = $fabricatedDeadBackendId
+    Write-CcodexJsonFileAtomic -Path (Join-Path $contendedDir status.json) -Object $contendedStatus
+    Write-CcodexTextFile -Path (Join-Path $contendedDir exit_code.txt) -Content '0'
+    Write-CcodexTextFile -Path (Join-Path $contendedDir result.md) -Content 'CONTENDED RESULT'
+    $contendedBefore = (Get-Item (Join-Path $contendedDir status.json)).LastWriteTimeUtc
+    Lock-CcodexJob -JobDir $contendedDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+    try {
+        $contendStart = Get-Date
+        $contended = Invoke-CcodexWaitAllCommand -StateRoot $root -Group contend -WaitTimeoutSec 3 -Json
+        $contendElapsed = ((Get-Date) - $contendStart).TotalSeconds
+    } finally {
+        Unlock-CcodexJob -JobDir $contendedDir
+    }
+    $contendedJson = $contended.Stdout | ConvertFrom-Json
+    Assert-Equal $contended.WrapperExitCode 20 'a held reconciliation lock leaves the batch job unresolved -> wait-timeout exit 20'
+    Assert-Equal $contendedJson.jobs[0].status running 'the contended job is reported still running (possibly-stale), never reconciled under the held lock'
+    Assert-Equal $contendedJson.jobs[0].health 'possibly-stale' 'the contended job carries health=possibly-stale in the timeout envelope'
+    Assert-True ($contendElapsed -lt 6) 'wait --all does not stall on the per-job lock (no 10s-scale wait stacked on the 3s budget)'
+    Assert-Equal (Get-Item (Join-Path $contendedDir status.json)).LastWriteTimeUtc $contendedBefore 'contended wait --all left status.json unwritten'
+
+    $contendedAfter = Invoke-CcodexWaitAllCommand -StateRoot $root -Group contend -WaitTimeoutSec 3 -Json
+    $contendedAfterJson = $contendedAfter.Stdout | ConvertFrom-Json
+    Assert-Equal $contendedAfterJson.jobs[0].status done 'once the lock is free, a later wait --all reconciles the orphan to its terminal status'
+
     Write-Host 'zero matches and unusable root'
     $empty = Invoke-CcodexWaitAllCommand -StateRoot $root -Json
     Assert-Equal $empty.WrapperExitCode 0

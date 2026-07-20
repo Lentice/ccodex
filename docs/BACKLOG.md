@@ -26,6 +26,7 @@ and the delegation-run issue record
 | 11. `diff --stat` / `--name-only` (mutually-exclusive scoped views) | f669eec |
 | 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | f669eec |
 | 14. Dispatcher → data-driven command registry (enabler for #6–#13) | 246d5f3 / 025ccd1 / 27200bb / 5e89a7e |
+| 16. Zero-wait orphan reconciliation on the `status`/`read`/`wait`/`wait --all` lifecycle polling paths | landed 2026-07-20 |
 
 ## Open — curated backlog items (user picks)
 
@@ -57,7 +58,6 @@ registry) is the same review's top speed item but was already listed above.
 | # | Item | Tier | Notes |
 |---|---|---|---|
 | 15 | Converge `FailureClassify` low-confidence scraping | 2 | The 229-line heuristic matches Codex stderr prose, which breaks on every Codex CLI upgrade (hence `codex-upgrade-check`). Instead of growing the signal table, collapse `confidence: low` cases to "no classification, exit code + raw evidence (job `stderr.log`; synchronous failures also print a stderr tail)" — the installed rule already handles unclassified exit 10. Note: `status.json.error` is generally null for async Codex failures, so it is not the fallback evidence source. Fewer misclassifications; smaller upgrade blast radius. |
-| 16 | Non-blocking reconciliation on lifecycle polling paths (`status`/`read`/`wait`/`wait --all`) | 2 | Corrected premise (2026-07-20 spec work): pure reads are already lock-free and status writes already atomic-rename; the real exposure is orphan reconciliation triggered from these read paths waiting up to 10 s on the per-job lock (exit 21 was never reachable from readers — the failure already degrades to possibly-stale). Fix: zero lock wait at those call sites. Spec: issue #2. |
 | 17 | Flip `--embed-diff` off by default in review flow docs/templates | 3 | embed-diff existed for the `CreateProcessWithLogonW 1385` sandbox-spawn quirk, lifted as of codex 0.144.1. Wrapper-side `git diff` + size-capped embedding adds latency and can truncate the diff Codex sees. Keep the flag, but make self-diff the documented default and embed-diff the fallback (rule/skill/README updates). |
 | 18 | Simplify or drop `cleanup --scrub-thread-ids` | 3 | Scrubbing exists only to make old jobs non-resumable; an age check on the `resume` path achieves the same with far less destructive-path code in the largest lib module (`Cleanup.ps1`, 403 lines). Contract note: keep the flag accepted (append-only contract) even if it becomes a no-op alias for the age policy. |
 

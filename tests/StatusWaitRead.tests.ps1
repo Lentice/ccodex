@@ -123,6 +123,34 @@ Assert-Equal $resultDeadNoEvidence.Stdout "$($jobDeadNoEvidence.JobId) running h
 $afterNoRewrite = (Get-Item (Join-Path $jobDeadNoEvidence.JobDir 'status.json')).LastWriteTimeUtc
 Assert-Equal $afterNoRewrite $beforeNoRewrite 'status.json was NOT rewritten when there is no completion evidence'
 
+# --- status: contended reconciliation lock -> prompt possibly-stale answer, no lock wait (backlog #16) ---
+
+Write-Host "Invoke-CcodexStatusCommand: a held reconciliation lock answers promptly with possibly-stale, never waiting on the lock"
+# Fixture must be reconcilable (running + dead backend + parsable exit-code evidence) so the
+# read-path actually reaches the lock attempt; otherwise it returns before any lock is taken and
+# the test proves nothing (issue #2 amendment 6). Hold the lock in THIS live process so it is
+# never treated as stale, then measure ONLY the in-process command call (issue #2 amendment 5:
+# exclude process startup from the stopwatch).
+$jobStatusLockHeld = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId -WithExitCodeEvidence -EvidenceExitCode 0 -WithResultFile
+$beforeStatusLockHeld = (Get-Item (Join-Path $jobStatusLockHeld.JobDir 'status.json')).LastWriteTimeUtc
+Lock-CcodexJob -JobDir $jobStatusLockHeld.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+try {
+    $statusLockStart = Get-Date
+    $resultStatusLockHeld = Invoke-CcodexStatusCommand -JobId $jobStatusLockHeld.JobId -StateRoot $localAppData
+    $statusLockElapsed = ((Get-Date) - $statusLockStart).TotalSeconds
+} finally {
+    Unlock-CcodexJob -JobDir $jobStatusLockHeld.JobDir
+}
+Assert-Equal $resultStatusLockHeld.WrapperExitCode 0 'contended status still exits 0'
+Assert-Equal $resultStatusLockHeld.Stdout "$($jobStatusLockHeld.JobId) running health=possibly-stale" 'contended status reports possibly-stale rather than reconciling'
+Assert-True ($statusLockElapsed -lt 3) 'status does not wait on the reconciliation lock (well under the old 10s default)'
+$afterStatusLockHeld = (Get-Item (Join-Path $jobStatusLockHeld.JobDir 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterStatusLockHeld $beforeStatusLockHeld 'contended status left status.json unwritten'
+
+Write-Host "Invoke-CcodexStatusCommand: once the lock is free, the next status call reconciles to the terminal verdict"
+$resultStatusAfterRelease = Invoke-CcodexStatusCommand -JobId $jobStatusLockHeld.JobId -StateRoot $localAppData
+Assert-Equal $resultStatusAfterRelease.Stdout "$($jobStatusLockHeld.JobId) done codex_exit_code=0 wrapper_exit_code=0" 'a later uncontended status reconciles the orphan to its terminal status'
+
 # --- status: done (terminal) ---
 
 Write-Host "Invoke-CcodexStatusCommand: already-done job -> terminal line with codes"
@@ -277,8 +305,12 @@ $resultWaitEmpty = Invoke-CcodexWaitCommand -JobId $jobWaitEmpty.JobId -StateRoo
 Assert-Equal $resultWaitEmpty.WrapperExitCode 11 'done job with missing result.md -> exit 11'
 Assert-True (-not [string]::IsNullOrEmpty($resultWaitEmpty.Message)) 'empty-result job returns a diagnostic message'
 
-Write-Host "Invoke-CcodexWaitCommand: a contended orphan-reconciliation lock is bounded by the wait budget"
-$jobWaitLockBudget = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-Host "Invoke-CcodexWaitCommand: a contended orphan-reconciliation lock never blocks and preserves possibly-stale at the deadline"
+# Reconcilable orphan (running + dead backend + parsable exit-code evidence) so the poll actually
+# reaches the lock attempt (issue #2 amendment 6). With the lock held for the whole wait, every
+# poll (INCLUDING the deadline iteration) reconciles zero-wait, degrades to possibly-stale, and
+# the job never resolves -> exit 20 whose status line still carries health=possibly-stale.
+$jobWaitLockBudget = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId -WithExitCodeEvidence -EvidenceExitCode 0 -WithResultFile
 Lock-CcodexJob -JobDir $jobWaitLockBudget.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
 try {
     $waitLockBudgetStart = Get-Date
@@ -289,6 +321,8 @@ try {
 }
 Assert-Equal $waitLockBudgetResult.WrapperExitCode 20 'wait returns its timeout when reconciliation cannot acquire the lock'
 Assert-True ($waitLockBudgetElapsed -lt 1.75) 'wait does not let orphan reconciliation exceed its remaining timeout budget'
+Assert-True ($waitLockBudgetResult.Message -like '*health=possibly-stale*') 'wait timeout on a contended orphan preserves health=possibly-stale (deadline iteration still reconciles zero-wait)'
+Assert-Equal (Read-CcodexStatusFile -JobDir $jobWaitLockBudget.JobDir).status 'running' 'contended wait left status.json unreconciled'
 
 # --- (d) slow job: submit via startprocess against a delayed fake-codex, timeout then completion ---
 
@@ -489,6 +523,24 @@ $jobReadTimedOutResult = New-CcodexTestJobWithStatus -Status 'timed_out' -Wrappe
 $resultReadTimedOutResult = Invoke-CcodexReadCommand -JobId $jobReadTimedOutResult.JobId -StateRoot $localAppData
 Assert-Equal $resultReadTimedOutResult.WrapperExitCode 0 'timed_out job with result.md -> exit 0 (read is the result channel)'
 Assert-Equal $resultReadTimedOutResult.Stdout 'the result' 'timed_out job -> stdout carries result.md content'
+
+# --- read: contended reconciliation lock -> prompt answer, no lock wait (backlog #16) ---
+
+Write-Host "Invoke-CcodexReadCommand: a held reconciliation lock answers promptly (exit 4, possibly-stale), never waiting on the lock"
+# Same reconcilable-orphan-with-held-lock fixture as the status contention test: read must not
+# stall for the reconciliation lock. It sees the still-running job and returns exit 4 + a wait hint.
+$jobReadLockHeld = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId -WithExitCodeEvidence -EvidenceExitCode 0 -WithResultFile
+Lock-CcodexJob -JobDir $jobReadLockHeld.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+try {
+    $readLockStart = Get-Date
+    $resultReadLockHeld = Invoke-CcodexReadCommand -JobId $jobReadLockHeld.JobId -StateRoot $localAppData
+    $readLockElapsed = ((Get-Date) - $readLockStart).TotalSeconds
+} finally {
+    Unlock-CcodexJob -JobDir $jobReadLockHeld.JobDir
+}
+Assert-Equal $resultReadLockHeld.WrapperExitCode 4 'contended read on a still-running orphan exits 4'
+Assert-True ($resultReadLockHeld.Message -like '*health=possibly-stale*') 'contended read reports possibly-stale'
+Assert-True ($readLockElapsed -lt 3) 'read does not wait on the reconciliation lock (well under the old 10s default)'
 
 # --- unknown job id -> exit 3 ---
 

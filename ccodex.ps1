@@ -1148,7 +1148,10 @@ function Invoke-CcodexStatusCommand {
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }
 
-    $reconciliation = Update-CcodexOrphanStatus -JobDir $record.JobDir
+    # Read-path reconciliation is opportunistic: never wait on the per-job lock (backlog #16).
+    # A lock we cannot take immediately is skipped this pass (job reported possibly-stale);
+    # a later poll or the worker's own terminal write converges the state.
+    $reconciliation = Update-CcodexOrphanStatus -JobDir $record.JobDir -LockTimeoutSec 0
     $statusObj = Read-CcodexStatusFile -JobDir $record.JobDir
 
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
@@ -1230,22 +1233,15 @@ function Invoke-CcodexWaitCommand {
     $deadline = if ($WaitTimeoutSec -gt 0) { (Get-Date).AddSeconds($WaitTimeoutSec) } else { $null }
 
     while ($true) {
-        $reconciliation = $null
-        if ($deadline) {
-            $remainingSec = ($deadline - (Get-Date)).TotalSeconds
-            if ($remainingSec -gt 0) {
-                # Reconciliation is a writer and can wait on the job lock. Give it no
-                # more than this wait invocation has left, rather than its 10s default.
-                $reconciliationTimeoutSec = [Math]::Max(0, [int][Math]::Floor($remainingSec))
-                $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir -LockTimeoutSec $reconciliationTimeoutSec
-            } else {
-                # At the deadline, do one ordinary status read below but never begin a
-                # lock wait that would make `--wait-timeout-sec` overrun.
-                $reconciliation = [pscustomobject]@{ Status = $null; PossiblyStale = $false }
-            }
-        } else {
-            $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
-        }
+        # Read-path reconciliation never waits on the per-job lock (backlog #16): every poll,
+        # INCLUDING the final one at/after the deadline, attempts the lock with zero wait and,
+        # on failure, skips the rewrite this pass and reports possibly-stale. Because it cannot
+        # wait, it can never make `--wait-timeout-sec` overrun, so the deadline no longer needs a
+        # special no-reconcile branch — running it on the deadline iteration means an orphan that
+        # just became evidenced still reconciles to its terminal status (evaluated below before
+        # the timeout guard) and a contended orphan keeps its possibly-stale verdict in the
+        # timeout line rather than silently losing it.
+        $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir -LockTimeoutSec 0
         $statusObj = Read-CcodexStatusFile -JobDir $jobDir
         $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
         if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }
@@ -1388,8 +1384,10 @@ function Invoke-CcodexWaitAllCommand {
     $deadline = if ($WaitTimeoutSec -gt 0) { (Get-Date).AddSeconds($WaitTimeoutSec) } else { $null }
     while ($pending.Count -gt 0) {
         foreach ($id in @($pending.Keys)) {
-            $remaining = if ($deadline) { [Math]::Max(0, [int][Math]::Floor(($deadline - (Get-Date)).TotalSeconds)) } else { 0 }
-            $check = Test-CcodexJobTerminalState -JobId $id -JobDir $pending[$id] -ReconciliationLockTimeoutSec $remaining
+            # Read-path reconciliation is zero-wait (backlog #16): a per-job lock we cannot take
+            # immediately is skipped this pass, so one contended job never consumes the wait budget
+            # meant for polling every job in the batch. The deadline check below bounds the wait.
+            $check = Test-CcodexJobTerminalState -JobId $id -JobDir $pending[$id] -ReconciliationLockTimeoutSec 0
             if ($check.Resolved) {
                 $results[$id] = $check.Envelope
                 if (-not $Json) {
@@ -1445,7 +1443,9 @@ function Invoke-CcodexReadCommand {
     $jobDir = $record.JobDir
     $resultPath = Join-Path $jobDir 'result.md'
 
-    $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir
+    # Read-path reconciliation never waits on the per-job lock (backlog #16): opportunistic
+    # attempt, skip-and-report-possibly-stale on contention, converge on a later call.
+    $reconciliation = Update-CcodexOrphanStatus -JobDir $jobDir -LockTimeoutSec 0
     $statusObj = Read-CcodexStatusFile -JobDir $jobDir
     $statusText = if ($statusObj) { $statusObj.status } else { $reconciliation.Status }
     if ([string]::IsNullOrEmpty($statusText)) { $statusText = 'unknown' }

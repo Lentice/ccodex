@@ -298,6 +298,31 @@ $afterLockHeld = (Get-Item (Join-Path $dirLockHeld 'status.json')).LastWriteTime
 Assert-Equal $afterLockHeld $beforeLockHeld 'held-lock reconciliation did not rewrite status.json'
 Unlock-CcodexJob -JobDir $dirLockHeld
 
+Write-Host "Update-CcodexOrphanStatus: -LockTimeoutSec 0 returns immediately (no lock wait) when the lock is held — the read-path contract for backlog #16"
+$dirLockZero = New-TestJobDir 'orphan-lock-zero'
+$lockZeroStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirLockZero 'status.json') -Object $lockZeroStatus
+Write-CcodexTextFile -Path (Join-Path $dirLockZero 'exit_code.txt') -Content '0'
+Write-CcodexTextFile -Path (Join-Path $dirLockZero 'result.md') -Content 'the result'
+# Read-path callers (status/read/wait/wait --all) pass -LockTimeoutSec 0 so a contended
+# reconciliation never blocks: it must make a single acquisition attempt, skip on failure, and
+# report possibly-stale. Bound is generous (3s) per the dev-notes timing guidance.
+Lock-CcodexJob -JobDir $dirLockZero -CommandName 'test-holder' | Out-Null
+$beforeLockZero = (Get-Item (Join-Path $dirLockZero 'status.json')).LastWriteTimeUtc
+$lockZeroStart = Get-Date
+try {
+    $resultLockZero = Update-CcodexOrphanStatus -JobDir $dirLockZero -LockTimeoutSec 0
+} finally {
+    $lockZeroElapsed = ((Get-Date) - $lockZeroStart).TotalSeconds
+    Unlock-CcodexJob -JobDir $dirLockZero
+}
+Assert-Equal $resultLockZero.Status 'running' 'zero-wait reconciliation reports the unchanged running status'
+Assert-Equal $resultLockZero.Reconciled $false 'zero-wait reconciliation does not reconcile under a held lock'
+Assert-Equal $resultLockZero.PossiblyStale $true 'zero-wait reconciliation reports possibly-stale'
+Assert-True ($lockZeroElapsed -lt 3) 'zero-wait reconciliation returns immediately without waiting on the lock'
+$afterLockZero = (Get-Item (Join-Path $dirLockZero 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterLockZero $beforeLockZero 'zero-wait reconciliation did not rewrite status.json'
+
 Write-Host "Update-CcodexOrphanStatus: aborts the rewrite when status changes under the lock (re-read guard)"
 $dirReReadGuard = New-TestJobDir 'orphan-reread-guard'
 $reReadStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId

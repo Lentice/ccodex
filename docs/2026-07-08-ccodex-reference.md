@@ -819,6 +819,20 @@ thread-id scrub — serializes through a per-job lock (`<job_dir>\.lock\`) so tw
 never race each other; a lock that cannot be acquired within its timeout surfaces as wrapper exit
 `21` rather than corrupting the file.
 
+**Read-only lifecycle polling never waits on the per-job lock.** The lifecycle polling paths —
+`status`, `read`, and each `wait` / `wait --all` poll iteration — reconcile a dead-but-evidenced
+orphan opportunistically: they attempt the reconciliation write-lock with **zero wait** and, if it
+is held, skip the rewrite this pass and report the job as `health=possibly-stale`. A later poll (or
+the worker's own terminal write) converges the state under the lock, guarded by the same
+re-read-under-lock check that aborts a stale verdict. This bounds these commands' latency to their
+own work and makes a bounded `wait --wait-timeout-sec N` immune to lock-wait overrun. It also means
+wrapper exit `21` (a lock-timeout) is only reachable from writer commands (`cancel`, `apply`); it
+was never reachable from these read paths — the contended reconcile already degraded to
+possibly-stale — so this is a latency change, not the removal of a failure class. Other
+reconcile-triggering commands (`debug`, and the `diff`/`apply` precondition resolver) still use the
+default lock wait; only the four lifecycle polling paths are zero-wait. `list` remains entirely
+lock-free and reconcile-free (see [list](#list)).
+
 For `submit --resume`, `parent_job_id` and the inherited `codex_thread_id` are present from the
 initial `created` status. This status metadata is how the worker recognizes a resumed child and
 builds `codex exec … resume <thread-id> -`, targeting `worktree_repo` when present; no resume flag is added to the worker launch line.

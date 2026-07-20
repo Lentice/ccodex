@@ -265,6 +265,45 @@ or changing a command:
   handler and is pinned by `tests/Characterization.tests.ps1`. `tests/Registry.tests.ps1` guards the
   inventory/metadata/handler-signature contract.
 
+## Read-path reconciliation is zero-wait (backlog #16, 2026-07-20)
+
+The lifecycle polling paths never block on the per-job lock. Know this before touching the
+reconciliation call sites:
+
+- **Change the callers, not the default.** `Update-CcodexOrphanStatus`'s `-LockTimeoutSec` default
+  stays `10` (other callers — `cancel`'s orphan branch, `cleanup`, the `diff`/`apply` resolver,
+  `debug` — legitimately inherit it). The four lifecycle polling paths pass `-LockTimeoutSec 0`
+  explicitly: `Invoke-CcodexStatusCommand`, `Invoke-CcodexReadCommand`, both branches of
+  `Invoke-CcodexWaitCommand`, and `Test-CcodexJobTerminalState`'s call from
+  `Invoke-CcodexWaitAllCommand`. Do NOT lower the function default to 0 — that would silently make
+  every writer-adjacent reconcile non-blocking too.
+- **`wait`'s deadline iteration reconciles too.** Once reconciliation is zero-wait, the old
+  no-reconcile special-case at the deadline (which existed only to avoid a lock-wait overrun) is
+  both unnecessary and wrong, so `Invoke-CcodexWaitCommand` now runs the same unconditional
+  zero-wait reconcile on every iteration. This keeps `health=possibly-stale` on the timeout line for
+  a contended orphan and lets an orphan that just became evidenced reconcile to its terminal status
+  on the final poll instead of spuriously returning exit 20 (a Codex review finding; guarded by the
+  possibly-stale-at-timeout assertions in `tests/StatusWaitRead.tests.ps1` and
+  `tests/WaitAll.tests.ps1`).
+- **`-LockTimeoutSec 0` means one acquisition attempt, no wait** (`Lock-CcodexJob` sets its
+  deadline to `now`, so a live-contended lock throws immediately; a *stale* lock is still broken and
+  retried — that is not a wait on a live owner). The reconcile catches the throw and degrades to
+  `possibly-stale`, exactly as the old 10 s timeout path did — only faster.
+- **The guarantee is scoped, not universal.** It is "the lifecycle polling paths of
+  `status`/`read`/`wait`/`wait --all` never wait on the job lock" — NOT "read-only commands never
+  lock". `debug` and the `diff`/`apply` precondition resolver still reconcile with the default wait;
+  they were audited and left for a follow-up (changing them is safe but out of #16's scope).
+- **Exit 21 was never reachable from these read paths** — the contended reconcile already degraded
+  to possibly-stale. #16 removed up-to-10 s of latency, not a failure class; docs must not claim
+  otherwise.
+- Guards: `tests/JobStatus.tests.ps1` pins the `-LockTimeoutSec 0` function contract (prompt return,
+  possibly-stale, no rewrite); `tests/StatusWaitRead.tests.ps1` pins `status`/`read` answering
+  promptly under a held lock and converging on a later uncontended call;
+  `tests/WaitAll.tests.ps1` pins the same for `wait --all`. Timing bounds are generous (3 s / 6 s)
+  and measured around the in-process call, never around a `pwsh` cold start (see the timing note at
+  the top of this file). The contention fixture is always `running` + dead backend id + a parsable
+  `exit_code.txt`, so reconciliation actually reaches the lock attempt.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them
