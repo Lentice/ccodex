@@ -7,6 +7,16 @@
 
 # Ordered signal table. Order IS precedence: first row whose literal pattern matches wins.
 # Class order and alternative order reproduce the legacy class-level alternation regexes.
+#
+# Precision over recall (backlog #15, 2026-07-20): the five former `confidence: low` rows
+# (`429`, bare `auth`, `401`, `502`, `503`) were removed. They were bare tokens that matched
+# incidental text in stderr/embedded command output, producing a wrong `failure_reason` that
+# steered the caller's documented reaction — a misclassification is worse than no classification.
+# A failure that only one of those tokens would have matched now yields NO signal ($null), and the
+# caller falls back to the documented "exit 10 with no failure_reason" path. Every surviving row is
+# `high` or `medium`; `confidence` is therefore never `low` for newly written jobs (historical
+# status.json values may still carry `low` and stay a weak signal). The generic HTTP-code regex
+# extraction below is retained, so surviving rows can still attach an http_code.
 $script:CcodexFailureSignals = @(
     [pscustomobject]@{ Class='thread_expired';        Pattern='session not found';      Confidence='high';   HttpCode=$null },
     [pscustomobject]@{ Class='thread_expired';        Pattern='thread not found';       Confidence='high';   HttpCode=$null },
@@ -15,10 +25,7 @@ $script:CcodexFailureSignals = @(
     [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='usage limit';            Confidence='high';   HttpCode=$null },
     [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='rate limit';             Confidence='high';   HttpCode=$null },
     [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='quota';                  Confidence='high';   HttpCode=$null },
-    [pscustomobject]@{ Class='quota_or_rate_limit';   Pattern='429';                    Confidence='low';    HttpCode=429 },
     [pscustomobject]@{ Class='auth';                  Pattern='login';                  Confidence='medium'; HttpCode=$null },
-    [pscustomobject]@{ Class='auth';                  Pattern='auth';                   Confidence='low';    HttpCode=$null },
-    [pscustomobject]@{ Class='auth';                  Pattern='401';                    Confidence='low';    HttpCode=401 },
     [pscustomobject]@{ Class='auth';                  Pattern='unauthorized';           Confidence='high';   HttpCode=401 },
     [pscustomobject]@{ Class='auth';                  Pattern='credential';             Confidence='medium'; HttpCode=$null },
     [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='sandbox';                Confidence='high';   HttpCode=$null },
@@ -27,9 +34,7 @@ $script:CcodexFailureSignals = @(
     [pscustomobject]@{ Class='permission_or_sandbox'; Pattern='permission';             Confidence='medium'; HttpCode=$null },
     [pscustomobject]@{ Class='network';               Pattern='network';                Confidence='medium'; HttpCode=$null },
     [pscustomobject]@{ Class='network';               Pattern='connection';             Confidence='medium'; HttpCode=$null },
-    [pscustomobject]@{ Class='network';               Pattern='dns';                    Confidence='high';   HttpCode=$null },
-    [pscustomobject]@{ Class='network';               Pattern='502';                    Confidence='low';    HttpCode=502 },
-    [pscustomobject]@{ Class='network';               Pattern='503';                    Confidence='low';    HttpCode=503 }
+    [pscustomobject]@{ Class='network';               Pattern='dns';                    Confidence='high';   HttpCode=$null }
 )
 
 function Get-CcodexCodexThreadId {
