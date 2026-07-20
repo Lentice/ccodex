@@ -2653,6 +2653,189 @@ function Get-CcodexArgValues {
     return , $values
 }
 
+# ============================================================
+# Command dispatch handlers (backlog #14 command registry)
+#
+# One handler per migrated command. Each is the former `switch` arm body, moved verbatim except:
+#   * `$args` -> `$cmdArgs = $Context.Args` (a function's own automatic $args would otherwise
+#     shadow the leftover-argument array the arm parsed);
+#   * pre-bound params read from $Context (.PositionalTask/.Mode/.Access/.Repo/.PromptFile);
+#   * `$exitCode = N; break` -> `$ExitCode.Value = N; return`, and the arm's trailing
+#     `$exitCode = <result>.WrapperExitCode` -> `$ExitCode.Value = <result>.WrapperExitCode`.
+# Output (Write-Output/Write-Host) is unchanged, so behavior stays byte-identical; see the handler
+# contract in lib/CommandRegistry.ps1 for why the exit code travels via [ref]. These live above the
+# -ImportOnly guard so tests can resolve them by name without executing a command.
+# ============================================================
+
+function Invoke-CcodexStatusDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit` use for their task text). --state-root is a hidden test flag.
+    $cmdArgs = $Context.Args
+    $statusJobId = $Context.PositionalTask
+    $statusStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $statusJson = ($cmdArgs -contains '--json')
+    if (-not $statusJobId) {
+        Write-Host "ccodex: status requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $statusParams = @{ JobId = $statusJobId }
+    if ($statusStateRoot) { $statusParams['StateRoot'] = $statusStateRoot }
+    if ($statusJson) { $statusParams['Json'] = $true }
+    $statusResult = Invoke-CcodexStatusCommand @statusParams
+    if ($statusJson) {
+        Write-Output $statusResult.Stdout
+    } elseif ($statusResult.WrapperExitCode -eq 0) {
+        Write-Output $statusResult.Stdout
+    } else {
+        Write-Host $statusResult.Message
+    }
+    $ExitCode.Value = $statusResult.WrapperExitCode
+}
+
+function Invoke-CcodexReadDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait` use). --state-root is a hidden test flag.
+    $cmdArgs = $Context.Args
+    $readJobId = $Context.PositionalTask
+    $readStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $readJson = ($cmdArgs -contains '--json')
+    if (-not $readJobId) {
+        Write-Host "ccodex: read requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $readParams = @{ JobId = $readJobId }
+    if ($readStateRoot) { $readParams['StateRoot'] = $readStateRoot }
+    if ($readJson) { $readParams['Json'] = $true }
+    $readResult = Invoke-CcodexReadCommand @readParams
+    if ($readJson) {
+        Write-Output $readResult.Stdout
+    } elseif ($readResult.WrapperExitCode -eq 0) {
+        Write-Output $readResult.Stdout
+    } else {
+        Write-Host $readResult.Message
+    }
+    $ExitCode.Value = $readResult.WrapperExitCode
+}
+
+function Invoke-CcodexCancelDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait`/`read` use). --state-root is a hidden test flag.
+    $cmdArgs = $Context.Args
+    $cancelJobId = $Context.PositionalTask
+    $cancelStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    if (-not $cancelJobId) {
+        Write-Host "ccodex: cancel requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $cancelParams = @{ JobId = $cancelJobId }
+    if ($cancelStateRoot) { $cancelParams['StateRoot'] = $cancelStateRoot }
+    $cancelResult = Invoke-CcodexCancelCommand @cancelParams
+    if ($cancelResult.WrapperExitCode -eq 0) {
+        Write-Output $cancelResult.Stdout
+    } else {
+        Write-Host $cancelResult.Message
+    }
+    $ExitCode.Value = $cancelResult.WrapperExitCode
+}
+
+function Invoke-CcodexTailDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --lines/--state-root are
+    # flags; a bad --lines is a usage error (exit 2), same shape as --hard-timeout-sec.
+    $cmdArgs = $Context.Args
+    $tailJobId = $Context.PositionalTask
+    $tailStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $tailLinesText = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--lines'
+    if (-not $tailJobId) {
+        Write-Host "ccodex: tail requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $tailParams = @{ JobId = $tailJobId }
+    if ($tailStateRoot) { $tailParams['StateRoot'] = $tailStateRoot }
+    if ($tailLinesText) {
+        try {
+            $tailParams['Lines'] = ConvertTo-CcodexTailLinesCount -FlagName '--lines' -ValueText $tailLinesText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    $tailResult = Invoke-CcodexTailCommand @tailParams
+    if ($tailResult.WrapperExitCode -eq 0) {
+        Write-Output $tailResult.Stdout
+    } else {
+        Write-Host $tailResult.Message
+    }
+    $ExitCode.Value = $tailResult.WrapperExitCode
+}
+
+function Invoke-CcodexDebugDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Positional job id lands in $PositionalTask (same declaration-order binding
+    # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`tail` use). --state-root is a
+    # hidden test flag.
+    $cmdArgs = $Context.Args
+    $debugJobId = $Context.PositionalTask
+    $debugStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    if (-not $debugJobId) {
+        Write-Host "ccodex: debug requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    $debugParams = @{ JobId = $debugJobId }
+    if ($debugStateRoot) { $debugParams['StateRoot'] = $debugStateRoot }
+    $debugResult = Invoke-CcodexDebugCommand @debugParams
+    if ($debugResult.WrapperExitCode -eq 0) {
+        Write-Output $debugResult.Stdout
+    } else {
+        Write-Host $debugResult.Message
+    }
+    $ExitCode.Value = $debugResult.WrapperExitCode
+}
+
+function Invoke-CcodexListDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # No positional job id. --json is a presence flag; --repo binds to $Repo (narrows
+    # to that repo's key); --state is repeatable (Get-CcodexArgValues, so a bare
+    # `--state` with no value is a usage error); --state-root is a hidden test flag.
+    $cmdArgs = $Context.Args
+    $Repo = $Context.Repo
+    $listJson = ($cmdArgs -contains '--json')
+    $listStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    try {
+        $listStates = Get-CcodexArgValues -ArgumentList $cmdArgs -FlagName '--state'
+        $listGroup = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--group'
+        $listLabel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--label'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+    $listParams = @{}
+    if ($listJson) { $listParams['Json'] = $true }
+    if ($Repo) { $listParams['RepoOverride'] = $Repo }
+    if ($listStates.Count -gt 0) { $listParams['State'] = $listStates }
+    if ($null -ne $listGroup) { $listParams['Group'] = $listGroup }
+    if ($null -ne $listLabel) { $listParams['Label'] = $listLabel }
+    if ($listStateRoot) { $listParams['StateRoot'] = $listStateRoot }
+    $listResult = Invoke-CcodexListCommand @listParams
+    if ($listResult.WrapperExitCode -eq 0) {
+        Write-Output $listResult.Stdout
+    } else {
+        Write-Host $listResult.Message
+    }
+    $ExitCode.Value = $listResult.WrapperExitCode
+}
+
 if ($ImportOnly) { return }
 
 $exitCode = 12
@@ -2981,30 +3164,6 @@ try {
             }
             $exitCode = $workerResult.WrapperExitCode
         }
-        'status' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit` use for their task text). --state-root is a hidden test flag.
-            $statusJobId = $PositionalTask
-            $statusStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $statusJson = ($args -contains '--json')
-            if (-not $statusJobId) {
-                Write-Host "ccodex: status requires a job id."
-                $exitCode = 2
-                break
-            }
-            $statusParams = @{ JobId = $statusJobId }
-            if ($statusStateRoot) { $statusParams['StateRoot'] = $statusStateRoot }
-            if ($statusJson) { $statusParams['Json'] = $true }
-            $statusResult = Invoke-CcodexStatusCommand @statusParams
-            if ($statusJson) {
-                Write-Output $statusResult.Stdout
-            } elseif ($statusResult.WrapperExitCode -eq 0) {
-                Write-Output $statusResult.Stdout
-            } else {
-                Write-Host $statusResult.Message
-            }
-            $exitCode = $statusResult.WrapperExitCode
-        }
         'wait' {
             if ($args -contains '--all') {
                 if ($PositionalTask) {
@@ -3077,50 +3236,6 @@ try {
                 Write-Host $waitResult.Message
             }
             $exitCode = $waitResult.WrapperExitCode
-        }
-        'read' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait` use). --state-root is a hidden test flag.
-            $readJobId = $PositionalTask
-            $readStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $readJson = ($args -contains '--json')
-            if (-not $readJobId) {
-                Write-Host "ccodex: read requires a job id."
-                $exitCode = 2
-                break
-            }
-            $readParams = @{ JobId = $readJobId }
-            if ($readStateRoot) { $readParams['StateRoot'] = $readStateRoot }
-            if ($readJson) { $readParams['Json'] = $true }
-            $readResult = Invoke-CcodexReadCommand @readParams
-            if ($readJson) {
-                Write-Output $readResult.Stdout
-            } elseif ($readResult.WrapperExitCode -eq 0) {
-                Write-Output $readResult.Stdout
-            } else {
-                Write-Host $readResult.Message
-            }
-            $exitCode = $readResult.WrapperExitCode
-        }
-        'cancel' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait`/`read` use). --state-root is a hidden test flag.
-            $cancelJobId = $PositionalTask
-            $cancelStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            if (-not $cancelJobId) {
-                Write-Host "ccodex: cancel requires a job id."
-                $exitCode = 2
-                break
-            }
-            $cancelParams = @{ JobId = $cancelJobId }
-            if ($cancelStateRoot) { $cancelParams['StateRoot'] = $cancelStateRoot }
-            $cancelResult = Invoke-CcodexCancelCommand @cancelParams
-            if ($cancelResult.WrapperExitCode -eq 0) {
-                Write-Output $cancelResult.Stdout
-            } else {
-                Write-Host $cancelResult.Message
-            }
-            $exitCode = $cancelResult.WrapperExitCode
         }
         'diff' {
             # Positional job id lands in $PositionalTask (same declaration-order binding
@@ -3277,88 +3392,6 @@ try {
                 Write-Host $reviewResult.Message
             }
             $exitCode = $reviewResult.WrapperExitCode
-        }
-        'tail' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait`/`read`/`cancel` use). --lines/--state-root are
-            # flags; a bad --lines is a usage error (exit 2), same shape as --hard-timeout-sec.
-            $tailJobId = $PositionalTask
-            $tailStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $tailLinesText = Get-CcodexArgValue -ArgumentList $args -FlagName '--lines'
-            if (-not $tailJobId) {
-                Write-Host "ccodex: tail requires a job id."
-                $exitCode = 2
-                break
-            }
-            $tailParams = @{ JobId = $tailJobId }
-            if ($tailStateRoot) { $tailParams['StateRoot'] = $tailStateRoot }
-            if ($tailLinesText) {
-                try {
-                    $tailParams['Lines'] = ConvertTo-CcodexTailLinesCount -FlagName '--lines' -ValueText $tailLinesText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            $tailResult = Invoke-CcodexTailCommand @tailParams
-            if ($tailResult.WrapperExitCode -eq 0) {
-                Write-Output $tailResult.Stdout
-            } else {
-                Write-Host $tailResult.Message
-            }
-            $exitCode = $tailResult.WrapperExitCode
-        }
-        'debug' {
-            # Positional job id lands in $PositionalTask (same declaration-order binding
-            # `run`/`submit`/`status`/`wait`/`read`/`cancel`/`tail` use). --state-root is a
-            # hidden test flag.
-            $debugJobId = $PositionalTask
-            $debugStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            if (-not $debugJobId) {
-                Write-Host "ccodex: debug requires a job id."
-                $exitCode = 2
-                break
-            }
-            $debugParams = @{ JobId = $debugJobId }
-            if ($debugStateRoot) { $debugParams['StateRoot'] = $debugStateRoot }
-            $debugResult = Invoke-CcodexDebugCommand @debugParams
-            if ($debugResult.WrapperExitCode -eq 0) {
-                Write-Output $debugResult.Stdout
-            } else {
-                Write-Host $debugResult.Message
-            }
-            $exitCode = $debugResult.WrapperExitCode
-        }
-        'list' {
-            # No positional job id. --json is a presence flag; --repo binds to $Repo (narrows
-            # to that repo's key); --state is repeatable (Get-CcodexArgValues, so a bare
-            # `--state` with no value is a usage error); --state-root is a hidden test flag.
-            $listJson = ($args -contains '--json')
-            $listStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            try {
-                $listStates = Get-CcodexArgValues -ArgumentList $args -FlagName '--state'
-                $listGroup = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--group'
-                $listLabel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--label'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-            $listParams = @{}
-            if ($listJson) { $listParams['Json'] = $true }
-            if ($Repo) { $listParams['RepoOverride'] = $Repo }
-            if ($listStates.Count -gt 0) { $listParams['State'] = $listStates }
-            if ($null -ne $listGroup) { $listParams['Group'] = $listGroup }
-            if ($null -ne $listLabel) { $listParams['Label'] = $listLabel }
-            if ($listStateRoot) { $listParams['StateRoot'] = $listStateRoot }
-            $listResult = Invoke-CcodexListCommand @listParams
-            if ($listResult.WrapperExitCode -eq 0) {
-                Write-Output $listResult.Stdout
-            } else {
-                Write-Host $listResult.Message
-            }
-            $exitCode = $listResult.WrapperExitCode
         }
         'cleanup' {
             # Retention sweep. --older-than <Nd|Nh> and --thread-ttl <Nd> override the

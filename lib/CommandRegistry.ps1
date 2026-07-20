@@ -43,7 +43,14 @@
 # entry. Keeping the mapping here (not a Migrated boolean scattered per entry) makes the migration
 # state a single readable list.
 $script:CcodexCommandHandlers = @{
-    # e.g. status = 'Invoke-CcodexStatusDispatch'  (populated per migration commit)
+    # Read-only batch (migrated): job-state queries and log/diagnostic views.
+    status = 'Invoke-CcodexStatusDispatch'
+    read   = 'Invoke-CcodexReadDispatch'
+    cancel = 'Invoke-CcodexCancelDispatch'
+    tail   = 'Invoke-CcodexTailDispatch'
+    debug  = 'Invoke-CcodexDebugDispatch'
+    list   = 'Invoke-CcodexListDispatch'
+    # (remaining commands are added as they are migrated; absent => legacy switch owns them)
 }
 
 # Internal (non-help-visible) commands: valid to dispatch, but must NOT appear in the help
