@@ -85,8 +85,15 @@ foreach ($case in @(
     @{ Text='reauthorize completed: request id 5021 502xx';  Why='bare tokens embedded in unrelated output must not classify' }
 )) {
     $p = New-TestFile "stderr-droppedlow-$([Guid]::NewGuid().ToString('N')).log" $case.Text
-    Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $p -EventsPath $null) $null "$($case.Why) -> no classification"
+    Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $p -EventsPath $null) $null "$($case.Why) -> no failure_reason"
+    # The whole structured signal must be null, not merely its reason (contract: no classification).
+    Assert-Equal (Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $p -EventsPath $null) $null "$($case.Why) -> no structured signal"
 }
+
+Write-Host "Get-CcodexFailureSignal: a removed bare token in an error-bearing EVENT line also yields no signal"
+$eventsBare429 = New-TestFile 'events-bare-429.jsonl' '{"type":"error","msg":"upstream returned 429"}'
+Assert-Equal (Get-CcodexFailureReason -CodexExitCode 1 -StderrPath $null -EventsPath $eventsBare429) $null 'events-only bare 429 -> no failure_reason'
+Assert-Equal (Get-CcodexFailureSignal -CodexExitCode 1 -StderrPath $null -EventsPath $eventsBare429) $null 'events-only bare 429 -> no structured signal'
 
 Write-Host "Get-CcodexFailureReason: thread_expired signature classes"
 foreach ($signal in @('session not found', 'thread not found', 'no session', 'conversation not found')) {
