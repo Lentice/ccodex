@@ -281,9 +281,13 @@ main repo's configured git user; `--message <msg>` sets its commit message — l
 identity in one step instead of a manual `git commit --amend --reset-author`. Both amend the single
 landed commit after a successful `am`; because a resumed cumulative series applies more than one
 commit (where a single message/author would be ambiguous), either flag on a multi-commit range is
-rejected up front with exit `2` **before** the main repo is touched. If the post-`am` amend itself
-fails (e.g. no git identity is configured for `--reset-author`), the main repo is restored to its
-pre-apply `HEAD` and the command exits `12`.
+rejected up front with exit `2` **before** the main repo is touched. `--message` requires a real
+value: a valueless trailing `--message`, or one immediately followed by another flag (e.g.
+`--message --reset-author`), is a usage error (exit `2`) rather than a silent no-op or one that
+swallows the next flag as the message. If the post-`am` amend itself fails (e.g. no git identity is
+configured for `--reset-author`), the main repo is rolled back to its pre-apply `HEAD` and the
+command exits `12`; the rollback is verified, so if it could not be fully completed the exit-`12`
+message says so and names the actual `HEAD` instead of claiming a clean restore.
 
 For a resumed implement series, apply only the newest accepted descendant. Its range is already
 cumulative (parent + child work); never apply an ancestor and then its cumulative descendant.

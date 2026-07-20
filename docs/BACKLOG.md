@@ -44,11 +44,14 @@ and the delegation-run issue record
 > `Invoke-Ccodex*Dispatch` handler + registry entry rather than switch surgery. See the reference's
 > module section and the dev-notes "Command registry / dispatch" section.
 
-> **Codex review pending for #11 and #12.** Both landed 2026-07-17 with the full local suite green
-> and self-review only — Codex delegation was skipped because the Codex usage quota was near its
-> limit. Request a scoped `ccodex review` of the #11/#12 diffs (`ccodex.ps1` diff/apply arms + the
-> `Invoke-CcodexDiffCommand`/`Invoke-CcodexApplyCommand` changes) once quota recovers, and triage
-> any findings.
+> **Codex review of #11/#12 done (2026-07-20).** The scoped `ccodex review` was run once quota
+> recovered and surfaced two `apply` findings, both adopted and landed with tests: (1) `apply
+> --message` used the silent-null `Get-CcodexArgValue` (a valueless/flag-swallowing `--message` was
+> ignored or consumed the next flag) — now `Get-CcodexRequiredArgValue` → exit `2`; (2) the
+> `--message`/`--reset-author` amend-failure path claimed the main repo was restored without
+> verifying — now both apply failure paths verify via the shared `Get-CcodexApplyRestoreState` and
+> warn (naming the actual `HEAD`) on an incomplete rollback. See the dev-notes "apply flag-parse +
+> rollback honesty" section.
 
 ## Open — speed/stability review items (2026-07-20 assessment, user picks)
 

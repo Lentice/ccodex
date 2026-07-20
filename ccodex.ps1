@@ -1737,6 +1737,40 @@ function Invoke-CcodexDiffCommand {
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = "$statOutput`n`n$diffOutput"; Message = $null }
 }
 
+function Get-CcodexApplyRestoreState {
+    # After a failed apply rolls the main repo back to $PreHead (git-am abort/reset, or the reset
+    # that follows a failed --message/--reset-author amend), verify the rollback actually restored
+    # the pre-apply state instead of assuming it: HEAD must equal $PreHead and the working tree
+    # must carry nothing beyond the untracked files that were already present before the apply
+    # (recorded in $PreUntrackedSet, only consulted under -AllowUntracked). Shared by both failure
+    # paths so each reports restoration honestly and can warn (naming the actual HEAD) when it is
+    # incomplete. Returns Restored plus the evidence needed for that warning.
+    param(
+        [Parameter(Mandatory)][string]$MainRepo,
+        [Parameter(Mandatory)][string]$PreHead,
+        [switch]$AllowUntracked,
+        [System.Collections.Generic.HashSet[string]]$PreUntrackedSet
+    )
+    $restoredHead = ([string](& git -C $MainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
+    $restorePorcelain = if ($AllowUntracked) {
+        @(& git -c core.quotepath=false -C $MainRepo status --porcelain --untracked-files=all 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+    } else {
+        @(& git -C $MainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
+    }
+    $restorePorcelain = @($restorePorcelain)
+    $unexpectedRestoreLines = if ($AllowUntracked) {
+        @($restorePorcelain | Where-Object {
+            $line = $_.ToString()
+            $line.Length -lt 3 -or $line.Substring(0, 2) -ne '??' -or -not ($PreUntrackedSet -and $PreUntrackedSet.Contains($line.Substring(3)))
+        })
+    } else {
+        $restorePorcelain
+    }
+    $unexpectedRestoreLines = @($unexpectedRestoreLines)
+    $restored = ($restoredHead -eq $PreHead) -and ($unexpectedRestoreLines.Count -eq 0)
+    return [pscustomobject]@{ Restored = $restored; Head = $restoredHead; UnexpectedLines = $unexpectedRestoreLines }
+}
+
 function Invoke-CcodexApplyCommand {
     # Applies a done worktree job's snapshot commit(s) onto the main repo (design: "apply
     # <job_id>", Phase 4 Task 5). Shares the unknown/non-terminal/no-worktree/worktree-removed
@@ -1923,7 +1957,14 @@ function Invoke-CcodexApplyCommand {
                 $amendOutput = (& git -c "core.hooksPath=$emptyHooksDir" -C $mainRepo @amendArgs 2>&1 | Out-String)
                 if ($LASTEXITCODE -ne 0) {
                     & git -C $mainRepo reset --hard $preHead 2>&1 | Out-Null
-                    $message = "ccodex: applied job $JobId but could not rewrite the landed commit (git commit --amend failed); main repo restored to its pre-apply state.`n  git output: $($amendOutput.TrimEnd())"
+                    # Verify the rollback rather than assuming it: a failed reset would otherwise
+                    # leave the applied commit (or a dirty tree) while the message claims restoration.
+                    $amendRestore = Get-CcodexApplyRestoreState -MainRepo $mainRepo -PreHead $preHead -AllowUntracked:$AllowUntracked -PreUntrackedSet $preUntrackedSet
+                    if ($amendRestore.Restored) {
+                        $message = "ccodex: applied job $JobId but could not rewrite the landed commit (git commit --amend failed); main repo restored to its pre-apply state.`n  git output: $($amendOutput.TrimEnd())"
+                    } else {
+                        $message = "ccodex: applied job $JobId but could not rewrite the landed commit (git commit --amend failed), AND could not fully restore the main repo to its pre-apply state (HEAD='$($amendRestore.Head)', expected '$preHead'); inspect it manually.`n  git output: $($amendOutput.TrimEnd())"
+                    }
                     return [pscustomobject]@{ WrapperExitCode = 12; Stdout = $null; Message = $message }
                 }
                 $postHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
@@ -1958,23 +1999,9 @@ function Invoke-CcodexApplyCommand {
             }
         }
 
-        $restoredHead = ([string](& git -C $mainRepo rev-parse HEAD 2>&1 | Select-Object -First 1)).Trim()
-        $restorePorcelain = if ($AllowUntracked) {
-            @(& git -c core.quotepath=false -C $mainRepo status --porcelain --untracked-files=all 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-        } else {
-            @(& git -C $mainRepo status --porcelain 2>&1 | Where-Object { $_ -and $_.ToString().Trim() -ne '' })
-        }
-        $restorePorcelain = @($restorePorcelain)
-        $unexpectedRestoreLines = if ($AllowUntracked) {
-            @($restorePorcelain | Where-Object {
-                $line = $_.ToString()
-                $line.Length -lt 3 -or $line.Substring(0, 2) -ne '??' -or -not $preUntrackedSet.Contains($line.Substring(3))
-            })
-        } else {
-            $restorePorcelain
-        }
-        $unexpectedRestoreLines = @($unexpectedRestoreLines)
-        $restored = ($restoredHead -eq $preHead) -and ($unexpectedRestoreLines.Count -eq 0)
+        $amRestore = Get-CcodexApplyRestoreState -MainRepo $mainRepo -PreHead $preHead -AllowUntracked:$AllowUntracked -PreUntrackedSet $preUntrackedSet
+        $restored = $amRestore.Restored
+        $restoredHead = $amRestore.Head
 
         # Parse conflicting file names out of the am output.
         $conflictFiles = New-Object System.Collections.Generic.List[string]
@@ -2966,7 +2993,18 @@ function Invoke-CcodexApplyDispatch {
     $cmdArgs = $Context.Args
     $applyStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
     $applyAllowUntracked = ($cmdArgs -contains '--allow-untracked')
-    $applyMessage = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--message'
+    # --message is a public flag whose silent misparse would be worse than a usage error: with
+    # plain Get-CcodexArgValue a trailing `--message` is silently ignored (landing the worker's
+    # default commit message while the caller believes it was rewritten) and `--message
+    # --reset-author` swallows the next flag as the message. Require a real value, exactly like
+    # run's --model/--effort/--group/--label.
+    try {
+        $applyMessage = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--message'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
     $applyResetAuthor = ($cmdArgs -contains '--reset-author')
     $applyJobId = $Context.PositionalTask
     if (-not $applyJobId -and ($applyAllowUntracked -or $applyResetAuthor -or $applyMessage)) {

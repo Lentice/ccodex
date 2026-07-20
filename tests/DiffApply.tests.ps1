@@ -706,6 +706,75 @@ $postHeadMulti = (& git -C $gitRepoApplyMulti rev-parse HEAD).Trim()
 Assert-Equal $postHeadMulti $preHeadMulti 'rejected multi-commit apply leaves main repo HEAD unchanged'
 
 Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+Write-Host "apply --message: a valueless flag is a usage error (exit 2), never a silent no-op or a consumed next flag"
+$gitRepoApplyMsgArg = Join-Path $tempRoot 'gitrepo-apply-message-argparse'
+New-CcodexTestGitRepo -Path $gitRepoApplyMsgArg
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'implement done'
+$env:CCODEX_FAKE_WRITE_FILE = 'msgarg-file.txt'
+$env:CCODEX_FAKE_WRITE_TEXT = 'msgarg content'
+$runApplyMsgArg = Invoke-CcodexRunForTest -Overrides @{ RepoOverride = $gitRepoApplyMsgArg }
+Remove-Item Env:\CCODEX_FAKE_WRITE_FILE, Env:\CCODEX_FAKE_WRITE_TEXT -ErrorAction SilentlyContinue
+Assert-Equal $runApplyMsgArg.WrapperExitCode 0 'setup: message-argparse implement run succeeds'
+$statusApplyMsgArg = Get-Content -LiteralPath (Join-Path $runApplyMsgArg.JobDir 'status.json') -Raw | ConvertFrom-Json
+$preHeadMsgArg = (& git -C $gitRepoApplyMsgArg rev-parse HEAD).Trim()
+
+# Trailing --message with no value must be rejected, not silently ignored (which would land the
+# worker's default commit message while the caller believes the message was rewritten).
+$msgTrailingOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') apply $statusApplyMsgArg.job_id --message --state-root $localAppData
+Assert-Equal $LASTEXITCODE 2 'apply <job> --message (no value) -> exit 2'
+Assert-True (($msgTrailingOutput -join "`n") -like '*--message requires a value*') 'trailing --message exit-2 message names the flag'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyMsgArg 'msgarg-file.txt'))) 'rejected trailing --message does not land the worker patch'
+Assert-Equal ((& git -C $gitRepoApplyMsgArg rev-parse HEAD).Trim()) $preHeadMsgArg 'rejected trailing --message leaves main repo HEAD unchanged'
+
+# --message immediately followed by another flag must NOT swallow that flag as the message value.
+$msgSwallowOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') apply $statusApplyMsgArg.job_id --message --reset-author --state-root $localAppData
+Assert-Equal $LASTEXITCODE 2 'apply <job> --message --reset-author -> exit 2 (next flag is not consumed as the message)'
+Assert-True (($msgSwallowOutput -join "`n") -like '*--message requires a value*') 'flag-swallow exit-2 message names the flag'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $gitRepoApplyMsgArg 'msgarg-file.txt'))) 'rejected --message --reset-author does not land the worker patch'
+Assert-Equal ((& git -C $gitRepoApplyMsgArg rev-parse HEAD).Trim()) $preHeadMsgArg 'rejected --message --reset-author leaves main repo HEAD unchanged'
+
+# A real value still works through the dispatcher.
+$msgValidOutput = & pwsh -NoProfile -File (Join-Path $PSScriptRoot '..\ccodex.ps1') apply $statusApplyMsgArg.job_id --message 'land with a real subject' --state-root $localAppData
+Assert-Equal $LASTEXITCODE 0 'apply <job> --message <value> -> exit 0'
+Assert-Equal ((& git -C $gitRepoApplyMsgArg log -1 --format='%s').Trim()) 'land with a real subject' 'a real --message value sets the landed commit subject'
+
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
+# ============================================================================
+# Get-CcodexApplyRestoreState (shared rollback verification for the git-am and
+# --message/--reset-author amend failure paths) (#12 hardening)
+# ============================================================================
+
+Write-Host "Get-CcodexApplyRestoreState: reports honest restored/not-restored state after a rollback"
+$gitRepoRestore = Join-Path $tempRoot 'gitrepo-restore-verify'
+New-CcodexTestGitRepo -Path $gitRepoRestore
+$restorePreHead = (& git -C $gitRepoRestore rev-parse HEAD).Trim()
+
+# Clean repo whose HEAD equals the pre-apply commit: a genuine, verified restoration.
+$restoreClean = Get-CcodexApplyRestoreState -MainRepo $gitRepoRestore -PreHead $restorePreHead
+Assert-True $restoreClean.Restored 'restore verification: clean repo at pre-apply HEAD -> Restored'
+Assert-Equal $restoreClean.Head $restorePreHead 'restore verification: reports the actual current HEAD'
+Assert-Equal $restoreClean.UnexpectedLines.Count 0 'restore verification: no unexpected working-tree lines when clean'
+
+# HEAD advanced past the pre-apply commit (as it would be if `git reset --hard` failed to roll
+# back after an amend failure): must be reported as NOT restored, naming the wrong HEAD.
+[System.IO.File]::WriteAllText((Join-Path $gitRepoRestore 'stuck.txt'), "stuck`n", $utf8NoBomTest)
+& git -C $gitRepoRestore add stuck.txt | Out-Null
+& git -C $gitRepoRestore commit -q -m 'commit that a failed rollback would leave behind' | Out-Null
+$restoreStuckHead = (& git -C $gitRepoRestore rev-parse HEAD).Trim()
+$restoreStuck = Get-CcodexApplyRestoreState -MainRepo $gitRepoRestore -PreHead $restorePreHead
+Assert-True (-not $restoreStuck.Restored) 'restore verification: HEAD ahead of pre-apply commit -> NOT Restored'
+Assert-Equal $restoreStuck.Head $restoreStuckHead 'restore verification: names the actual (wrong) HEAD when not restored'
+
+# Uncommitted tracked change without --allow-untracked is also unexpected -> NOT restored.
+& git -C $gitRepoRestore reset --hard $restorePreHead -q | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $gitRepoRestore 'seed.txt'), "dirtied after rollback`n", $utf8NoBomTest)
+$restoreDirty = Get-CcodexApplyRestoreState -MainRepo $gitRepoRestore -PreHead $restorePreHead
+Assert-True (-not $restoreDirty.Restored) 'restore verification: dirty tracked tree -> NOT Restored'
+Assert-True ($restoreDirty.UnexpectedLines.Count -gt 0) 'restore verification: surfaces the unexpected dirty line'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Complete-CcodexTests

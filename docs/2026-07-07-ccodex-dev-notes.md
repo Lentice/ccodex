@@ -304,6 +304,30 @@ reconciliation call sites:
   the top of this file). The contention fixture is always `running` + dead backend id + a parsable
   `exit_code.txt`, so reconciliation actually reaches the lock attempt.
 
+## apply flag-parse + rollback honesty (backlog #11/#12 Codex review, 2026-07-20)
+
+A scoped Codex review of the #11/#12 diff surfaced two `apply` gaps; both are fixed and guarded in
+`tests/DiffApply.tests.ps1`. Know them before touching the apply dispatch or its failure paths:
+
+- **`apply --message` uses `Get-CcodexRequiredArgValue`, not `Get-CcodexArgValue`.** `--message` is
+  a public value-flag, so the same misparse class the `run` handler already guards applies: plain
+  `Get-CcodexArgValue` silently returned `$null` for a trailing `--message` (landing the worker's
+  default message while the caller believed it was rewritten) and consumed the *next* flag as the
+  message for `--message --reset-author`. `Invoke-CcodexApplyDispatch` now calls
+  `Get-CcodexRequiredArgValue` in a try/catch → exit `2`. Do NOT revert it to `Get-CcodexArgValue`;
+  the trailing/flag-swallow cases are pinned. (Legitimate commit subjects starting with `--` are the
+  documented tradeoff shared by every flag routed through the Required helper.)
+- **Both apply failure paths verify the rollback via `Get-CcodexApplyRestoreState`.** The failed-`am`
+  path and the failed-`--message`/`--reset-author`-amend path both roll the main repo back to
+  `$preHead`, then call the shared `Get-CcodexApplyRestoreState` helper (HEAD-equals-preHead **and**
+  no working-tree lines beyond the pre-existing untracked set) instead of assuming success. The amend
+  path previously claimed "main repo restored to its pre-apply state" unconditionally; it now warns
+  and names the actual `HEAD` when the reset did not fully restore. The helper is the single source
+  of that check — do not re-inline it. The amend-failure branch is near-unreachable in practice
+  (`--reset-author` resolves the author from the committer, so an amend after a successful `am` rarely
+  fails), which is why its coverage is the helper's own unit test plus the existing `am`-failure
+  integration tests (conflict / apply-twice / hook-conflict) that now exercise the shared helper.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them
