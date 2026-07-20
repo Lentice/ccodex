@@ -35,7 +35,7 @@ and the delegation-run issue record
 | 8 | `apply --check` (transactional preview) | 3 | validate the patch applies to the clean main repo before mutating |
 | 9 | `review --include-untracked` | 3 | review new/untracked files, not just tracked diffs |
 | 10 | Review profiles + `capabilities --json` | 3 | deterministic prompt presets; capability manifest consumed by skill/commands |
-| 13 | `tail --summary` / truncate `aggregated_output` | 3 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. |
+| 13 | `tail --summary` / truncate `aggregated_output` | 2 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. **Re-tiered 3→2 (2026-07-20):** health-checking long jobs is a high-frequency agent operation; also the natural first new registry flag to validate #14 once it lands. |
 
 > **Codex review pending for #11 and #12.** Both landed 2026-07-17 with the full local suite green
 > and self-review only — Codex delegation was skipped because the Codex usage quota was near its
@@ -56,6 +56,16 @@ registry) is the same review's top speed item but was already listed above.
 | 17 | Flip `--embed-diff` off by default in review flow docs/templates | 3 | embed-diff existed for the `CreateProcessWithLogonW 1385` sandbox-spawn quirk, lifted as of codex 0.144.1. Wrapper-side `git diff` + size-capped embedding adds latency and can truncate the diff Codex sees. Keep the flag, but make self-diff the documented default and embed-diff the fallback (rule/skill/README updates). |
 | 18 | Simplify or drop `cleanup --scrub-thread-ids` | 3 | Scrubbing exists only to make old jobs non-resumable; an age check on the `resume` path achieves the same with far less destructive-path code in the largest lib module (`Cleanup.ps1`, 403 lines). Contract note: keep the flag accepted (append-only contract) even if it becomes a no-op alias for the age policy. |
 
+## Open — delegation-quality items (2026-07-20 assessment, user picks)
+
+From a Claude assessment of where the biggest leverage sits outside the existing items: the
+consumability of Codex's output and quota economics dominate per-delegation cost/quality.
+
+| # | Item | Tier | Notes |
+|---|---|---|---|
+| 19 | Structured review findings schema | 2 | The installed rule mandates per-finding triage (adopt/reject each one), but `ccodex review` returns free-form prose the agent must segment itself — mis-segmentation loses findings. Have the review worker prompt require a fixed per-finding schema (severity / file / claim / evidence), validate it wrapper-side, and expose it as a structured field in `result`. Touches only the review prompt template + result validation, not the lifecycle contract. Complements #10 (review profiles): profiles shape the prompt IN, this shapes findings OUT — spec them together if both are picked. |
+| 20 | Fan-out concurrency cap (`max_parallel` queue for `submit`) | 3 | `submit` + `--group` encourages fan-out with no guard against launching N jobs that exhaust quota or local resources at once. A simple config-driven cap: jobs beyond the limit queue as `created` and start as slots free. Defensive; lower priority than 19. |
+
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 
 Priority order per the Codex-confirmed triage:
@@ -63,6 +73,7 @@ Priority order per the Codex-confirmed triage:
 | # | Item | Origin | Notes |
 |---|---|---|---|
 | F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose. **Blocked — precondition unmet (verified 2026-07-16, codex-cli 0.144.4):** `codex exec --json` emits only `thread`/`turn`/`item` events; quota surfaces solely as prose stderr (matched by `FailureClassify`'s `usage limit`/`rate limit`/`quota`/`429` substrings). No structured retry/reset field exists to source these from. Revisit only if a future Codex release emits structured rate-limit evidence. |
+| F6 | Proactive quota visibility (pre-flight, e.g. via `doctor --json`) (conditional) | 2026-07-17 #11/#12 review skip | Quota only surfaces today AFTER a failed call (`failure_reason: quota_or_rate_limit`); the #11/#12 Codex review was skipped near-quota with no way to check first. If quota remaining were queryable pre-flight, policy checkpoints could skip-with-note instead of burning a failing call. **Blocked — precondition unmet (verified 2026-07-20, codex-cli 0.144.4):** neither `codex doctor --json` nor `codex login status` exposes quota/usage fields; usage data exists server-side (interactive `/status` shows limits) but has no non-interactive CLI surface. Same conditional stance as F5: never infer from prose; revisit when a Codex release exposes usage programmatically. |
 
 ## Explicitly not planned
 
