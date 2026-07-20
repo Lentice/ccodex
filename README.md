@@ -321,8 +321,10 @@ it, never retry · `auth` → run `codex login` · `permission_or_sandbox` → n
 `test`/`implement` may use `--access workspace`; a review stays read-only) · `network` → one retry
 is safe · `thread_expired` (resumed jobs only) → start a
 fresh `run`. The adjacent structured `status.json.failure` object adds the matched signal,
-source, confidence, and HTTP code for automation. When it's unclear, run `ccodex doctor` before
-retrying anything.
+source, confidence (`high`/`medium` for new jobs; bare-token matches like `429`/`401`/`502` no
+longer classify), and HTTP code for automation. A failure matching no reliable signature leaves
+`failure_reason` null — fall back to the exit code and the recorded error. When it's unclear, run
+`ccodex doctor` before retrying anything.
 
 ### Delegation policy (`.ccodex/ccodex.json`)
 

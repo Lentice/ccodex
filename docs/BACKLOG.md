@@ -28,6 +28,7 @@ and the delegation-run issue record
 | 14. Dispatcher → data-driven command registry (enabler for #6–#13) | 246d5f3 / 025ccd1 / 27200bb / 5e89a7e |
 | 16. Zero-wait orphan reconciliation on the `status`/`read`/`wait`/`wait --all` lifecycle polling paths | landed 2026-07-20 |
 | 19. Structured review findings schema (parser + `findings` in `read`/`wait`/`wait --all` `--json`; review-prompt appendix) | 394e73b / ee58261 / cfaec83 / 047c7c2 (+ docs) |
+| 15. Drop `confidence:low` failure-classification signatures (precision over recall) | landed 2026-07-20 |
 
 ## Open — curated backlog items (user picks)
 
@@ -61,9 +62,18 @@ registry) is the same review's top speed item but was already listed above.
 
 | # | Item | Tier | Notes |
 |---|---|---|---|
-| 15 | Converge `FailureClassify` low-confidence scraping | 2 | The 229-line heuristic matches Codex stderr prose, which breaks on every Codex CLI upgrade (hence `codex-upgrade-check`). Instead of growing the signal table, collapse `confidence: low` cases to "no classification, exit code + raw evidence (job `stderr.log`; synchronous failures also print a stderr tail)" — the installed rule already handles unclassified exit 10. Note: `status.json.error` is generally null for async Codex failures, so it is not the fallback evidence source. Fewer misclassifications; smaller upgrade blast radius. |
 | 17 | Flip `--embed-diff` off by default in review flow docs/templates | 3 | embed-diff existed for the `CreateProcessWithLogonW 1385` sandbox-spawn quirk, lifted as of codex 0.144.1. Wrapper-side `git diff` + size-capped embedding adds latency and can truncate the diff Codex sees. Keep the flag, but make self-diff the documented default and embed-diff the fallback (rule/skill/README updates). |
 | 18 | Simplify or drop `cleanup --scrub-thread-ids` | 3 | Scrubbing exists only to make old jobs non-resumable; an age check on the `resume` path achieves the same with far less destructive-path code in the largest lib module (`Cleanup.ps1`, 403 lines). Contract note: keep the flag accepted (append-only contract) even if it becomes a no-op alias for the age policy. |
+
+> **#15 landed (2026-07-20).** The five `confidence: low` bare tokens (`429`, bare `auth`, `401`,
+> `502`, `503`) were removed from the `lib/FailureClassify.ps1` signal table — precision over
+> recall: a bare token matching incidental stderr / embedded output stamped a wrong `failure_reason`,
+> and a misclassification is worse than no classification. Surviving rows are all `high`/`medium`;
+> `confidence` is never `low` for new jobs (historical values stay readable). Class order, precedence,
+> never-throws discipline, HTTP-code regex extraction, and the `failure`/`failure_reason` contract are
+> unchanged. A failure matching only a removed token now yields no signal and falls to the documented
+> "exit 10, no `failure_reason`" path (read the job's `stderr.log` — `status.json.error` is generally
+> null for async failures). Amendment in the adapter-design doc + reference/README/templates updated.
 
 ## Open — delegation-quality items (2026-07-20 assessment, user picks)
 
@@ -91,7 +101,7 @@ Priority order per the Codex-confirmed triage:
 
 | # | Item | Origin | Notes |
 |---|---|---|---|
-| F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose. **Blocked — precondition unmet (verified 2026-07-16, codex-cli 0.144.4):** `codex exec --json` emits only `thread`/`turn`/`item` events; quota surfaces solely as prose stderr (matched by `FailureClassify`'s `usage limit`/`rate limit`/`quota` phrase signatures; the bare `429` row is slated for removal by #15). No structured retry/reset field exists to source these from. Revisit only if a future Codex release emits structured rate-limit evidence. |
+| F5 | `retry_after_sec` / `rate_limit_reset_at` on quota failures (conditional) | O7 | only from explicit structured Codex evidence, never inferred from prose. **Blocked — precondition unmet (verified 2026-07-16, codex-cli 0.144.4):** `codex exec --json` emits only `thread`/`turn`/`item` events; quota surfaces solely as prose stderr (matched by `FailureClassify`'s `usage limit`/`rate limit`/`quota` phrase signatures; the bare `429` row was removed by #15, landed 2026-07-20, so quota no longer classifies via a bare `429`). No structured retry/reset field exists to source these from. Revisit only if a future Codex release emits structured rate-limit evidence. |
 | F6 | Proactive quota visibility (pre-flight, e.g. via `doctor --json`) (conditional) | 2026-07-17 #11/#12 review skip | Quota only surfaces today AFTER a failed call (`failure_reason: quota_or_rate_limit`); the #11/#12 Codex review was skipped near-quota with no way to check first. If quota remaining were queryable pre-flight, policy checkpoints could skip-with-note instead of burning a failing call. **Blocked — precondition unmet (verified 2026-07-20, codex-cli 0.144.4):** neither `codex doctor --json` nor `codex login status` exposes quota/usage fields; usage data exists server-side (interactive `/status` shows limits) but has no non-interactive CLI surface. Same conditional stance as F5: never infer from prose; revisit when a Codex release exposes usage programmatically. |
 
 ## Explicitly not planned

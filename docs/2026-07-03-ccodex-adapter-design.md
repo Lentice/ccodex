@@ -982,6 +982,38 @@ addressed by a code comment plus the existing E2E stdout-exactness assertions; i
 (embedded quotes in CIM command lines) is guarded with a clear error since Windows paths cannot
 contain quotes.
 
+#### Precision-over-recall refinement (2026-07-20, backlog #15)
+
+This amendment refines the signature lists in the table above. The five `confidence: low` bare
+tokens — quota `429`, auth `auth` and `401`, network `502` and `503` — are **removed** from the
+ordered signal table (`lib/FailureClassify.ps1`). They matched incidental text in `stderr.log` or
+embedded command output (e.g. a request id containing `502`, an unrelated `429` substring),
+stamping a wrong `failure_reason` that steers the caller's documented reaction — a
+misclassification is worse than no classification. Effective signatures are now:
+
+| Class | Surviving signatures |
+|---|---|
+| `quota_or_rate_limit` | `usage limit`, `rate limit`, `quota` |
+| `auth` | `login`, `unauthorized`, `credential` |
+| `permission_or_sandbox` | `sandbox`, `denied`, `approval`, `permission` |
+| `network` | `network`, `connection`, `dns` |
+| `thread_expired` | `session not found`, `thread not found`, `no session`, `conversation not found` |
+
+A failure matching only a removed token now yields **no** signal (`failure_reason`/`failure` stay
+`null`), and the caller falls back to the documented "exit `10` with no `failure_reason`" path
+(read the recorded error — the job's `stderr.log`, plus the stderr tail included in synchronous
+failure output; `status.json.error` is generally `null` for async Codex failures — and use
+judgment, don't retry-loop). Class order and precedence (thread_expired > quota > auth > permission
+> network) are unchanged, as is the never-throws / degrade-to-null discipline and the generic
+HTTP-code regex extraction (surviving rows still attach an `http_code`, and `unauthorized` keeps
+its static `401` fallback). Contract-preserving: the `failure` object schema
+(`reason`/`matched_signal`/`source`/`confidence`/`http_code`) and the `failure_reason`
+compatibility field are unchanged (append-only); `confidence` simply never takes the value `low`
+for newly written jobs — historical `status.json` files may still carry `low` and it remains a
+weak signal when read. The surviving `medium` literals (`login`, `denied`, `permission`,
+`network`, `connection`) are still unbounded substring matches with residual false-positive risk;
+retaining them is an accepted scope decision, not a collision-free guarantee.
+
 ### Scoped review and delegation policy (2026-07-05)
 
 User use cases: (1) after Claude completes a feature/fix, optionally have Codex review exactly
