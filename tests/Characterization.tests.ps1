@@ -179,5 +179,46 @@ $cleanupBogus = Invoke-CcodexShell -Arguments @('cleanup', '--dry-run', '--bogus
 Assert-Equal $cleanupBogus.ExitCode $cleanupPlain.ExitCode 'cleanup: unknown flag does not change exit code'
 Assert-Equal $cleanupBogus.Text $cleanupPlain.Text 'cleanup: unknown flag does not change output'
 
+# ============================================================
+# Third batch: run, submit, resume, review, worker
+# These pin the fast usage-error paths (no live Codex): required-value semantics for the
+# hyphenated --model/--effort flags, effort validation, the submit --resume inherit guard, and
+# the internal worker's missing --job-id error. The RunCommand/SubmitCommand/Resume/
+# ReviewCommand/Worker suites cover the codex-invoking happy paths with fixtures.
+# ============================================================
+
+Write-Host 'characterization/run: a trailing --model with no value is an exact usage error (required-value)'
+$runModelNoValue = Invoke-CcodexShell -Arguments @('run', '--model', '--effort', 'high', 'a task')
+Assert-Equal $runModelNoValue.ExitCode 2 'run --model with no value exits 2'
+Assert-Equal $runModelNoValue.Text 'ccodex: --model requires a value.' 'run --model required-value message is exact'
+
+Write-Host 'characterization/run: an invalid --effort is an exact usage error (validated before any Codex call)'
+$runBadEffort = Invoke-CcodexShell -Arguments @('run', '--effort', 'NotAValidEffort', 'a task')
+Assert-Equal $runBadEffort.ExitCode 2 'run --effort invalid exits 2'
+Assert-Equal $runBadEffort.Text "ccodex: --effort must be one of: none, minimal, low, medium, high, xhigh, max, ultra (case-sensitive); got 'NotAValidEffort'." 'run invalid-effort message is exact'
+
+Write-Host 'characterization/review: a trailing --model with no value is an exact usage error'
+$reviewModelNoValue = Invoke-CcodexShell -Arguments @('review', '--model', '--effort', 'high')
+Assert-Equal $reviewModelNoValue.ExitCode 2 'review --model with no value exits 2'
+Assert-Equal $reviewModelNoValue.Text 'ccodex: --model requires a value.' 'review --model required-value message is exact'
+
+Write-Host 'characterization/submit: --resume with an inherited override is an exact usage error'
+$submitResumeOverride = Invoke-CcodexShell -Arguments @('submit', '--resume', 'some-parent-id', '--mode', 'review')
+Assert-Equal $submitResumeOverride.ExitCode 2 'submit --resume with --mode exits 2'
+Assert-Equal $submitResumeOverride.Text 'ccodex: submit --resume inherits mode, access, repo, group, and label from the parent job.' 'submit --resume inherit-guard message is exact'
+
+Write-Host 'characterization/resume: missing job id is an exact usage error'
+$resumeNoId = Invoke-CcodexShell -Arguments @('resume')
+Assert-Equal $resumeNoId.ExitCode 2 'resume with no job id exits 2'
+Assert-Equal $resumeNoId.Text 'ccodex: resume requires a job id.' 'resume missing-id message is exact'
+
+Write-Host 'characterization/worker: the internal entrypoint requires --job-id (exact message), and stays hidden from help'
+$workerNoId = Invoke-CcodexShell -Arguments @('worker')
+Assert-Equal $workerNoId.ExitCode 2 'worker with no --job-id exits 2'
+Assert-Equal $workerNoId.Text 'ccodex: worker requires --job-id <id>.' 'worker missing --job-id message is exact'
+$workerHelp = Invoke-CcodexShell -Arguments @('worker', '--help')
+Assert-Equal $workerHelp.ExitCode 2 'worker --help is an unknown-command usage error (worker is help-hidden)'
+Assert-True ($workerHelp.Text -like "*command 'worker' is not implemented*") 'worker --help prints the unknown-command message'
+
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests

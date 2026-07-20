@@ -37,11 +37,11 @@
 # (amendment 2). Handlers read leftover flags from .Args via the existing Get-CcodexArgValue* /
 # ConvertTo-Ccodex* helpers, exactly as the arms did.
 
-# Command name -> dispatch handler function name. A command is "migrated" (router-dispatched)
-# exactly when it appears here; absent => the legacy switch still owns it. This map is grown one
-# command at a time across the migration commits; the switch is deleted once every command has an
-# entry. Keeping the mapping here (not a Migrated boolean scattered per entry) makes the migration
-# state a single readable list.
+# Command name -> dispatch handler function name. A command is "routed" exactly when it appears
+# here. Every command (including the internal `worker`) now has an entry, so the former
+# `switch ($Command)` dispatcher has been fully retired; the router is the only dispatch path.
+# Keeping the mapping here (not a Migrated boolean scattered per entry) makes the dispatch
+# inventory a single readable list and is the one place a new command (backlog #6-#13) registers.
 $script:CcodexCommandHandlers = @{
     # Read-only batch (migrated): job-state queries and log/diagnostic views.
     status = 'Invoke-CcodexStatusDispatch'
@@ -56,7 +56,12 @@ $script:CcodexCommandHandlers = @{
     apply   = 'Invoke-CcodexApplyDispatch'
     cleanup = 'Invoke-CcodexCleanupDispatch'
     doctor  = 'Invoke-CcodexDoctorDispatch'
-    # (remaining commands are added as they are migrated; absent => legacy switch owns them)
+    # Task-generating + internal batch (migrated): the switch is now fully retired.
+    run    = 'Invoke-CcodexRunDispatch'
+    submit = 'Invoke-CcodexSubmitDispatch'
+    resume = 'Invoke-CcodexResumeDispatch'
+    review = 'Invoke-CcodexReviewDispatch'
+    worker = 'Invoke-CcodexWorkerDispatch'
 }
 
 # Internal (non-help-visible) commands: valid to dispatch, but must NOT appear in the help

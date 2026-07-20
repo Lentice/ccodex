@@ -3103,6 +3103,370 @@ function Invoke-CcodexDoctorDispatch {
     $ExitCode.Value = $doctorResult.WrapperExitCode
 }
 
+function Invoke-CcodexRunDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Redirected stdin is read directly from the OS stream by
+    # Get-CcodexPromptContent (via [Console]::OpenStandardInput); the
+    # PowerShell pipeline ($input) path is intentionally not used here.
+    # See the header comment for why. The PipelineExpected/PipelineObjects
+    # parameters remain on Invoke-CcodexRun for direct/test callers.
+    $cmdArgs = $Context.Args
+    $Mode = $Context.Mode; $Access = $Context.Access; $Repo = $Context.Repo; $PromptFile = $Context.PromptFile
+    $PositionalTask = $Context.PositionalTask
+    $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--hard-timeout-sec'
+    # `--prompt-file` carries an internal hyphen, so PowerShell's -File binder cannot map
+    # it onto the -PromptFile script parameter (it lands in $cmdArgs instead, leaving
+    # $PromptFile empty and silently falling through to the stdin reader — a 2s stall then
+    # a confusing "redirected stdin produced no data" error). Parse it from $cmdArgs here,
+    # exactly like the other hyphenated flags; keep $PromptFile as the fallback so a direct
+    # `-PromptFile` caller still works.
+    $runPromptFile = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--prompt-file'
+    if (-not $runPromptFile) { $runPromptFile = $PromptFile }
+    # Opt-in bypass of codex's trusted-directory check for a non-git (or untrusted) target.
+    # Presence-only switch (no value), so a plain membership test in $cmdArgs is enough.
+    $runSkipGitRepoCheck = ($cmdArgs -contains '--skip-git-repo-check')
+    try {
+        $runModel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--model'
+        $runEffortText = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--effort'
+        $runGroup = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--group'
+        $runLabel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--label'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+    $runParams = @{
+        Mode             = $Mode
+        Access           = $Access
+        RepoOverride     = $Repo
+        PromptFile       = $runPromptFile
+        PositionalTask   = $PositionalTask
+        PipelineExpected = $false
+        PipelineObjects  = $null
+    }
+    if ($runHardTimeoutSecText) {
+        try {
+            $runParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $runHardTimeoutSecText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    if ($runSkipGitRepoCheck) { $runParams['SkipGitRepoCheck'] = $true }
+    if ($runModel) { $runParams['Model'] = $runModel }
+    if ($null -ne $runGroup) { $runParams['Group'] = $runGroup }
+    if ($null -ne $runLabel) { $runParams['Label'] = $runLabel }
+    if ($runEffortText) {
+        try {
+            $runParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $runEffortText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    $runResult = Invoke-CcodexRun @runParams
+    if ($runResult.WrapperExitCode -eq 0) {
+        Write-Output $runResult.Stdout
+    } else {
+        Write-Host $runResult.Message
+    }
+    $ExitCode.Value = $runResult.WrapperExitCode
+}
+
+function Invoke-CcodexSubmitDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Mirrors `run`'s pipeline/stdin capture (see the header comment). --state-root,
+    # --codex-path, --detach-mechanism are hidden test-support flags; production calls
+    # never pass them, so LocalAppDataRoot/AppDataRoot default to the real
+    # LOCALAPPDATA/APPDATA and the detached worker is launched via `cim` with no
+    # env-var dependence.
+    $cmdArgs = $Context.Args
+    $Mode = $Context.Mode; $Access = $Context.Access; $Repo = $Context.Repo; $PromptFile = $Context.PromptFile
+    $PositionalTask = $Context.PositionalTask
+    $submitStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $submitCodexPath = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--codex-path'
+    $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--detach-mechanism'
+    $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--hard-timeout-sec'
+    # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
+    # binder (internal hyphen), so parse it from $cmdArgs with $PromptFile as the fallback.
+    $submitPromptFile = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--prompt-file'
+    if (-not $submitPromptFile) { $submitPromptFile = $PromptFile }
+    $submitModel = $null
+    $submitEffortText = $null
+    $submitResumeParentJobId = $null
+    try {
+        $submitModel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--model'
+        $submitEffortText = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--effort'
+        $submitGroup = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--group'
+        $submitLabel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--label'
+        $submitResumeParentJobId = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--resume'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+
+    if ($submitResumeParentJobId) {
+        $submitHasInheritedOverride = $Mode -or $Access -or $Repo `
+            -or ($cmdArgs -contains '--mode') -or ($cmdArgs -contains '--access') -or ($cmdArgs -contains '--repo') `
+            -or ($cmdArgs -contains '--group') -or ($cmdArgs -contains '--label')
+        if ($submitHasInheritedOverride) {
+            Write-Host 'ccodex: submit --resume inherits mode, access, repo, group, and label from the parent job.'
+            $ExitCode.Value = 2
+            return
+        }
+    }
+
+    $submitParams = @{
+        Mode             = $Mode
+        Access           = $Access
+        RepoOverride     = $Repo
+        PromptFile       = $submitPromptFile
+        PositionalTask   = $PositionalTask
+        PipelineExpected = $false
+        PipelineObjects  = $null
+    }
+    if ($submitStateRoot) { $submitParams['LocalAppDataRoot'] = $submitStateRoot }
+    if ($submitCodexPath) { $submitParams['CodexPath'] = $submitCodexPath }
+    if ($submitDetachMechanism) { $submitParams['DetachMechanism'] = $submitDetachMechanism }
+    if ($submitHardTimeoutSecText) {
+        try {
+            $submitParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $submitHardTimeoutSecText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    if ($submitModel) { $submitParams['Model'] = $submitModel }
+    if ($null -ne $submitGroup) { $submitParams['Group'] = $submitGroup }
+    if ($null -ne $submitLabel) { $submitParams['Label'] = $submitLabel }
+    if ($submitResumeParentJobId) { $submitParams['ResumeParentJobId'] = $submitResumeParentJobId }
+    if ($submitEffortText) {
+        try {
+            $submitParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $submitEffortText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+
+    $submitResult = Invoke-CcodexSubmit @submitParams
+    if ($submitResult.WrapperExitCode -eq 0) {
+        Write-Output $submitResult.Stdout
+    } else {
+        Write-Host $submitResult.Message
+    }
+    $ExitCode.Value = $submitResult.WrapperExitCode
+}
+
+function Invoke-CcodexResumeDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Continue a finished job's Codex thread with a follow-up. The parent job id is the
+    # positional arg (lands in $PositionalTask, same declaration-order binding the other
+    # subcommands use); the follow-up itself comes from the standard prompt-source
+    # machinery (piped stdin at the shell, since the positional slot is the parent id).
+    # Pipeline/stdin capture mirrors run/submit exactly (PipelineExpected=$false; the OS
+    # stdin stream is read directly by Get-CcodexPromptContent). --state-root/--codex-path
+    # are hidden test-support flags; --hard-timeout-sec is a usage error on bad input (2).
+    $cmdArgs = $Context.Args
+    $Mode = $Context.Mode; $Access = $Context.Access; $Repo = $Context.Repo; $PromptFile = $Context.PromptFile
+    $resumeParentJobId = $Context.PositionalTask
+    $resumeStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $resumeCodexPath = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--codex-path'
+    $resumeHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--hard-timeout-sec'
+    $resumeModel = $null
+    $resumeEffortText = $null
+    try {
+        $resumeModel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--model'
+        $resumeEffortText = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--effort'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+    if (-not $resumeParentJobId) {
+        Write-Host "ccodex: resume requires a job id."
+        $ExitCode.Value = 2
+        return
+    }
+    # resume inherits mode/access/repo from the parent job verbatim, so it must not accept
+    # --mode/--access/--repo (which bind to $Mode/$Access/$Repo). A second positional after
+    # the job id ALSO binds to those params in declaration order, so the same guard rejects
+    # `ccodex resume <job> <text>` instead of silently dropping the text (the follow-up must
+    # come from stdin or --prompt-file). Reject before doing any work; --state-root/
+    # --codex-path/--hard-timeout-sec (hidden/supported flags) land in $cmdArgs and are unaffected.
+    $resumeReject = $null
+    if ($Repo)   { $resumeReject = '--repo' }
+    elseif ($Mode)   { $resumeReject = '--mode' }
+    elseif ($Access) { $resumeReject = '--access' }
+    elseif ($cmdArgs -contains '--group') { $resumeReject = '--group' }
+    elseif ($cmdArgs -contains '--label') { $resumeReject = '--label' }
+    if ($resumeReject) {
+        Write-Host "ccodex: resume does not accept $resumeReject or extra positional arguments; it inherits mode, access, repo, group, and label from the parent job. Pass only the job id (the follow-up text comes from stdin or --prompt-file)."
+        $ExitCode.Value = 2
+        return
+    }
+    # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
+    # binder (internal hyphen). Parse it from $cmdArgs (with $PromptFile as fallback) so the
+    # documented "follow-up from stdin or --prompt-file" actually works.
+    $resumePromptFile = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--prompt-file'
+    if (-not $resumePromptFile) { $resumePromptFile = $PromptFile }
+    $resumeParams = @{
+        ParentJobId      = $resumeParentJobId
+        PromptFile       = $resumePromptFile
+        PositionalTask   = $null
+        PipelineExpected = $false
+        PipelineObjects  = $null
+    }
+    if ($resumeStateRoot) { $resumeParams['LocalAppDataRoot'] = $resumeStateRoot }
+    if ($resumeCodexPath) { $resumeParams['CodexPath'] = $resumeCodexPath }
+    if ($resumeHardTimeoutSecText) {
+        try {
+            $resumeParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $resumeHardTimeoutSecText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    # Unlike --repo/--mode/--access above, --model/--effort are ACCEPTED on resume:
+    # they are per-invocation knobs (this follow-up's model/effort), not inherited
+    # parent context. They land in $cmdArgs (hyphenated flags never bind to the script
+    # params), so the rejection guard above never sees them.
+    if ($resumeModel) { $resumeParams['Model'] = $resumeModel }
+    if ($resumeEffortText) {
+        try {
+            $resumeParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $resumeEffortText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    $resumeResult = Invoke-CcodexResume @resumeParams
+    if ($resumeResult.WrapperExitCode -eq 0) {
+        Write-Output $resumeResult.Stdout
+    } else {
+        Write-Host $resumeResult.Message
+    }
+    $ExitCode.Value = $resumeResult.WrapperExitCode
+}
+
+function Invoke-CcodexWorkerDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Internal entrypoint only: launched by the (future) `submit` detached
+    # process, or directly in tests. Not documented/Claude-facing.
+    $cmdArgs = $Context.Args
+    $workerJobId = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--job-id'
+    $workerStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $workerCodexPath = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--codex-path'
+    # --model/--effort arrive on the wrapper-authored launch line built by
+    # Get-CcodexWorkerArgumentLine; effort was already validated by `submit`, so the
+    # internal worker entrypoint forwards both verbatim.
+    $workerModel = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--model'
+    $workerEffort = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--effort'
+    if (-not $workerJobId) {
+        Write-Host "ccodex: worker requires --job-id <id>."
+        $ExitCode.Value = 2
+        return
+    }
+    $workerParams = @{ JobId = $workerJobId }
+    if ($workerStateRoot) { $workerParams['StateRoot'] = $workerStateRoot }
+    if ($workerCodexPath) { $workerParams['CodexPath'] = $workerCodexPath }
+    if ($workerModel) { $workerParams['Model'] = $workerModel }
+    if ($workerEffort) { $workerParams['Effort'] = $workerEffort }
+    $workerResult = Invoke-CcodexWorker @workerParams
+    if ($workerResult.Message) {
+        Write-Host $workerResult.Message
+    }
+    $ExitCode.Value = $workerResult.WrapperExitCode
+}
+
+function Invoke-CcodexReviewDispatch {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][ref]$ExitCode)
+    # Sugar over the `run` pipeline (mode review, access read-only): compose a
+    # scoped-review prompt from the diff selector/paths, then hand the composed
+    # text to Invoke-CcodexRun as the positional task. No second execution path —
+    # same job artifacts, exit codes, and failure classification as `run`. Piped
+    # stdin is NOT consumed by review (the task text is the composed prompt).
+    # --repo binds to $Repo; --state-root/--codex-path are hidden test-support
+    # flags mirroring the other subcommands.
+    $cmdArgs = $Context.Args
+    $Access = $Context.Access; $Repo = $Context.Repo
+    $reviewRange = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--range'
+    $reviewStaged = ($cmdArgs -contains '--staged')
+    $reviewWorking = ($cmdArgs -contains '--working')
+    $reviewEmbedDiff = ($cmdArgs -contains '--embed-diff')
+    $reviewIntent = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--intent'
+    $reviewFocus = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--focus'
+    $reviewStateRoot = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--state-root'
+    $reviewCodexPath = Get-CcodexArgValue -ArgumentList $cmdArgs -FlagName '--codex-path'
+    $reviewModel = $null
+    $reviewEffortText = $null
+    try {
+        $reviewPaths = Get-CcodexArgValues -ArgumentList $cmdArgs -FlagName '--path'
+        $reviewModel = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--model'
+        $reviewEffortText = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--effort'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+
+    # Resolve the repo up front: the self-diff prompt names it and the embed form
+    # runs git from it. A bad --repo is a usage error (exit 2), same as `run`.
+    try {
+        $reviewRepoRoot = Resolve-CcodexRepo -RepoOverride $Repo
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+
+    try {
+        $reviewPrompt = Build-CcodexReviewPrompt -Range $reviewRange -Staged $reviewStaged -Working $reviewWorking `
+            -Paths $reviewPaths -Intent $reviewIntent -Focus $reviewFocus -EmbedDiff $reviewEmbedDiff -RepoRoot $reviewRepoRoot
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
+
+    $reviewParams = @{
+        Mode             = 'review'
+        Access           = $Access
+        RepoOverride     = $Repo
+        PromptFile       = $null
+        PositionalTask   = $reviewPrompt
+        PipelineExpected = $false
+        PipelineObjects  = $null
+    }
+    if ($reviewStateRoot) { $reviewParams['LocalAppDataRoot'] = $reviewStateRoot }
+    if ($reviewCodexPath) { $reviewParams['CodexPath'] = $reviewCodexPath }
+    if ($reviewModel) { $reviewParams['Model'] = $reviewModel }
+    if ($reviewEffortText) {
+        try {
+            $reviewParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $reviewEffortText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+
+    $reviewResult = Invoke-CcodexRun @reviewParams
+    if ($reviewResult.WrapperExitCode -eq 0) {
+        Write-Output $reviewResult.Stdout
+    } else {
+        Write-Host $reviewResult.Message
+    }
+    $ExitCode.Value = $reviewResult.WrapperExitCode
+}
+
 if ($ImportOnly) { return }
 
 $exitCode = 12
@@ -3139,15 +3503,13 @@ try {
     }
 
     # Data-driven dispatch (backlog #14). The registry (lib/CommandRegistry.ps1) is the single
-    # source of truth for which commands exist and which are router-dispatched. For a migrated
-    # command we resolve its handler and invoke it INLINE and UNCAPTURED so the handler's
-    # Write-Output flows straight to the real stdout (byte-identical to the legacy arm's
-    # Write-Output); the exit code comes back through a [ref], never the success stream (see the
-    # handler contract in lib/CommandRegistry.ps1). Commands not yet migrated fall through to the
-    # legacy `switch` below. As each arm moves into a handler, its `switch` case is removed and the
-    # registry gains its handler entry; this hybrid state is safe to pause at any commit. The
-    # dispatch path does NOT parse arguments or reject unknown flags — each handler keeps the exact
-    # parsing (and permissiveness) its arm had.
+    # source of truth for which commands exist. Every command resolves to an Invoke-Ccodex*Dispatch
+    # handler (defined above the -ImportOnly guard); we resolve it and invoke it INLINE and
+    # UNCAPTURED so the handler's Write-Output flows straight to the real stdout (byte-identical to
+    # the former switch arm's Write-Output), while its exit code comes back through a [ref], never
+    # the success stream (see the handler contract in lib/CommandRegistry.ps1). The dispatch path
+    # does NOT parse arguments or reject unknown flags — each handler keeps the exact parsing (and
+    # permissiveness) its arm had. Anything not in the registry inventory is an unknown command.
     $ccodexDispatchContext = [pscustomobject]@{
         Command        = $Command
         PositionalTask = $PositionalTask
@@ -3164,355 +3526,14 @@ try {
         exit $ccodexHandlerExit
     }
 
-    switch ($Command) {
-        'run' {
-            # Redirected stdin is read directly from the OS stream by
-            # Get-CcodexPromptContent (via [Console]::OpenStandardInput); the
-            # PowerShell pipeline ($input) path is intentionally not used here.
-            # See the header comment for why. The PipelineExpected/PipelineObjects
-            # parameters remain on Invoke-CcodexRun for direct/test callers.
-            $runHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            # `--prompt-file` carries an internal hyphen, so PowerShell's -File binder cannot map
-            # it onto the -PromptFile script parameter (it lands in $args instead, leaving
-            # $PromptFile empty and silently falling through to the stdin reader — a 2s stall then
-            # a confusing "redirected stdin produced no data" error). Parse it from $args here,
-            # exactly like the other hyphenated flags; keep $PromptFile as the fallback so a direct
-            # `-PromptFile` caller still works.
-            $runPromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
-            if (-not $runPromptFile) { $runPromptFile = $PromptFile }
-            # Opt-in bypass of codex's trusted-directory check for a non-git (or untrusted) target.
-            # Presence-only switch (no value), so a plain membership test in $args is enough.
-            $runSkipGitRepoCheck = ($args -contains '--skip-git-repo-check')
-            try {
-                $runModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
-                $runEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
-                $runGroup = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--group'
-                $runLabel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--label'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-            $runParams = @{
-                Mode             = $Mode
-                Access           = $Access
-                RepoOverride     = $Repo
-                PromptFile       = $runPromptFile
-                PositionalTask   = $PositionalTask
-                PipelineExpected = $false
-                PipelineObjects  = $null
-            }
-            if ($runHardTimeoutSecText) {
-                try {
-                    $runParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $runHardTimeoutSecText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            if ($runSkipGitRepoCheck) { $runParams['SkipGitRepoCheck'] = $true }
-            if ($runModel) { $runParams['Model'] = $runModel }
-            if ($null -ne $runGroup) { $runParams['Group'] = $runGroup }
-            if ($null -ne $runLabel) { $runParams['Label'] = $runLabel }
-            if ($runEffortText) {
-                try {
-                    $runParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $runEffortText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            $runResult = Invoke-CcodexRun @runParams
-            if ($runResult.WrapperExitCode -eq 0) {
-                Write-Output $runResult.Stdout
-            } else {
-                Write-Host $runResult.Message
-            }
-            $exitCode = $runResult.WrapperExitCode
-        }
-        'submit' {
-            # Mirrors `run`'s pipeline/stdin capture (see the header comment). --state-root,
-            # --codex-path, --detach-mechanism are hidden test-support flags; production calls
-            # never pass them, so LocalAppDataRoot/AppDataRoot default to the real
-            # LOCALAPPDATA/APPDATA and the detached worker is launched via `cim` with no
-            # env-var dependence.
-            $submitStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $submitCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-            $submitDetachMechanism = Get-CcodexArgValue -ArgumentList $args -FlagName '--detach-mechanism'
-            $submitHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
-            # binder (internal hyphen), so parse it from $args with $PromptFile as the fallback.
-            $submitPromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
-            if (-not $submitPromptFile) { $submitPromptFile = $PromptFile }
-            $submitModel = $null
-            $submitEffortText = $null
-            $submitResumeParentJobId = $null
-            try {
-                $submitModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
-                $submitEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
-                $submitGroup = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--group'
-                $submitLabel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--label'
-                $submitResumeParentJobId = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--resume'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-
-            if ($submitResumeParentJobId) {
-                $submitHasInheritedOverride = $Mode -or $Access -or $Repo `
-                    -or ($args -contains '--mode') -or ($args -contains '--access') -or ($args -contains '--repo') `
-                    -or ($args -contains '--group') -or ($args -contains '--label')
-                if ($submitHasInheritedOverride) {
-                    Write-Host 'ccodex: submit --resume inherits mode, access, repo, group, and label from the parent job.'
-                    $exitCode = 2
-                    break
-                }
-            }
-
-            $submitParams = @{
-                Mode             = $Mode
-                Access           = $Access
-                RepoOverride     = $Repo
-                PromptFile       = $submitPromptFile
-                PositionalTask   = $PositionalTask
-                PipelineExpected = $false
-                PipelineObjects  = $null
-            }
-            if ($submitStateRoot) { $submitParams['LocalAppDataRoot'] = $submitStateRoot }
-            if ($submitCodexPath) { $submitParams['CodexPath'] = $submitCodexPath }
-            if ($submitDetachMechanism) { $submitParams['DetachMechanism'] = $submitDetachMechanism }
-            if ($submitHardTimeoutSecText) {
-                try {
-                    $submitParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $submitHardTimeoutSecText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            if ($submitModel) { $submitParams['Model'] = $submitModel }
-            if ($null -ne $submitGroup) { $submitParams['Group'] = $submitGroup }
-            if ($null -ne $submitLabel) { $submitParams['Label'] = $submitLabel }
-            if ($submitResumeParentJobId) { $submitParams['ResumeParentJobId'] = $submitResumeParentJobId }
-            if ($submitEffortText) {
-                try {
-                    $submitParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $submitEffortText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-
-            $submitResult = Invoke-CcodexSubmit @submitParams
-            if ($submitResult.WrapperExitCode -eq 0) {
-                Write-Output $submitResult.Stdout
-            } else {
-                Write-Host $submitResult.Message
-            }
-            $exitCode = $submitResult.WrapperExitCode
-        }
-        'resume' {
-            # Continue a finished job's Codex thread with a follow-up. The parent job id is the
-            # positional arg (lands in $PositionalTask, same declaration-order binding the other
-            # subcommands use); the follow-up itself comes from the standard prompt-source
-            # machinery (piped stdin at the shell, since the positional slot is the parent id).
-            # Pipeline/stdin capture mirrors run/submit exactly (PipelineExpected=$false; the OS
-            # stdin stream is read directly by Get-CcodexPromptContent). --state-root/--codex-path
-            # are hidden test-support flags; --hard-timeout-sec is a usage error on bad input (2).
-            $resumeParentJobId = $PositionalTask
-            $resumeStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $resumeCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-            $resumeHardTimeoutSecText = Get-CcodexArgValue -ArgumentList $args -FlagName '--hard-timeout-sec'
-            $resumeModel = $null
-            $resumeEffortText = $null
-            try {
-                $resumeModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
-                $resumeEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-            if (-not $resumeParentJobId) {
-                Write-Host "ccodex: resume requires a job id."
-                $exitCode = 2
-                break
-            }
-            # resume inherits mode/access/repo from the parent job verbatim, so it must not accept
-            # --mode/--access/--repo (which bind to $Mode/$Access/$Repo). A second positional after
-            # the job id ALSO binds to those params in declaration order, so the same guard rejects
-            # `ccodex resume <job> <text>` instead of silently dropping the text (the follow-up must
-            # come from stdin or --prompt-file). Reject before doing any work; --state-root/
-            # --codex-path/--hard-timeout-sec (hidden/supported flags) land in $args and are unaffected.
-            $resumeReject = $null
-            if ($Repo)   { $resumeReject = '--repo' }
-            elseif ($Mode)   { $resumeReject = '--mode' }
-            elseif ($Access) { $resumeReject = '--access' }
-            elseif ($args -contains '--group') { $resumeReject = '--group' }
-            elseif ($args -contains '--label') { $resumeReject = '--label' }
-            if ($resumeReject) {
-                Write-Host "ccodex: resume does not accept $resumeReject or extra positional arguments; it inherits mode, access, repo, group, and label from the parent job. Pass only the job id (the follow-up text comes from stdin or --prompt-file)."
-                $exitCode = 2
-                break
-            }
-            # See the `run` branch: --prompt-file cannot bind to -PromptFile through the -File
-            # binder (internal hyphen). Parse it from $args (with $PromptFile as fallback) so the
-            # documented "follow-up from stdin or --prompt-file" actually works.
-            $resumePromptFile = Get-CcodexArgValue -ArgumentList $args -FlagName '--prompt-file'
-            if (-not $resumePromptFile) { $resumePromptFile = $PromptFile }
-            $resumeParams = @{
-                ParentJobId      = $resumeParentJobId
-                PromptFile       = $resumePromptFile
-                PositionalTask   = $null
-                PipelineExpected = $false
-                PipelineObjects  = $null
-            }
-            if ($resumeStateRoot) { $resumeParams['LocalAppDataRoot'] = $resumeStateRoot }
-            if ($resumeCodexPath) { $resumeParams['CodexPath'] = $resumeCodexPath }
-            if ($resumeHardTimeoutSecText) {
-                try {
-                    $resumeParams['HardTimeoutSec'] = ConvertTo-CcodexHardTimeoutSec -FlagName '--hard-timeout-sec' -ValueText $resumeHardTimeoutSecText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            # Unlike --repo/--mode/--access above, --model/--effort are ACCEPTED on resume:
-            # they are per-invocation knobs (this follow-up's model/effort), not inherited
-            # parent context. They land in $args (hyphenated flags never bind to the script
-            # params), so the rejection guard above never sees them.
-            if ($resumeModel) { $resumeParams['Model'] = $resumeModel }
-            if ($resumeEffortText) {
-                try {
-                    $resumeParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $resumeEffortText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-            $resumeResult = Invoke-CcodexResume @resumeParams
-            if ($resumeResult.WrapperExitCode -eq 0) {
-                Write-Output $resumeResult.Stdout
-            } else {
-                Write-Host $resumeResult.Message
-            }
-            $exitCode = $resumeResult.WrapperExitCode
-        }
-        'worker' {
-            # Internal entrypoint only: launched by the (future) `submit` detached
-            # process, or directly in tests. Not documented/Claude-facing.
-            $workerJobId = Get-CcodexArgValue -ArgumentList $args -FlagName '--job-id'
-            $workerStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $workerCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-            # --model/--effort arrive on the wrapper-authored launch line built by
-            # Get-CcodexWorkerArgumentLine; effort was already validated by `submit`, so the
-            # internal worker entrypoint forwards both verbatim.
-            $workerModel = Get-CcodexArgValue -ArgumentList $args -FlagName '--model'
-            $workerEffort = Get-CcodexArgValue -ArgumentList $args -FlagName '--effort'
-            if (-not $workerJobId) {
-                Write-Host "ccodex: worker requires --job-id <id>."
-                $exitCode = 2
-                break
-            }
-            $workerParams = @{ JobId = $workerJobId }
-            if ($workerStateRoot) { $workerParams['StateRoot'] = $workerStateRoot }
-            if ($workerCodexPath) { $workerParams['CodexPath'] = $workerCodexPath }
-            if ($workerModel) { $workerParams['Model'] = $workerModel }
-            if ($workerEffort) { $workerParams['Effort'] = $workerEffort }
-            $workerResult = Invoke-CcodexWorker @workerParams
-            if ($workerResult.Message) {
-                Write-Host $workerResult.Message
-            }
-            $exitCode = $workerResult.WrapperExitCode
-        }
-        'review' {
-            # Sugar over the `run` pipeline (mode review, access read-only): compose a
-            # scoped-review prompt from the diff selector/paths, then hand the composed
-            # text to Invoke-CcodexRun as the positional task. No second execution path —
-            # same job artifacts, exit codes, and failure classification as `run`. Piped
-            # stdin is NOT consumed by review (the task text is the composed prompt).
-            # --repo binds to $Repo; --state-root/--codex-path are hidden test-support
-            # flags mirroring the other subcommands.
-            $reviewRange = Get-CcodexArgValue -ArgumentList $args -FlagName '--range'
-            $reviewStaged = ($args -contains '--staged')
-            $reviewWorking = ($args -contains '--working')
-            $reviewEmbedDiff = ($args -contains '--embed-diff')
-            $reviewIntent = Get-CcodexArgValue -ArgumentList $args -FlagName '--intent'
-            $reviewFocus = Get-CcodexArgValue -ArgumentList $args -FlagName '--focus'
-            $reviewStateRoot = Get-CcodexArgValue -ArgumentList $args -FlagName '--state-root'
-            $reviewCodexPath = Get-CcodexArgValue -ArgumentList $args -FlagName '--codex-path'
-            $reviewModel = $null
-            $reviewEffortText = $null
-            try {
-                $reviewPaths = Get-CcodexArgValues -ArgumentList $args -FlagName '--path'
-                $reviewModel = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--model'
-                $reviewEffortText = Get-CcodexRequiredArgValue -ArgumentList $args -FlagName '--effort'
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-
-            # Resolve the repo up front: the self-diff prompt names it and the embed form
-            # runs git from it. A bad --repo is a usage error (exit 2), same as `run`.
-            try {
-                $reviewRepoRoot = Resolve-CcodexRepo -RepoOverride $Repo
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-
-            try {
-                $reviewPrompt = Build-CcodexReviewPrompt -Range $reviewRange -Staged $reviewStaged -Working $reviewWorking `
-                    -Paths $reviewPaths -Intent $reviewIntent -Focus $reviewFocus -EmbedDiff $reviewEmbedDiff -RepoRoot $reviewRepoRoot
-            } catch {
-                Write-Host $_.Exception.Message
-                $exitCode = 2
-                break
-            }
-
-            $reviewParams = @{
-                Mode             = 'review'
-                Access           = $Access
-                RepoOverride     = $Repo
-                PromptFile       = $null
-                PositionalTask   = $reviewPrompt
-                PipelineExpected = $false
-                PipelineObjects  = $null
-            }
-            if ($reviewStateRoot) { $reviewParams['LocalAppDataRoot'] = $reviewStateRoot }
-            if ($reviewCodexPath) { $reviewParams['CodexPath'] = $reviewCodexPath }
-            if ($reviewModel) { $reviewParams['Model'] = $reviewModel }
-            if ($reviewEffortText) {
-                try {
-                    $reviewParams['Effort'] = ConvertTo-CcodexEffort -FlagName '--effort' -ValueText $reviewEffortText
-                } catch {
-                    Write-Host $_.Exception.Message
-                    $exitCode = 2
-                    break
-                }
-            }
-
-            $reviewResult = Invoke-CcodexRun @reviewParams
-            if ($reviewResult.WrapperExitCode -eq 0) {
-                Write-Output $reviewResult.Stdout
-            } else {
-                Write-Host $reviewResult.Message
-            }
-            $exitCode = $reviewResult.WrapperExitCode
-        }
-        default {
-            Write-Host (Get-CcodexUnknownCommandText -Command $Command)
-            $exitCode = 2
-        }
-    }
+    # Every command is now registry-dispatched, so reaching here means $Command is not in the
+    # registry inventory: it is unknown. The displayed "Supported commands" list stays the
+    # help-visible set (Get-CcodexCommandNames), so the internal `worker` — which IS in the
+    # inventory and therefore never lands here — is not advertised, byte-identical to the former
+    # `default` switch arm.
+    Write-Host (Get-CcodexUnknownCommandText -Command $Command)
+    $exitCode = 2
+    exit $exitCode
 } catch {
     Write-Host "ccodex: internal error: $($_.Exception.Message)"
     $exitCode = 12
