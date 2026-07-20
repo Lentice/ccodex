@@ -54,6 +54,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Worker.ps1')
 . (Join-Path $PSScriptRoot 'lib\Detach.ps1')
 . (Join-Path $PSScriptRoot 'lib\ReviewPrompt.ps1')
+. (Join-Path $PSScriptRoot 'lib\ReviewFindings.ps1')
 . (Join-Path $PSScriptRoot 'lib\UserConfig.ps1')
 . (Join-Path $PSScriptRoot 'lib\Cleanup.ps1')
 . (Join-Path $PSScriptRoot 'lib\Worktree.ps1')
@@ -1044,7 +1045,11 @@ function Invoke-CcodexSubmit {
 function New-CcodexLifecycleErrorResult {
     param(
         [Parameter(Mandatory)][string]$JobId,
-        [Parameter(Mandatory)][string]$ErrorMessage
+        [Parameter(Mandatory)][string]$ErrorMessage,
+        # Opt-in: wait/read error envelopes carry findings: null so the key is always present
+        # for those two commands (backlog #19 amendment #3). status --json shares this helper but
+        # must NOT gain a findings key, so it leaves the switch off.
+        [switch]$IncludeFindings
     )
 
     $envelope = [ordered]@{
@@ -1055,6 +1060,7 @@ function New-CcodexLifecycleErrorResult {
         job_dir           = $null
         command_exit_code = 3
     }
+    if ($IncludeFindings) { $envelope['findings'] = $null }
     return [pscustomobject]@{ WrapperExitCode = 3; Stdout = ($envelope | ConvertTo-Json -Depth 10); Message = $null }
 }
 
@@ -1076,6 +1082,7 @@ function New-CcodexWaitJsonResult {
         codex_exit_code   = if ($StatusObject) { $StatusObject.codex_exit_code } else { $null }
         wrapper_exit_code = if ($StatusObject) { $StatusObject.wrapper_exit_code } else { $null }
         result            = $Result
+        findings          = (Get-CcodexReviewFindings -ResultContent $Result)
         timeout_reason    = if ($StatusObject) { $StatusObject.timeout_reason } else { $null }
         health            = if ($Reconciliation.PossiblyStale) { 'possibly-stale' } else { $null }
         job_dir           = $JobDir
@@ -1103,6 +1110,7 @@ function New-CcodexReadJsonResult {
         finished          = $Finished
         result_present    = $ResultPresent
         result            = $Result
+        findings          = (Get-CcodexReviewFindings -ResultContent $Result)
         health            = if ($Reconciliation.PossiblyStale) { 'possibly-stale' } else { $null }
         job_dir           = $JobDir
         command_exit_code = $CommandExitCode
@@ -1223,7 +1231,7 @@ function Invoke-CcodexWaitCommand {
         $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
     } catch {
         if ($Json) {
-            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message)
+            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message -IncludeFindings)
         }
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }
@@ -1435,7 +1443,7 @@ function Invoke-CcodexReadCommand {
         $record = Get-CcodexJobRecord -JobId $JobId -Root $StateRoot
     } catch {
         if ($Json) {
-            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message)
+            return (New-CcodexLifecycleErrorResult -JobId $JobId -ErrorMessage $_.Exception.Message -IncludeFindings)
         }
         return [pscustomobject]@{ WrapperExitCode = 3; Stdout = $null; Message = $_.Exception.Message }
     }

@@ -102,13 +102,23 @@ try {
     $doneDir = Add-WaitJob '20260716T000003Z-cccccccc-test' running 0 g1 success
     $failedDir = Add-WaitJob '20260716T000002Z-bbbbbbbb-test' running 0 g1 failure
     $cancelDir = Add-WaitJob '20260716T000001Z-aaaaaaaa-test' running 0 g1 cancelled
+    $script:findingsBlockResult = @'
+Prose review.
+
+<!-- ccodex:findings -->
+```json
+{ "verdict": "batch verdict", "items": [ { "severity": "critical", "file": "x.ps1", "line": 9, "claim": "boom", "evidence": "e", "suggested_fix": "f" } ] }
+```
+'@
+    $script:findingsDir = Add-WaitJob '20260716T000008Z-hhhhhhhh-test' running 0 fgrp x
     $script:checks = 0
     function Update-CcodexOrphanStatus {
         param([string]$JobDir, [int]$LockTimeoutSec)
         $script:checks++
         $s = Read-CcodexStatusFile -JobDir $JobDir
         if ($s.status -eq 'running') {
-            if ($JobDir -eq $doneDir -or $JobDir -notin @($failedDir, $cancelDir, $script:soloCancelDir)) { $s.status = 'done'; $s.wrapper_exit_code = 0; $s.codex_exit_code = 0; Write-CcodexTextFile -Path (Join-Path $JobDir result.md) -Content 'SECRET-RESULT' }
+            if ($JobDir -eq $script:findingsDir) { $s.status = 'done'; $s.wrapper_exit_code = 0; $s.codex_exit_code = 0; Write-CcodexTextFile -Path (Join-Path $JobDir result.md) -Content $script:findingsBlockResult }
+            elseif ($JobDir -eq $doneDir -or $JobDir -notin @($failedDir, $cancelDir, $script:soloCancelDir)) { $s.status = 'done'; $s.wrapper_exit_code = 0; $s.codex_exit_code = 0; Write-CcodexTextFile -Path (Join-Path $JobDir result.md) -Content 'SECRET-RESULT' }
             elseif ($JobDir -eq $failedDir) { $s.status = 'failed'; $s.wrapper_exit_code = 10 }
             elseif ($JobDir -eq $script:soloCancelDir) { $s.status = 'cancelled'; $s.wrapper_exit_code = 22 }
             else { $s.status = 'cancelled'; $s.wrapper_exit_code = 22 }
@@ -124,12 +134,22 @@ try {
     Assert-Equal $mixedJson.summary.succeeded 1
     Assert-Equal $mixedJson.summary.failed 1
     Assert-Equal $mixedJson.summary.cancelled 1
-    Assert-Equal @($mixedJson.jobs[0].PSObject.Properties).Count 10
+    Assert-Equal @($mixedJson.jobs[0].PSObject.Properties).Count 11
+    Assert-True ($mixedJson.jobs[0].PSObject.Properties.Name -contains 'findings') 'each nested wait --all envelope carries a findings key'
+    Assert-True ($null -eq $mixedJson.jobs[0].findings) 'a reconciled job whose result has no findings block reports findings: null'
     Add-WaitJob '20260716T000007Z-gggggggg-test' running 0 human x | Out-Null
     $human = Invoke-CcodexWaitAllCommand -StateRoot $root -Group human
     Assert-True ($human.Stdout -match '  done  exit=0') 'human mode prints one terminal line'
     Assert-True ($human.Stdout -match 'ccodex: 1 jobs') 'human mode prints summary'
     Assert-True ($human.Stdout -notmatch 'SECRET-RESULT') 'human batch mode does not print result content'
+
+    Write-Host 'wait --all nested envelope carries parsed findings when a reconciled result has a block'
+    $fgrp = Invoke-CcodexWaitAllCommand -StateRoot $root -Group fgrp -Json
+    $fgrpJson = $fgrp.Stdout | ConvertFrom-Json
+    Assert-Equal $fgrpJson.jobs.Count 1 'findings-group batch has one job'
+    Assert-True ($null -ne $fgrpJson.jobs[0].findings) 'reconciled findings-bearing result yields parsed findings in the batch entry'
+    Assert-Equal $fgrpJson.jobs[0].findings.verdict 'batch verdict' 'batch entry findings verdict parsed'
+    Assert-Equal $fgrpJson.jobs[0].findings.items[0].severity 'critical' 'batch entry findings item parsed'
 
     Write-Host 'cancelled-only precedence'
     $script:soloCancelDir = Add-WaitJob '20260716T000005Z-eeeeeeee-test' running 0 solo x

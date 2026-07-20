@@ -46,6 +46,7 @@ function New-CcodexTestJobWithStatus {
         [switch]$WithExitCodeEvidence,
         [int]$EvidenceExitCode = 0,
         [switch]$WithResultFile,
+        [string]$ResultContent = 'the result',
         [string]$LastHeartbeatAt = $null,
         [string]$StartedAt = $null,
         [string]$ParentJobId = $null,
@@ -66,7 +67,7 @@ function New-CcodexTestJobWithStatus {
         Write-CcodexTextFile -Path (Join-Path $jobDir 'exit_code.txt') -Content "$EvidenceExitCode"
     }
     if ($WithResultFile) {
-        Write-CcodexTextFile -Path (Join-Path $jobDir 'result.md') -Content 'the result'
+        Write-CcodexTextFile -Path (Join-Path $jobDir 'result.md') -Content $ResultContent
     }
     return [pscustomobject]@{ JobId = $jobId; JobDir = $jobDir }
 }
@@ -624,6 +625,68 @@ $shellReadUnknownJsonExit = $LASTEXITCODE
 $shellReadUnknownJson = ($shellReadUnknownJsonOut -join "`n") | ConvertFrom-Json
 Assert-Equal $shellReadUnknownJsonExit 3 'shell-level read --json unknown exits 3'
 Assert-True (-not [string]::IsNullOrEmpty($shellReadUnknownJson.error)) 'shell-level read --json unknown emits error envelope'
+
+# ============================================================
+# Structured findings in wait/read (and error) envelopes (backlog #19, ticket 2/#7)
+# ============================================================
+
+$findingsResult = @'
+Prose review goes here, severity-ordered as usual.
+
+<!-- ccodex:findings -->
+```json
+{
+  "verdict": "one important issue",
+  "items": [
+    {
+      "severity": "important",
+      "file": "lib/Thing.ps1",
+      "line": 42,
+      "claim": "off-by-one in the loop bound",
+      "evidence": "the diff uses -le where -lt is required",
+      "suggested_fix": "change -le to -lt"
+    }
+  ]
+}
+```
+'@
+
+Write-Host "wait --json: a done job whose result carries a valid findings block -> parsed findings"
+$jobFindings = New-CcodexTestJobWithStatus -Status 'done' -CodexExitCode 0 -WrapperExitCode 0 -WithResultFile -ResultContent $findingsResult
+$waitFindingsJson = (Invoke-CcodexWaitCommand -JobId $jobFindings.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($waitFindingsJson.PSObject.Properties.Name -contains 'findings') 'wait --json always includes a findings key'
+Assert-True ($null -ne $waitFindingsJson.findings) 'wait --json parses a present findings block'
+Assert-Equal $waitFindingsJson.findings.verdict 'one important issue' 'wait --json findings carries the verdict'
+Assert-Equal @($waitFindingsJson.findings.items).Count 1 'wait --json findings carries one item'
+Assert-Equal $waitFindingsJson.findings.items[0].severity 'important' 'wait --json finding item severity parsed'
+Assert-Equal $waitFindingsJson.findings.items[0].line 42 'wait --json finding item line parsed'
+Assert-Equal $waitFindingsJson.result $findingsResult 'wait --json result content is byte-unchanged (raw, with the appendix)'
+
+Write-Host "read --json: the same job -> identical parsed findings"
+$readFindingsJson = (Invoke-CcodexReadCommand -JobId $jobFindings.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($readFindingsJson.PSObject.Properties.Name -contains 'findings') 'read --json always includes a findings key'
+Assert-Equal $readFindingsJson.findings.verdict 'one important issue' 'read --json findings verdict matches wait'
+Assert-Equal $readFindingsJson.findings.items[0].claim 'off-by-one in the loop bound' 'read --json finding item claim matches'
+
+Write-Host "wait/read --json: a done job with NO block -> findings present and null"
+$waitNoBlockJson = (Invoke-CcodexWaitCommand -JobId $jobWaitDone.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($waitNoBlockJson.PSObject.Properties.Name -contains 'findings') 'wait --json includes findings key even with no block'
+Assert-True ($null -eq $waitNoBlockJson.findings) 'wait --json findings is null when the result has no block'
+$readNoBlockJson = (Invoke-CcodexReadCommand -JobId $jobReadDone.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($readNoBlockJson.PSObject.Properties.Name -contains 'findings') 'read --json includes findings key even with no block'
+Assert-True ($null -eq $readNoBlockJson.findings) 'read --json findings is null when the result has no block'
+
+Write-Host "wait/read --json error envelopes carry findings: null; status --json does NOT gain findings"
+$waitErrFindingsJson = (Invoke-CcodexWaitCommand -JobId 'does-not-exist-findings' -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($waitErrFindingsJson.PSObject.Properties.Name -contains 'findings') 'wait --json error envelope includes findings key'
+Assert-True ($null -eq $waitErrFindingsJson.findings) 'wait --json error envelope findings is null'
+$readErrFindingsJson = (Invoke-CcodexReadCommand -JobId 'does-not-exist-findings' -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True ($readErrFindingsJson.PSObject.Properties.Name -contains 'findings') 'read --json error envelope includes findings key'
+Assert-True ($null -eq $readErrFindingsJson.findings) 'read --json error envelope findings is null'
+$statusErrFindingsJson = (Invoke-CcodexStatusCommand -JobId 'does-not-exist-findings' -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True (-not ($statusErrFindingsJson.PSObject.Properties.Name -contains 'findings')) 'status --json error envelope does NOT gain a findings key'
+$statusOkFindingsJson = (Invoke-CcodexStatusCommand -JobId $jobDone.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+Assert-True (-not ($statusOkFindingsJson.PSObject.Properties.Name -contains 'findings')) 'status --json success envelope does NOT gain a findings key'
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 Complete-CcodexTests
