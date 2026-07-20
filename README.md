@@ -199,6 +199,15 @@ ccodex read <child_job_id>
 fields stay present with `null` values when unavailable, so automation can parse a stable shape.
 As with `list --json`, the top-level `schema_version` is `1`.
 
+**Structured review findings.** A `ccodex review` result ends with a machine-readable appendix
+(a `<!-- ccodex:findings -->` marker + a `json` block). `read --json` and `wait --json` (and each
+per-job entry in `wait --all --json`) parse it into a `findings` field — `{ verdict, items[] }`,
+each item `{ severity, file, line, claim, evidence, suggested_fix }` — so per-finding triage
+consumes structured data instead of re-segmenting prose. `findings` is always present on those
+commands and is `null` when the result has no valid block (older jobs, non-review jobs, malformed
+output), where callers fall back to the prose `result`. This is an append-only addition;
+`schema_version` stays `1` and the raw `result` text is unchanged.
+
 **List jobs** (newest first) — the enumeration endpoint for orchestrating several jobs:
 
 ```powershell

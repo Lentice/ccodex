@@ -104,6 +104,12 @@ Notes:
   the job's recorded `wrapper_exit_code`. Lifecycle fields are always present (`null` when
   unavailable); `wait`/`read` place result text in `result`. Without `--json`, human text remains
   the default. A missing job id (usage exit `2`) is still human text.
+- `read --json`/`wait --json` (and each `wait --all --json` entry) also carry a `findings` field:
+  when non-null, a `ccodex review` result has been parsed into `{ verdict, items[] }` (each item
+  `{ severity, file, line, claim, evidence, suggested_fix }`). Triage `findings.items` directly —
+  one entry per finding — instead of re-segmenting the prose. When `findings` is `null` (no
+  appendix, older/non-review job, malformed block), fall back to the prose `result`. A resumed
+  review job won't include the appendix unless you restate the marker instruction in the follow-up.
 - ALWAYS pass `--embed-diff` on `review` unless you have verified this host's Codex sandbox can
   spawn processes: the wrapper runs `git diff` itself and embeds a size-capped diff (on many
   hosts Codex cannot run git; signature: `CreateProcessWithLogonW failed: 1385`). If the

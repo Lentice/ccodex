@@ -107,6 +107,12 @@ child id with `wait`/`read`. It shares the same preconditions and exit semantics
 parent's mode/access/repo/group/label, and returns immediately; never override those inherited
 fields. `--model`/`--effort` remain valid per-follow-up knobs.
 
+A resumed review job does **not** re-compose the review prompt (the follow-up carries only your
+reply), so its result will not contain the structured findings appendix unless you ask for it: if
+you want structured `findings` back from a follow-up, restate the appendix instruction in the
+resume text (a line with the `<!-- ccodex:findings -->` marker followed by a `json` block of
+`{ verdict, items[] }`).
+
 ## Triage every finding
 
 Never adopt a Codex finding uncritically and never dismiss one without checking it. For each
@@ -114,14 +120,23 @@ finding: verify it against the actual code/diff, then explicitly adopt it (and a
 reject it with a stated reason. Summarize adopted and rejected findings distinctly when reporting
 back to the user — do not present Codex's raw output as your own conclusion.
 
+**Enumerate findings from the structured field first.** When you collect a `review` job with
+`ccodex read <id> --json` or `ccodex wait <id> --json` (or a batch with `wait --all --json`), the
+envelope carries a `findings` field. When it is non-null, iterate `findings.items` — each is
+`{ severity, file, line, claim, evidence, suggested_fix }` — and triage one item per entry, so no
+finding is lost to prose mis-segmentation. Only when `findings` is `null` (an older job, a
+non-review job, or a result without the appendix) fall back to segmenting the prose `result`
+yourself. The structured field is an accelerator, not a different contract: triage each item
+exactly as above, and `findings.verdict` mirrors the prose one-line verdict.
+
 ## Failure reactions
 
 When checking a background job, call `ccodex status <job_id> --json`, `ccodex wait <job_id>
 --json`, or `ccodex read <job_id> --json`. Parse the top-level `schema_version: 1` lifecycle
 envelope instead of scraping human output. Its `command_exit_code` matches the process exit and
 is separate from the job's recorded `wrapper_exit_code`; fields remain present with `null` when
-unavailable, and `wait`/`read` return content in `result`. A missing job id is still a human usage
-error (exit `2`).
+unavailable, and `wait`/`read` return content in `result` plus a structured `findings` field for
+review results (see Triage). A missing job id is still a human usage error (exit `2`).
 
 For fan-out/gather, submit jobs with a shared `--group <g>` (and optional `--label <l>`), then
 use `ccodex wait --all --group <g> --json` once instead of hand-written polling loops.

@@ -27,6 +27,7 @@ and the delegation-run issue record
 | 12. `apply --message <msg>` / `--reset-author` (single-commit operator identity) | f669eec |
 | 14. Dispatcher → data-driven command registry (enabler for #6–#13) | 246d5f3 / 025ccd1 / 27200bb / 5e89a7e |
 | 16. Zero-wait orphan reconciliation on the `status`/`read`/`wait`/`wait --all` lifecycle polling paths | landed 2026-07-20 |
+| 19. Structured review findings schema (parser + `findings` in `read`/`wait`/`wait --all` `--json`; review-prompt appendix) | 394e73b / ee58261 / cfaec83 / 047c7c2 (+ docs) |
 
 ## Open — curated backlog items (user picks)
 
@@ -71,8 +72,18 @@ consumability of Codex's output and quota economics dominate per-delegation cost
 
 | # | Item | Tier | Notes |
 |---|---|---|---|
-| 19 | Structured review findings schema | 2 | The installed rule mandates per-finding triage (adopt/reject each one), but `ccodex review` returns free-form prose the agent must segment itself — mis-segmentation loses findings. Have the review worker prompt require a fixed per-finding schema (severity / file / claim / evidence), validate it wrapper-side, and expose it as a structured field in `result`. Touches only the review prompt template + result validation, not the lifecycle contract. Complements #10 (review profiles): profiles shape the prompt IN, this shapes findings OUT — spec them together if both are picked. |
 | 20 | Fan-out concurrency cap (`max_parallel` queue for `submit`) | 3 | `submit` + `--group` encourages fan-out with no guard against launching N jobs that exhaust quota or local resources at once. A simple config-driven cap: jobs beyond the limit queue as `created` and start as slots free. Defensive; lower priority than 19. |
+
+> **#19 landed (2026-07-20, commits 394e73b / ee58261 / cfaec83 / 047c7c2 + this docs commit).** Shipped
+> as four tracer-bullet tickets: `lib/ReviewFindings.ps1` parser (hint-only, degrade-to-null), the
+> review-prompt findings appendix in the shared instruction block (both self-diff/embed forms), and a
+> `findings` field in the `read`/`wait`/`wait --all` `--json` envelopes (plus `findings: null` on
+> their error envelopes; `status --json` untouched). **Correction to the original note:** this
+> *is* an append-only **lifecycle envelope** addition (the note above claimed it touched "not the
+> lifecycle contract") — `findings` is a new always-present key on `read`/`wait`; `schema_version`
+> stays `1` and no existing key changed meaning. It was implemented via envelope wiring rather than
+> result-file rewriting, so the raw `result` content is byte-unchanged. See the reference's
+> **findings field** note and the `review` section.
 
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 

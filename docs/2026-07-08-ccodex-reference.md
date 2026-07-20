@@ -208,6 +208,19 @@ file:line and a suggested fix per finding, plus a one-line verdict — success p
 to stdout, and failures behave exactly like a failed `run` (same exit codes and
 `failure_reason` hints).
 
+The review prompt also instructs Codex to append, after the prose review, one machine-readable
+findings block: a line containing `<!-- ccodex:findings -->` followed by a ```` ```json ```` fence
+carrying `{ verdict, items[] }` (each item `{ severity, file, line, claim, evidence,
+suggested_fix }`). The prose review stays first; the block is an appendix. Collecting the result
+with `read --json`/`wait --json` (or `wait --all --json`) parses this appendix into a structured
+`findings` field so per-finding triage consumes structured data instead of re-segmenting prose —
+see the **findings field** note in the JSON-envelope section. When the appendix is absent or
+malformed, `findings` is `null` and callers fall back to the prose result. The instruction lives
+in the shared instruction block, so the self-diff and `--embed-diff` forms cannot diverge. A
+resumed review job (`resume`/`submit --resume`) does **not** re-compose the review prompt, so if
+structured findings are wanted from a follow-up the appendix instruction must be restated in that
+follow-up.
+
 **Submodule scoping:** when the change under review lives inside a git submodule, point `--repo`
 directly at the submodule instead of the superproject, so the diff and path scoping resolve
 against the submodule's own history:
@@ -412,7 +425,8 @@ The same collection flow applies to a child returned by `submit --resume <parent
 exact case-sensitive group, label, and repo. Later submissions are excluded. The timeout applies
 to the whole batch; zero matches exit 0. Human output is one line per resolved job plus a summary.
 JSON contains ordered `schema_version`, `jobs`, `summary`, and `command_exit_code`; every nested
-job is the unchanged single-job wait envelope. Summary fields are `total`, `succeeded`, `failed`,
+job is the unchanged single-job wait envelope, so each carries a `findings` key (see the
+**findings field** note under `wait --json`). Summary fields are `total`, `succeeded`, `failed`,
 `timed_out`, `no_result`, `cancelled`, and `wait_timeout`. Exit precedence is 3, 20, 12, 10, 24,
 11, 22, 0. A job id with `--all`, or group/label without `--all`, is exit 2. Single-job wait is
 unchanged.
@@ -463,24 +477,45 @@ from `wrapper_exit_code`, which is the job's recorded wrapper exit in `status.js
 
 **`read --json` envelope contract:**
 
-- Fields: `schema_version`, `job_id`, `status`, `finished`, `result_present`, `result`, `health`,
-  `job_dir`, `command_exit_code`.
+- Fields: `schema_version`, `job_id`, `status`, `finished`, `result_present`, `result`,
+  `findings`, `health`, `job_dir`, `command_exit_code`.
 - `finished` means the status is `done`, `failed`, `timed_out`, or `cancelled`.
   `result_present` reflects result validation and `result` is the full `result.md` text only when
-  usable. Exit/code pairs are success `0`, unfinished `4`, terminal missing/empty result `11`,
-  and unknown job `3` (using the same error envelope shape as `status`).
+  usable. `findings` is the structured review-findings appendix parsed out of `result` (see
+  **findings field** below), or `null`. Exit/code pairs are success `0`, unfinished `4`, terminal
+  missing/empty result `11`, and unknown job `3` (using the same error envelope shape as `status`,
+  which for `read`/`wait` also carries `findings: null`).
 
 **`wait --json` envelope contract:**
 
 - Fields: `schema_version`, `job_id`, `status`, `codex_exit_code`, `wrapper_exit_code`, `result`,
-  `timeout_reason`, `health`, `job_dir`, `command_exit_code`.
+  `findings`, `timeout_reason`, `health`, `job_dir`, `command_exit_code`.
 - It blocks and polls exactly like human-mode `wait`, then emits one envelope. Exit/code pairs
   are done with a valid result `0`, done with no usable result `11`, failed `10`/`11`/`12` as
   recorded and validated, hard timed-out `24` by default (or the recorded wrapper exit),
   cancelled `22`, wait's own elapsed `--wait-timeout-sec` `20`, and unknown job `3` (the shared
-  error shape). `timeout_reason` surfaces the recorded hard-timeout reason. On wait's own timeout,
-  `status` is the current non-terminal state and `health` may be `possibly-stale`; the command does
-  not modify `status.json`.
+  error shape, which for `read`/`wait` also carries `findings: null`). `findings` is the parsed
+  review-findings appendix (see **findings field** below), or `null`. `timeout_reason` surfaces the
+  recorded hard-timeout reason. On wait's own timeout, `status` is the current non-terminal state
+  and `health` may be `possibly-stale`; the command does not modify `status.json`.
+
+**findings field (`read`/`wait`, and `wait --all` per-job entries):**
+
+- `read --json`, `wait --json`, and each per-job entry inside `wait --all --json` carry a
+  `findings` key. It is **always present** on those commands (append-only addition, backlog #19;
+  `schema_version` stays `1`) and is either `null` or a `{ verdict, items[] }` object. `status
+  --json` does **not** carry `findings`.
+- The value is parsed opportunistically from the job's `result` content: a `ccodex review` result
+  ends with a machine-readable appendix — a line containing
+  `<!-- ccodex:findings -->` followed by a ```` ```json ```` fenced block. When present and valid,
+  `findings.verdict` is a one-line string (or `null`) and `findings.items` is an array of
+  `{ severity, file, line, claim, evidence, suggested_fix }` objects (`severity` and `claim`
+  always present; the other four may be `null`). Parsing is job-type agnostic — any result that
+  ends with the same block yields findings; anything else (older jobs, non-review jobs, malformed
+  blocks) yields `findings: null`, and the caller falls back to reading the prose `result`.
+- The wrapper's formatting of `result` is unchanged: `findings` is derived from the raw `result`
+  text, which is itself byte-identical to before. Only the content Codex produces gained the JSON
+  appendix; the wrapper adds nothing to `result` and never rejects a result for lacking the block.
 
 **`doctor --json` envelope contract:**
 

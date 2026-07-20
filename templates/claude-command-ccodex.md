@@ -134,7 +134,10 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
    `schema_version: 1` envelope instead of scraping human text. `command_exit_code` matches the
    process exit and is distinct from the job's recorded `wrapper_exit_code`; lifecycle fields are
    present with `null` when unavailable, and `wait`/`read` carry result text in `result`. Missing
-   job id remains a human usage error (exit `2`).
+   job id remains a human usage error (exit `2`). `read`/`wait` (and each `wait --all` entry) also
+   carry a `findings` field: when non-null, the `review` result was parsed into
+   `{ verdict, items[] }` — triage `findings.items` one entry at a time rather than re-segmenting
+   the prose; when `null`, fall back to the prose `result`.
 
 7. **Read stdout as the worker's final answer** for synchronous commands. For `wait --json` and
    `read --json`, read the envelope's `result` field. Do not parse prose from stderr to decide
@@ -207,5 +210,7 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
 
 10. **Merge Codex's findings into your own judgment.** Treat the result as input from a capable
    subagent, not as ground truth — you remain the final decision-maker on what to do with it.
-   The same applies to a delegated implementation: `ccodex apply` lands exactly what the diff
-   showed, nothing more — you decide whether it's landed, not Codex.
+   When the collected envelope's `findings` field is non-null, enumerate `findings.items` and
+   triage each one (verify, then adopt or reject with a reason); when it is `null`, segment the
+   prose `result` yourself. The same applies to a delegated implementation: `ccodex apply` lands
+   exactly what the diff showed, nothing more — you decide whether it's landed, not Codex.
