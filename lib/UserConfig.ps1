@@ -4,6 +4,15 @@ $script:CcodexRetentionDefaults = @{
     thread_ttl_days = 30
 }
 
+# Per-field lower bounds. jobs_days must be >= 1: with jobs_days = 0 the cleanup guard
+# (ageDays -gt jobsDays) matches every terminal job, so a plain `ccodex cleanup` would wipe
+# them all (including seconds-old, un-applied implement jobs). thread_ttl_days = 0 is a
+# legitimate explicit "scrub thread ids immediately" choice, so its minimum stays 0.
+$script:CcodexRetentionMinimums = @{
+    jobs_days       = 1
+    thread_ttl_days = 0
+}
+
 function Get-CcodexUserConfig {
     param(
         [string]$AppDataRoot = $env:APPDATA
@@ -41,8 +50,9 @@ function Get-CcodexUserConfig {
         if ($asDouble -ne [Math]::Truncate($asDouble)) {
             throw "ccodex: invalid config.json: retention.$key must be a whole number of days, not fractional (got '$value')"
         }
-        if ($asDouble -lt 0 -or $asDouble -gt [int]::MaxValue) {
-            throw "ccodex: invalid config.json: retention.$key must be between 0 and $([int]::MaxValue) (got '$value')"
+        $min = $script:CcodexRetentionMinimums[$key]
+        if ($asDouble -lt $min -or $asDouble -gt [int]::MaxValue) {
+            throw "ccodex: invalid config.json: retention.$key must be between $min and $([int]::MaxValue) (got '$value')"
         }
         $value = [int]$asDouble
 

@@ -167,4 +167,45 @@ try {
     Remove-Item -Recurse -Force $appData
 }
 
+Write-Host "jobs_days: 0 throws (would make cleanup wipe every terminal job)"
+$appData = New-CcodexTempAppData
+try {
+    New-Item -ItemType Directory -Path (Join-Path $appData 'ccodex') -Force | Out-Null
+    $json = @'
+{
+  "retention": {
+    "jobs_days": 0
+  }
+}
+'@
+    Set-Content -Path (Join-Path $appData 'ccodex/config.json') -Value $json -NoNewline -Encoding utf8
+    Assert-Throws { Get-CcodexUserConfig -AppDataRoot $appData } 'jobs_days: 0 throws'
+    try {
+        Get-CcodexUserConfig -AppDataRoot $appData
+    } catch {
+        Assert-True ($_.Exception.Message -like 'ccodex: invalid config.json:*') 'error message has the expected prefix'
+    }
+} finally {
+    Remove-Item -Recurse -Force $appData
+}
+
+Write-Host "thread_ttl_days: 0 is accepted (explicit immediate thread-id scrub) and round-trips to 0"
+$appData = New-CcodexTempAppData
+try {
+    New-Item -ItemType Directory -Path (Join-Path $appData 'ccodex') -Force | Out-Null
+    $json = @'
+{
+  "retention": {
+    "thread_ttl_days": 0
+  }
+}
+'@
+    Set-Content -Path (Join-Path $appData 'ccodex/config.json') -Value $json -NoNewline -Encoding utf8
+    $config = Get-CcodexUserConfig -AppDataRoot $appData
+    Assert-Equal $config.retention.thread_ttl_days 0 'round-trips thread_ttl_days of 0'
+    Assert-Equal $config.retention.jobs_days 14 'defaults the unset jobs_days'
+} finally {
+    Remove-Item -Recurse -Force $appData
+}
+
 Complete-CcodexTests

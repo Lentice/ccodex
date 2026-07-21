@@ -756,8 +756,8 @@ config above — this one is user-level, applying to every repo):
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `jobs_days` | non-negative int | `14` | A terminal job older than this (measured from `finished_at`, else `terminated_at`, else `cancelled_at`, else `created_at`) is deleted by `cleanup`. |
-| `thread_ttl_days` | non-negative int | `30` | With `--scrub-thread-ids`, a *retained* terminal job older than this has its `codex_thread_id` blanked. |
+| `jobs_days` | int >= 1 | `14` | A terminal job older than this (measured from `finished_at`, else `terminated_at`, else `cancelled_at`, else `created_at`) is deleted by `cleanup`. Must be at least 1: `0` is rejected because it would make `cleanup` treat every terminal job as aged-out and delete them all. |
+| `thread_ttl_days` | non-negative int (>= 0) | `30` | With `--scrub-thread-ids`, a *retained* terminal job older than this has its `codex_thread_id` blanked. `0` is allowed and means scrub eligible thread ids immediately. |
 
 The file and the `retention` section are both optional; a missing file, a missing section, or
 missing individual keys fall back to the defaults above. A malformed `config.json`, a
@@ -1008,7 +1008,8 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
 - `lib/Config.ps1` — `.ccodex/ccodex.json` `delegation` section reader, with per-key defaults and
   enum/type validation
 - `lib/UserConfig.ps1` — `%APPDATA%\ccodex\config.json` `retention` section reader (`jobs_days`/
-  `thread_ttl_days`), with per-key defaults and non-negative-integer validation
+  `thread_ttl_days`), with per-key defaults and per-key minimum validation (`jobs_days` >= 1,
+  `thread_ttl_days` >= 0)
 - `lib/JobLock.ps1` — the per-job advisory lock (`<job_dir>\.lock\`) every status.json writer
   (worker, `cancel`, `cleanup`'s thread-id scrub) routes through; stale-lock breaking after a
   10-minute owner-dead window; lock acquisition failure surfaces as wrapper exit `21`
