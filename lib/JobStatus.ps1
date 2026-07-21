@@ -80,40 +80,41 @@ function ConvertTo-CcodexBackendId {
     return "$ProcessId;$($StartTime.ToUniversalTime().ToString('o'))"
 }
 
-function Test-CcodexWorkerAlive {
+function ConvertFrom-CcodexBackendId {
+    # Single source of the <pid>;<UTC start time> identity grammar (the inverse of
+    # ConvertTo-CcodexBackendId). Returns { ProcessId; StartTimeUtc } for a well-formed id, or
+    # $null when it is empty/malformed. Both the liveness check (Test-CcodexWorkerAlive) and the
+    # provable-identity predicate (Test-CcodexBackendIdParsable) go through here so the parse rules
+    # can never drift between them.
     param([string]$BackendId)
-
-    if ([string]::IsNullOrEmpty($BackendId)) {
-        return $false
-    }
-
+    if ([string]::IsNullOrEmpty($BackendId)) { return $null }
     $parts = $BackendId.Split(';', 2)
-    if ($parts.Count -ne 2) {
-        return $false
-    }
-
-    $pidText = $parts[0]
-    $startTimeText = $parts[1]
-
+    if ($parts.Count -ne 2) { return $null }
     $processId = 0
-    if (-not [int]::TryParse($pidText, [ref]$processId)) {
-        return $false
-    }
-
+    if (-not [int]::TryParse($parts[0], [ref]$processId)) { return $null }
     $recordedStartTime = [DateTime]::MinValue
     if (-not [DateTime]::TryParse(
-            $startTimeText,
+            $parts[1],
             [System.Globalization.CultureInfo]::InvariantCulture,
             [System.Globalization.DateTimeStyles]::RoundtripKind,
             [ref]$recordedStartTime)) {
+        return $null
+    }
+    return [pscustomobject]@{ ProcessId = $processId; StartTimeUtc = $recordedStartTime.ToUniversalTime() }
+}
+
+function Test-CcodexWorkerAlive {
+    param([string]$BackendId)
+
+    $identity = ConvertFrom-CcodexBackendId -BackendId $BackendId
+    if ($null -eq $identity) {
         return $false
     }
 
     try {
-        $proc = Get-Process -Id $processId -ErrorAction Stop
+        $proc = Get-Process -Id $identity.ProcessId -ErrorAction Stop
         $actualStartTimeUtc = $proc.StartTime.ToUniversalTime()
-        $recordedStartTimeUtc = $recordedStartTime.ToUniversalTime()
-        $delta = ($actualStartTimeUtc - $recordedStartTimeUtc).Duration()
+        $delta = ($actualStartTimeUtc - $identity.StartTimeUtc).Duration()
         return $delta.TotalSeconds -le 2
     } catch {
         return $false
@@ -128,17 +129,7 @@ function Test-CcodexBackendIdParsable {
     # the worker gone. An empty backend_id (a worker that died before stamping one) can never be
     # PROVED gone, so it must not be force-failed from a missing exit_code.txt.
     param([string]$BackendId)
-    if ([string]::IsNullOrEmpty($BackendId)) { return $false }
-    $parts = $BackendId.Split(';', 2)
-    if ($parts.Count -ne 2) { return $false }
-    $processId = 0
-    if (-not [int]::TryParse($parts[0], [ref]$processId)) { return $false }
-    $parsedStart = [DateTime]::MinValue
-    return [DateTime]::TryParse(
-        $parts[1],
-        [System.Globalization.CultureInfo]::InvariantCulture,
-        [System.Globalization.DateTimeStyles]::RoundtripKind,
-        [ref]$parsedStart)
+    return $null -ne (ConvertFrom-CcodexBackendId -BackendId $BackendId)
 }
 
 function Get-CcodexProcessIdentity {
