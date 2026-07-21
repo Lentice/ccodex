@@ -634,20 +634,38 @@ function Initialize-CcodexJob {
         $promptRepoRoot = $worktreeRepo
     }
 
-    # Artifacts stay under the job dir (never the worktree). Worktree access gets an artifact
-    # dir exactly as workspace access does, so browser/test evidence has a home outside the repo.
-    $artifactDir = $null
-    if ($resolvedAccess -in @('workspace', 'worktree')) {
-        $artifactDir = Join-Path $jobDir 'artifacts'
-        New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+    # The init steps AFTER worktree creation (artifact dir, template render, prompt/status writes)
+    # must be transactional for a worktree run: if any throws (disk full, IO error, template render
+    # failure), the worktree AND its .git/worktrees/<id> admin entry would otherwise be orphaned --
+    # the job dir exists, so neither cleanup sweep reclaims it. Mirror the resume path
+    # (Initialize-CcodexResumeJob): best-effort Remove-CcodexJobWorktree, then a terminal failed
+    # status via Complete-CcodexInternalFailure (exit 12), carrying the original error. The teardown
+    # is best-effort and must never mask the original failure, so it is swallowed with Out-Null.
+    try {
+        # Artifacts stay under the job dir (never the worktree). Worktree access gets an artifact
+        # dir exactly as workspace access does, so browser/test evidence has a home outside the repo.
+        $artifactDir = $null
+        if ($resolvedAccess -in @('workspace', 'worktree')) {
+            $artifactDir = Join-Path $jobDir 'artifacts'
+            New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+        }
+
+        $templatePath = Get-CcodexWorkerPromptTemplatePath -RepoRoot $repoRoot -AppDataRoot $AppDataRoot
+        $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $promptRepoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
+        Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
+
+        $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
+        Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $Group -Label $Label)
+    } catch {
+        $initializationError = $_.Exception.Message
+        if ($worktreeRepo) {
+            Remove-CcodexJobWorktree -MainRepo $mainRepo -WorktreePath $worktreeRepo | Out-Null
+        }
+        $failure = Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $resolvedAccess `
+            -RepoRoot $repoRoot -CreatedAt $createdAt -Message $initializationError -Backend $Backend `
+            -ResultPath (Join-Path $jobDir 'result.md') -Group $Group -Label $Label
+        return [pscustomobject]@{ WrapperExitCode = 12; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $null; CreatedAt = $createdAt; Message = $failure.Message; MainRepo = $null; WorktreeRepo = $null; BaseCommit = $null }
     }
-
-    $templatePath = Get-CcodexWorkerPromptTemplatePath -RepoRoot $repoRoot -AppDataRoot $AppDataRoot
-    $workerPrompt = Build-CcodexWorkerPrompt -TemplatePath $templatePath -Mode $Mode -Access $resolvedAccess -RepoRoot $promptRepoRoot -ArtifactDir $artifactDir -TaskContent $taskContent
-    Write-CcodexTextFile -Path (Join-Path $jobDir 'prompt.md') -Content $workerPrompt
-
-    $hardTimeoutSecOrNull = if ($HardTimeoutSec -gt 0) { $HardTimeoutSec } else { $null }
-    Write-CcodexJsonFileAtomic -Path (Join-Path $jobDir 'status.json') -Object (New-CcodexStatusObject -JobId $jobId -Status $InitialStatus -Mode $Mode -Access $resolvedAccess -Repo $repoRoot -CreatedAt $createdAt -Backend $Backend -HardTimeoutSec $hardTimeoutSecOrNull -MainRepo $mainRepo -WorktreeRepo $worktreeRepo -BaseCommit $baseCommit -Group $Group -Label $Label)
 
     return [pscustomobject]@{ WrapperExitCode = 0; JobId = $jobId; JobDir = $jobDir; RepoRoot = $repoRoot; ResolvedAccess = $resolvedAccess; WorkerPrompt = $workerPrompt; CreatedAt = $createdAt; Message = $null; MainRepo = $mainRepo; WorktreeRepo = $worktreeRepo; BaseCommit = $baseCommit }
 }

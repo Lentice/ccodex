@@ -132,6 +132,46 @@ $statusNoWrite = Get-Content -LiteralPath (Join-Path $resultNoWrite.JobDir 'stat
 Assert-Equal $statusNoWrite.worktree_committed $false 'worktree_committed is false when the worker wrote nothing'
 Assert-Equal ((& git -C $statusNoWrite.worktree_repo rev-parse HEAD).Trim()) $baseHeadNoWrite 'worktree HEAD stays at base when nothing was committed'
 
+Write-Host "mode 'implement' post-worktree init failure tears down the worktree transactionally (no leaked worktree or phantom .git/worktrees entry)"
+# Regression (ticket 23): a step AFTER New-CcodexJobWorktree throwing (here the prompt.md write)
+# used to leave the created worktree AND its .git/worktrees/<id> admin entry orphaned, because
+# the job dir exists so neither cleanup sweep reclaims it. The run path must now mirror the
+# resume path: best-effort Remove-CcodexJobWorktree + a terminal failed status, exit 12.
+$faultRepo = Join-Path $tempRoot 'faultrepo'
+New-Item -ItemType Directory -Path $faultRepo -Force | Out-Null
+& git -C $faultRepo init -q 2>$null | Out-Null
+& git -C $faultRepo config user.email 'test@example.com' | Out-Null
+& git -C $faultRepo config user.name 'ccodex test' | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $faultRepo 'seed.txt'), "seed`n", $utf8NoBomTest)
+& git -C $faultRepo add seed.txt | Out-Null
+& git -C $faultRepo commit -q -m 'init' | Out-Null
+
+$env:CCODEX_FAKE_EXIT_CODE = '0'
+$env:CCODEX_FAKE_RESULT = 'should never run'
+$originalWriteTextFileRun = ${function:Write-CcodexTextFile}
+${function:Write-CcodexTextFile} = {
+    param([string]$Path, [string]$Content)
+    if ($Path -like '*prompt.md') { throw 'simulated run post-worktree prompt failure' }
+    & $originalWriteTextFileRun @PSBoundParameters
+}
+try {
+    $faultResult = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; RepoOverride = $faultRepo; PositionalTask = 'do the implement task' }
+} finally {
+    ${function:Write-CcodexTextFile} = $originalWriteTextFileRun
+}
+Assert-Equal $faultResult.WrapperExitCode 12 'post-worktree init failure on the run path -> exit 12'
+$faultStatus = Get-Content -LiteralPath (Join-Path $faultResult.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $faultStatus.status 'failed' 'run post-worktree init failure records a terminal failed status'
+Assert-True (Test-Path -LiteralPath (Join-Path $faultResult.JobDir 'worker-complete.json') -PathType Leaf) 'run post-worktree init failure records worker-complete.json'
+$faultJobId = $faultStatus.job_id
+$faultWtPath = Join-Path (Join-Path (Join-Path $localAppData 'ccodex') 'worktrees') $faultJobId
+Assert-True (-not (Test-Path -LiteralPath $faultWtPath)) 'the created worktree directory is torn down (no leak under the state root)'
+$faultAdminEntry = Join-Path $faultRepo (Join-Path '.git' (Join-Path 'worktrees' $faultJobId))
+Assert-True (-not (Test-Path -LiteralPath $faultAdminEntry)) 'no phantom .git/worktrees/<id> admin entry remains in the main repo'
+$faultWtList = @(& git -C $faultRepo worktree list)
+Assert-Equal $faultWtList.Count 1 'git worktree list shows only the main worktree (the leaked one was pruned)'
+Remove-Item Env:\CCODEX_FAKE_EXIT_CODE, Env:\CCODEX_FAKE_RESULT -ErrorAction SilentlyContinue
+
 Write-Host "mode 'implement' rejects --access workspace (worktree only)"
 $result3b = Invoke-CcodexRunForTest -Overrides @{ Mode = 'implement'; Access = 'workspace' }
 Assert-Equal $result3b.WrapperExitCode 2 'exit code 2 for implement mode with --access workspace'

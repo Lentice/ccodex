@@ -229,6 +229,13 @@ only a live call validates flag placement against the real CLI.
   `Initialize-CcodexResumeJob`. Any failure after `git worktree add` must tear down the child
   worktree and either leave terminal `status.json` + `worker-complete.json` evidence or roll back
   the reservation/index completely.
+- The **non-resume run path** (`Initialize-CcodexJob`, backlog #23) must mirror this: the post-
+  `New-CcodexJobWorktree` steps (artifact dir, template render, prompt/status writes) run inside a
+  `try/catch` that best-effort `Remove-CcodexJobWorktree`s (swallowed with `Out-Null` so it never
+  masks the original error) and records terminal `failed` evidence via `Complete-CcodexInternalFailure`
+  (exit 12). Without the guard, a throw there (disk full, IO error, template render failure) orphans
+  BOTH the worktree dir and its `.git/worktrees/<id>` admin entry — the job dir exists, so neither
+  the age nor dangling cleanup sweep reclaims it.
 - Async resumed workers must build `Build-CcodexResumeArgs -RepoRoot` from `worktree_repo` when
   present, not status `repo` (the main repo). The relocation envelope in child `prompt.md` is also
   load-bearing: the resumed thread remembers obsolete parent paths.
