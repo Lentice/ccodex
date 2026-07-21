@@ -85,6 +85,10 @@ function Build-CcodexReviewPrompt {
     # lib/ReviewFindings.ps1's parser reads (backlog #19); keep the two in lockstep.
     $instructions = @'
 Review instructions:
+- Judge the change on its own merits. Any stated change intent or focus above describes the
+  scope and expected behavior; treat it as context, not evidence that the code is correct.
+  Do not treat it as a conclusion to endorse — verify the code independently and report
+  problems even when the intent implies the change is already fine.
 - Lead with severity-ordered findings: Critical first, then Important, then Minor. For
   each finding give the file:line location and a concrete suggested fix.
 - Explicitly hunt for omissions and edge cases the author may have missed (error

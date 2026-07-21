@@ -32,6 +32,10 @@ $selfProseIdx = $selfDiff.IndexOf('one-line verdict')
 $selfMarkerIdx = $selfDiff.IndexOf('<!-- ccodex:findings -->')
 Assert-True ($selfProseIdx -ge 0 -and $selfMarkerIdx -gt $selfProseIdx) 'the findings appendix instruction comes AFTER the prose review instructions (appendix is last)'
 
+Write-Host "review prompt carries the neutrality instruction (judge on merits; intent is context, not evidence)"
+Assert-True ($selfDiff -like '*Judge the change on its own merits*') 'self-diff form instructs Codex to judge the change on its own merits'
+Assert-True ($selfDiff -like '*context, not evidence that the code is correct*') 'self-diff form frames the stated intent as context, not evidence of correctness'
+
 Write-Host "intent/focus omitted when not provided"
 $noMeta = Build-CcodexReviewPrompt -Range 'abc..def' -Staged $false -Working $false -Paths @() -Intent $null -Focus $null -EmbedDiff $false -RepoRoot 'C:\repo'
 Assert-True (-not ($noMeta -like '*Change intent:*')) 'no Change intent line when intent is absent'
@@ -108,6 +112,8 @@ try {
     $selfAppendix = $selfDiff.Substring($selfDiff.IndexOf('<!-- ccodex:findings -->'))
     $embedAppendix = $embed.Substring($embed.IndexOf('<!-- ccodex:findings -->'))
     Assert-Equal $embedAppendix $selfAppendix 'the appendix instruction is identical in both forms (single shared definition)'
+
+    Assert-True ($embed -like '*Judge the change on its own merits*' -and $embed -like '*context, not evidence that the code is correct*') 'embed form carries the identical neutrality instruction (shared block)'
 
     # New contract: the embed form checks git's exit code and throws (usage error) instead of
     # embedding an empty diff when the range/pathspec is invalid — a nonexistent ref that still

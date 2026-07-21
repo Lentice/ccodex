@@ -34,6 +34,7 @@ and the delegation-run issue record
 | 22. `retention.jobs_days >= 1` per-field guard (blocks cleanup wiping all jobs) | 1d4d941 |
 | 23. Run-path transactional worktree teardown on init failure (matches resume) | f48cdcb |
 | 24. PID-reuse-safe launch liveness + terminalize launch-failed/dead orphans | e0e7459 |
+| 33. Review-neutrality hardening: prompt frames stated intent as context-not-evidence (ReviewPrompt `$instructions` + worker-prompt review section); neutral-intent guidance in rule/reference | landed 2026-07-21 |
 
 ## Open — curated backlog items (user picks)
 
@@ -105,4 +106,10 @@ Items 21–24 (Tier 1) landed 2026-07-21 — see the Done table above.
 - O3 (chained waits): user-misuse; indefinite wait and `wait --all` already cover it.
 - O4 (`apply` lands worker commit): by-design and documented; optional `--stage-only` only if
   uncommitted landing is ever genuinely wanted.
+- Input-layer soft warning on leading/conclusory `--intent`/`--focus` phrasing (considered with #33,
+  declined 2026-07-21, Codex-confirmed): a string-match heuristic for "already fine"-style wording is
+  brittle, language-dependent (English + zh-TW + …), false-positive-prone, and cuts against the
+  "don't be too clever" ethos. Redundant once the review prompt is neutral by construction (#33),
+  which defends regardless of how intent is phrased — fixing at the input layer a bias the prompt
+  layer is already immune to has low marginal value.
 - Everything under "Dropped / indefinitely deferred" in the curated backlog.

@@ -71,6 +71,11 @@ ccodex review --range <base>..HEAD --path <changed-path> --intent "<one-line cha
   `CreateProcessWithLogonW failed: 1385`). If you've confirmed this host's Codex sandbox can spawn
   processes, the lighter-weight no-flag (self-diff) form works too — Codex generates the diff
   itself instead of the wrapper embedding it.
+- Keep `--intent`/`--focus` neutral: state the change's *purpose* and the *aspect* to review, never
+  the conclusion you expect ("Add retry logic to CodexInvoke", not "confirm this is already fine").
+  The review prompt already frames intent as context rather than evidence of correctness so Codex
+  judges independently, but conclusory phrasing still biases it toward endorsement — the exact
+  failure mode a second opinion exists to avoid.
 - Use `--path` once per changed area (directory or file) instead of reviewing the whole repo.
 - Use `review_default_paths` from the config as the default `--path` set when the caller hasn't
   narrowed it further.

@@ -200,8 +200,12 @@ Other flags:
 - `--path <p>` — repeatable; scopes the diff to one or more paths (directories or files) instead
   of the whole repo. Omit it to review the full range.
 - `--intent "<text>"` — one-line description of what the change is trying to do; included in the
-  prompt to give Codex context.
-- `--focus "<text>"` — an additional angle to emphasize (e.g. "concurrency" or "error handling").
+  prompt to give Codex context. Keep it neutral — describe the change's *purpose*, not the
+  conclusion you expect ("Add retry logic", not "confirm this is already fine"). The review prompt
+  explicitly frames intent as context, not evidence the code is correct, so Codex still judges
+  independently; neutral phrasing just avoids nudging it toward endorsement.
+- `--focus "<text>"` — an additional angle to emphasize (e.g. "concurrency" or "error handling");
+  name a review *aspect*, not a predetermined verdict.
 - `--embed-diff` — instead of having Codex run `git diff` itself, the wrapper runs it up front
   (from `--repo`'s root) and embeds the diff plus a `git diff --stat` summary directly in the
   prompt, capped at 100 KB with a truncation note. Use this when Codex regenerating the diff

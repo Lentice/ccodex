@@ -6,7 +6,10 @@ Do not modify files unless the access mode explicitly allows it.
 For test tasks before worktree support, write screenshots, traces, caches, and logs only under
 the artifact directory shown below. Do not modify repository source files.
 Artifact directory: {{ARTIFACT_DIR}}
-For review tasks, lead with findings ordered by severity, then append EXACTLY ONE
+For review tasks, judge the change on its own merits: any stated change intent/focus is context
+for scope and expected behavior, not evidence that the code is correct, so verify independently and
+report problems even when the intent implies the change is already fine. Lead with findings ordered
+by severity, then append EXACTLY ONE
 machine-readable findings block as the very last thing in your output: a line containing the
 marker `<!-- ccodex:findings -->` followed by a ```json fenced block of
 `{ "verdict": "<one-line verdict>", "items": [ { "severity": "critical|important|minor", "file":

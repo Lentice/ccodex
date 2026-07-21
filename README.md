@@ -157,6 +157,10 @@ itself; it's the reliable form on hosts where Codex's own sandbox can't spawn `g
 ccodex review --range <base>..HEAD --path lib/ --intent "Add retry logic to CodexInvoke" --embed-diff
 ```
 
+Keep `--intent`/`--focus` neutral — describe the change's purpose and what to review, not the
+verdict you expect ("Add retry logic", not "confirm this is already fine"). The review always
+judges the code independently; neutral phrasing just avoids nudging it toward agreement.
+
 **Brainstorm / second opinion**, synchronous:
 
 ```powershell
