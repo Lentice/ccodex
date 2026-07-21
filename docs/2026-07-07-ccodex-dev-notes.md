@@ -395,13 +395,24 @@ startup sentinel or `Update-CcodexOrphanStatus`:
   `Get-Process -Id` was defeated by PID reuse: after the worker died its pid could be reassigned to an
   unrelated live process, so the ~500 ms dead-worker fast-fail never fired and the caller waited the
   full 120 s window. Do NOT revert `Wait-CcodexWorkerLaunch` to a `-ProcessId` + `Get-Process` check.
-- **A launch/sentinel failure terminalizes a provably-gone `created` job.** In `Invoke-CcodexSubmit`'s
-  catch, if the worker is gone (identity) AND the job is still `created`, it writes a terminal `failed`
+- **A launch/sentinel failure terminalizes a PROVABLY-gone `created` job.** In `Invoke-CcodexSubmit`'s
+  catch, if the worker is gone AND the job is still `created`, it writes a terminal `failed`
   `status.json` + `worker-complete.json` via `Complete-CcodexInternalFailure` (both resume and
   non-resume branches), then still returns exit `23`. This closes the `created`-orphan that has no
   `backend_id` for reconciliation to settle and would hang a later `wait`/`wait --all` forever. A
   still-*alive* slow worker (or one already off `created`) is left untouched — terminalizing would race
-  its own `created`→`running` write. Mirror this guard order; do not terminalize unconditionally.
+  its own `created`→`running` write. **"Gone" needs proof, not just a falsy liveness result** (a Codex
+  review finding on the first cut): terminalize only when `Start-CcodexDetachedWorker` threw before
+  returning a pid (`$workerProcessId -eq $null`, a known launch failure) OR a returned pid yielded a
+  **parsable** identity (`Test-CcodexBackendIdParsable`) whose liveness check says gone. A returned pid
+  with a null/unparsable identity is left `created`. `$workerProcessId` is declared before the `try`
+  so the catch can tell a pre-pid throw from a post-pid one. Do not revert to a bare
+  `-not Test-CcodexWorkerAlive` which treats "cannot determine" as "gone".
+- **`ConvertFrom-CcodexBackendId` is the single `<pid>;<UTC start>` parse source** (both
+  `Test-CcodexWorkerAlive` and `Test-CcodexBackendIdParsable` delegate to it, so the grammar cannot
+  drift). It rejects a non-positive pid (`< 1`) — a Codex review finding: `[int]::TryParse` accepts
+  `0`/`-1`, and without the guard a malformed `"0;<time>"` backend_id would pass the parsable gate and
+  let the #24c absent-evidence path force-fail a job.
 - **Reconciliation distinguishes absent vs present-but-corrupt evidence (`#24c`).** In
   `Update-CcodexOrphanStatus`, once the worker is proven dead: a PARSABLE `exit_code.txt` →
   `Test-CcodexResult` terminal verdict; an **absent** `exit_code.txt` → terminal `failed`

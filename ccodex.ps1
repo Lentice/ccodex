@@ -1046,6 +1046,7 @@ function Invoke-CcodexSubmit {
     $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }
 
     $workerIdentity = $null
+    $workerProcessId = $null
     try {
         $workerProcessId = Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
             -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism `
@@ -1064,7 +1065,18 @@ function Invoke-CcodexSubmit {
         # diagnosis: terminalizing would race the live worker's own created->running write.
         $sentinelError = $_.Exception.Message
         $currentLaunchStatus = Read-CcodexStatusFile -JobDir $jobDir
-        $workerGone = -not (Test-CcodexWorkerAlive -BackendId $workerIdentity)
+        # Terminalize only when the worker is PROVABLY gone — never conflate "cannot prove" with
+        # "proven gone", or a slow-but-alive worker gets false-failed (a Codex-review finding on the
+        # first cut, which used `-not Test-CcodexWorkerAlive` and so treated a null identity as proof).
+        # Two proof sources, mirroring the reconciliation gate (#24c):
+        #   * Start-CcodexDetachedWorker threw before returning a pid ($workerProcessId still $null):
+        #     the launch itself failed, so no worker exists — a known launch failure.
+        #   * A pid was returned AND we hold a well-formed identity whose liveness check says gone.
+        # A returned pid with a null/unparsable identity (the process could not be snapshotted) is NOT
+        # proof, so the job is left 'created' for diagnosis rather than terminalized.
+        $launchFailedBeforePid = ($null -eq $workerProcessId)
+        $identityProvesGone = (Test-CcodexBackendIdParsable -BackendId $workerIdentity) -and (-not (Test-CcodexWorkerAlive -BackendId $workerIdentity))
+        $workerGone = $launchFailedBeforePid -or $identityProvesGone
         if ($workerGone -and $currentLaunchStatus -and $currentLaunchStatus.status -eq 'created') {
             # Mirror the pre-launch codex-path failure above: a terminal failed status.json +
             # worker-complete.json (both wrapper_exit_code 12), taking the per-job lock and

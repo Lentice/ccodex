@@ -92,6 +92,10 @@ function ConvertFrom-CcodexBackendId {
     if ($parts.Count -ne 2) { return $null }
     $processId = 0
     if (-not [int]::TryParse($parts[0], [ref]$processId)) { return $null }
+    # A real OS process id is >= 1; 0/negative can only come from a malformed backend_id and must
+    # not be accepted as a provable identity (a Codex-review finding: else the #24c absent-evidence
+    # gate would treat "0;<time>" as proof-of-gone and force-fail the job).
+    if ($processId -lt 1) { return $null }
     $recordedStartTime = [DateTime]::MinValue
     if (-not [DateTime]::TryParse(
             $parts[1],

@@ -90,6 +90,27 @@ Write-Host "Test-CcodexWorkerAlive: current process pid but mismatched start tim
 $wrongBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime ([DateTime]::Parse('2000-01-01T00:00:00Z'))
 Assert-Equal (Test-CcodexWorkerAlive -BackendId $wrongBackendId) $false 'pid alive but start time mismatch (pid reuse) is not alive'
 
+# --- ConvertFrom-CcodexBackendId / Test-CcodexBackendIdParsable ---
+
+Write-Host "ConvertFrom-CcodexBackendId: well-formed id -> parsed pid + UTC start time"
+$parsedId = ConvertFrom-CcodexBackendId -BackendId '4321;2026-07-21T04:05:06.0000000Z'
+Assert-Equal $parsedId.ProcessId 4321 'parses the pid'
+Assert-Equal ($parsedId.StartTimeUtc.ToString('o')) '2026-07-21T04:05:06.0000000Z' 'parses the UTC start time'
+
+Write-Host "ConvertFrom-CcodexBackendId / Test-CcodexBackendIdParsable: malformed ids -> null / false"
+foreach ($bad in @($null, '', 'no-semicolon', 'abc;2026-07-21T04:05:06Z', '4321;not-a-date', '4321;;', '0;2026-07-21T04:05:06.0000000Z', '-1;2026-07-21T04:05:06.0000000Z')) {
+    Assert-Equal (ConvertFrom-CcodexBackendId -BackendId $bad) $null "ConvertFrom rejects malformed id '$bad'"
+    Assert-Equal (Test-CcodexBackendIdParsable -BackendId $bad) $false "Test-CcodexBackendIdParsable is false for '$bad'"
+}
+
+Write-Host "Test-CcodexBackendIdParsable: a well-formed (even if dead) identity -> true"
+Assert-Equal (Test-CcodexBackendIdParsable -BackendId '999999;2020-01-01T00:00:00.0000000Z') $true 'well-formed dead identity is parsable (provable-gone gate can fire)'
+
+# Finding 2 (Codex review): a non-positive pid must NOT count as a provable identity, else the
+# #24c absent-evidence gate would force-fail a job carrying a malformed "0;<time>" backend_id.
+Assert-Equal (Test-CcodexBackendIdParsable -BackendId '0;2026-07-21T04:05:06.0000000Z') $false 'pid 0 is not a provable identity'
+Assert-Equal (Test-CcodexBackendIdParsable -BackendId '-5;2026-07-21T04:05:06.0000000Z') $false 'negative pid is not a provable identity'
+
 # --- Update-CcodexOrphanStatus ---
 
 $fabricatedDeadBackendId = '999999;2020-01-01T00:00:00.0000000Z'
