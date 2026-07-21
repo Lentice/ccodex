@@ -2067,15 +2067,180 @@ function Get-CcodexTailLines {
     return , $allLines.GetRange($allLines.Count - $Lines, $Lines).ToArray()
 }
 
+# Default per-line display width (UTF-8 bytes) for the codex-events.jsonl tail block. A
+# single `item.completed` event can embed a whole command's stdout (~60 KB observed), which
+# makes `tail` unusable for a quick health check; truncating each line to this width with a
+# dropped-byte marker keeps the block scannable. `--max-line 0` restores verbatim output.
+$script:CcodexTailDefaultMaxLine = 200
+# Hard ceiling on bytes read/allocated PER LINE, in every mode (truncate and verbatim). It
+# bounds memory regardless of how large `--max-line` (or a huge line under `--max-line 0`) is:
+# beyond it, the line is shown as a prefix with an honest `…(+N bytes)` marker rather than
+# silently dropping the remainder. Realistic Codex event lines are well under this.
+$script:CcodexTailReadCap = 16MB
+
+function Get-CcodexTailEventsRecords {
+    # Retrieval half of the codex-events.jsonl tail. Returns the last $Lines COMPLETE logical
+    # lines of $Path, oldest-first, as records:
+    #   [pscustomobject]@{ ByteLength = <long, full UTF-8 content byte length>;
+    #                      Bytes      = <byte[], up to $ReadCap bytes of the line's START> }
+    # Unlike Get-CcodexTailLines (a fixed end-window that DROPS an oversized final record when
+    # the whole window falls inside one line), this locates line-start offsets by scanning
+    # backward for newlines, so the last $Lines lines are always returned intact even when one
+    # is larger than the scan window — and an oversized final record surfaces as its PREFIX
+    # (Bytes capped at $ReadCap) plus its true full ByteLength, never dropped. A trailing LF at
+    # EOF does not create an empty final record; a trailing CR (CRLF) is not part of content.
+    # Returns $null when $Path is absent, @() for an existing-but-empty file. Never loads the
+    # whole file: it reads only backward windows until $Lines line starts are found, plus each
+    # retained line's own (capped) bytes.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Lines,
+        [Parameter(Mandatory)][long]$ReadCap
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $length = $stream.Length
+        if ($length -eq 0) { return @() }
+
+        # Establish the content end (exclusive): ignore one trailing LF, and a CR before it.
+        $peek = New-Object byte[] 1
+        $contentEnd = $length
+        $stream.Seek($length - 1, [System.IO.SeekOrigin]::Begin) | Out-Null
+        $stream.Read($peek, 0, 1) | Out-Null
+        if ($peek[0] -eq 10) {
+            $contentEnd = $length - 1
+            if ($contentEnd -gt 0) {
+                $stream.Seek($contentEnd - 1, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $stream.Read($peek, 0, 1) | Out-Null
+                if ($peek[0] -eq 13) { $contentEnd = $contentEnd - 1 }
+            }
+        }
+        if ($contentEnd -le 0) { return @() }
+
+        # Scan backward for the '\n' bytes that begin each retained line. $starts/$ends are
+        # collected newest-first; each retained line is [start, end).
+        $chunkSize = 16KB
+        $buf = New-Object byte[] $chunkSize
+        $starts = New-Object System.Collections.Generic.List[long]
+        $ends = New-Object System.Collections.Generic.List[long]
+        $currentEnd = $contentEnd
+        $pos = $contentEnd
+        while ($starts.Count -lt $Lines -and $pos -gt 0) {
+            $readLen = [int][Math]::Min([long]$chunkSize, $pos)
+            $pos -= $readLen
+            $stream.Seek($pos, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $stream.Read($buf, 0, $readLen) | Out-Null
+            for ($i = $readLen - 1; $i -ge 0; $i--) {
+                if ($buf[$i] -eq 10) {
+                    $nlOffset = [long]($pos + $i)
+                    $starts.Add($nlOffset + 1)
+                    $ends.Add($currentEnd)
+                    $currentEnd = $nlOffset
+                    if ($starts.Count -ge $Lines) { break }
+                }
+            }
+        }
+        # If we exhausted the file (reached BOF) still needing a line, the earliest retained
+        # line begins at offset 0 (it has no preceding newline).
+        if ($starts.Count -lt $Lines -and $pos -eq 0 -and $currentEnd -gt 0) {
+            $starts.Add([long]0)
+            $ends.Add($currentEnd)
+        }
+
+        # Emit oldest-first, reading each retained line's own (capped) bytes.
+        $records = New-Object System.Collections.Generic.List[object]
+        for ($k = $starts.Count - 1; $k -ge 0; $k--) {
+            $s = $starts[$k]
+            $e = $ends[$k]
+            $len = $e - $s
+            if ($len -lt 0) { $len = 0 }
+            # Exclude a trailing CR (CRLF terminator) from the logical content length BEFORE
+            # applying the read cap, so an oversized intermediate CRLF line's dropped-byte count
+            # is not inflated by one. (The final line already had its CR excluded via
+            # $contentEnd, so this peek finds none there.) Peek the single byte at $e-1.
+            if ($len -gt 0) {
+                $stream.Seek($e - 1, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $stream.Read($peek, 0, 1) | Out-Null
+                if ($peek[0] -eq 13) { $len = $len - 1 }
+            }
+            $readN = [int][Math]::Min($len, $ReadCap)
+            $bytes = New-Object byte[] $readN
+            if ($readN -gt 0) {
+                $stream.Seek($s, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $stream.Read($bytes, 0, $readN) | Out-Null
+            }
+            $records.Add([pscustomobject]@{ ByteLength = [long]$len; Bytes = $bytes })
+        }
+        return , $records.ToArray()
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Format-CcodexTailEventsLine {
+    # Render half of the codex-events.jsonl tail. Truncates one retrieved record to at most
+    # $MaxLine UTF-8 bytes of content, then appends a ` …(+N bytes)` marker reporting the
+    # dropped byte count (from the record's true UTF-8 ByteLength, never String.Length). The
+    # cut lands on a UTF-8 character boundary — a multi-byte sequence (hence any surrogate
+    # pair, which is a single astral code point) is never split — and the marker sits OUTSIDE
+    # the width budget. $MaxLine <= 0 means verbatim: decode and return every byte held, no
+    # marker.
+    param(
+        [Parameter(Mandatory)][AllowNull()][byte[]]$Bytes,
+        [Parameter(Mandatory)][long]$ByteLength,
+        [Parameter(Mandatory)][int]$MaxLine
+    )
+    if ($null -eq $Bytes) { $Bytes = New-Object byte[] 0 }
+    # Verbatim mode keeps everything held; truncate mode keeps at most $MaxLine bytes. Either
+    # way $keep can never exceed what we actually read ($Bytes.Length) — a line larger than the
+    # per-line read cap arrives already prefix-only, and the marker below reports the remainder.
+    if ($MaxLine -le 0) {
+        $keep = $Bytes.Length
+    } else {
+        $keep = [int][Math]::Min([long]$MaxLine, $ByteLength)
+        if ($keep -gt $Bytes.Length) { $keep = $Bytes.Length }
+    }
+    # Back off out of the middle of a UTF-8 multi-byte sequence so a code point — hence any
+    # surrogate pair (one astral code point is a single 4-byte sequence) — is never split.
+    if ($keep -lt $Bytes.Length) {
+        # We cut inside the held buffer: $Bytes[$keep] is the first dropped byte; retreat while
+        # it is a continuation byte (10xxxxxx).
+        while ($keep -gt 0 -and (($Bytes[$keep] -band 0xC0) -eq 0x80)) { $keep-- }
+    } elseif ($ByteLength -gt $Bytes.Length -and $keep -gt 0) {
+        # We kept the whole buffer but the line was cut mid-content by the read cap, so the
+        # buffer's own tail may be an incomplete sequence. Drop a dangling partial sequence.
+        $j = $keep - 1
+        while ($j -ge 0 -and (($Bytes[$j] -band 0xC0) -eq 0x80)) { $j-- }
+        if ($j -ge 0) {
+            $lead = $Bytes[$j]
+            $seqLen = if ($lead -lt 0x80) { 1 }
+                      elseif (($lead -band 0xE0) -eq 0xC0) { 2 }
+                      elseif (($lead -band 0xF0) -eq 0xE0) { 3 }
+                      elseif (($lead -band 0xF8) -eq 0xF0) { 4 }
+                      else { 1 }
+            if (($keep - $j) -lt $seqLen) { $keep = $j }
+        }
+    }
+    $text = [System.Text.Encoding]::UTF8.GetString($Bytes, 0, $keep)
+    $dropped = $ByteLength - $keep
+    if ($dropped -gt 0) { return "$text …(+$dropped bytes)" }
+    return $text
+}
+
 function Invoke-CcodexTailCommand {
     # Diagnostic tail of a job's live/finished-process artifacts (design: "tail <job_id>",
     # Phase 2b Task 6). Read-only, never reconciles or mutates status.json — unlike
-    # status/wait/read, this is pure log inspection. Prints stderr.log's tail block first,
-    # then codex-events.jsonl's; a missing file renders as a `(absent)` placeholder rather
-    # than failing the whole command.
+    # status/wait/read, this is pure log inspection. Prints stderr.log's tail block first
+    # (byte-for-byte the raw last $Lines lines), then codex-events.jsonl's — but each events
+    # line is truncated to $MaxLine UTF-8 bytes with a dropped-byte marker (verbatim when
+    # $MaxLine <= 0) so a giant embedded-output record cannot swamp a health check. A missing
+    # file renders as a `(absent)` placeholder rather than failing the whole command.
     param(
         [Parameter(Mandatory)][string]$JobId,
         [int]$Lines = 40,
+        [int]$MaxLine = $script:CcodexTailDefaultMaxLine,
         [string]$StateRoot = $env:LOCALAPPDATA
     )
 
@@ -2090,13 +2255,29 @@ function Invoke-CcodexTailCommand {
     $eventsPath = Join-Path $jobDir 'codex-events.jsonl'
 
     $stderrLines = Get-CcodexTailLines -Path $stderrPath -Lines $Lines
-    $eventsLines = Get-CcodexTailLines -Path $eventsPath -Lines $Lines
+    # Read only what the renderer needs per line, and never more than the per-line ceiling:
+    # the display width (plus a little slack for the char-boundary backoff) when truncating,
+    # the ceiling itself for verbatim. Clamping here bounds the byte-array allocation even when
+    # `--max-line` is set to an enormous value; anything past the ceiling surfaces via the
+    # renderer's `…(+N bytes)` marker rather than being read into memory.
+    $eventsReadCap = if ($MaxLine -le 0) {
+        [long]$script:CcodexTailReadCap
+    } else {
+        [Math]::Min([long]$MaxLine + 4, [long]$script:CcodexTailReadCap)
+    }
+    $eventsRecords = Get-CcodexTailEventsRecords -Path $eventsPath -Lines $Lines -ReadCap $eventsReadCap
 
     $blocks = New-Object System.Collections.Generic.List[string]
     $blocks.Add("== stderr.log (last $Lines) ==")
     if ($null -eq $stderrLines) { $blocks.Add('(absent)') } else { $blocks.AddRange([string[]]$stderrLines) }
     $blocks.Add("== codex-events.jsonl (last $Lines) ==")
-    if ($null -eq $eventsLines) { $blocks.Add('(absent)') } else { $blocks.AddRange([string[]]$eventsLines) }
+    if ($null -eq $eventsRecords) {
+        $blocks.Add('(absent)')
+    } else {
+        foreach ($r in $eventsRecords) {
+            $blocks.Add((Format-CcodexTailEventsLine -Bytes $r.Bytes -ByteLength $r.ByteLength -MaxLine $MaxLine))
+        }
+    }
 
     $output = [string]::Join("`n", $blocks)
     return [pscustomobject]@{ WrapperExitCode = 0; Stdout = $output; Message = $null }
@@ -2594,6 +2775,20 @@ function ConvertTo-CcodexTailLinesCount {
     return $parsed
 }
 
+function ConvertTo-CcodexMaxLineWidth {
+    # --max-line is a NON-negative UTF-8 byte width for codex-events.jsonl lines; 0 restores
+    # verbatim output (no truncation). Negative or non-numeric text is a usage error (exit 2).
+    # Presence is validated by the caller (Get-CcodexRequiredArgValue): a present-but-valueless
+    # `--max-line` is itself a usage error, so this only ever sees a real value — 0 is a legal
+    # value, distinct from an absent flag (which uses the default width).
+    param([Parameter(Mandatory)][string]$FlagName, [Parameter(Mandatory)][string]$ValueText)
+    $parsed = 0
+    if (-not [int]::TryParse($ValueText, [ref]$parsed) -or $parsed -lt 0) {
+        throw "ccodex: $FlagName must be a non-negative whole number of bytes (0 = verbatim); got '$ValueText'."
+    }
+    return $parsed
+}
+
 function Get-CcodexArgValue {
     # Test-support / internal flags (e.g. --job-id, --state-root, --codex-path) contain
     # hyphens that PowerShell's native named-parameter binder cannot match against a
@@ -2793,11 +2988,30 @@ function Invoke-CcodexTailDispatch {
         $ExitCode.Value = 2
         return
     }
+    # --max-line is presence-aware: an absent flag uses the default width, but a present
+    # `--max-line` MUST carry a value (`--max-line 0` is valid; a trailing/valueless flag or a
+    # next `--`-shaped token is a usage error), so it routes through Get-CcodexRequiredArgValue.
+    try {
+        $tailMaxLineText = Get-CcodexRequiredArgValue -ArgumentList $cmdArgs -FlagName '--max-line'
+    } catch {
+        Write-Host $_.Exception.Message
+        $ExitCode.Value = 2
+        return
+    }
     $tailParams = @{ JobId = $tailJobId }
     if ($tailStateRoot) { $tailParams['StateRoot'] = $tailStateRoot }
     if ($tailLinesText) {
         try {
             $tailParams['Lines'] = ConvertTo-CcodexTailLinesCount -FlagName '--lines' -ValueText $tailLinesText
+        } catch {
+            Write-Host $_.Exception.Message
+            $ExitCode.Value = 2
+            return
+        }
+    }
+    if ($null -ne $tailMaxLineText) {
+        try {
+            $tailParams['MaxLine'] = ConvertTo-CcodexMaxLineWidth -FlagName '--max-line' -ValueText $tailMaxLineText
         } catch {
             Write-Host $_.Exception.Message
             $ExitCode.Value = 2

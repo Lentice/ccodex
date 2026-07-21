@@ -127,12 +127,13 @@ $script:CcodexHelpCommands = [ordered]@{
     }
     tail = [ordered]@{
         Summary = 'Print the tail of a job stderr and Codex event logs.'
-        Usage   = 'ccodex tail <job_id> [--lines <n>]'
+        Usage   = 'ccodex tail <job_id> [--lines <n>] [--max-line <bytes>]'
         Flags   = @(
             [ordered]@{ Flag = '--lines <n>'; Desc = 'Number of lines per log; defaults to 40.' }
+            [ordered]@{ Flag = '--max-line <bytes>'; Desc = 'Truncate each codex-events.jsonl line to this many UTF-8 bytes (marker reports dropped bytes); defaults to 200. 0 = verbatim. stderr.log is never truncated.' }
             [ordered]@{ Flag = '--state-root <path>'; Desc = 'Override the state root (test/support use).' }
         )
-        Example = 'ccodex tail <job_id> --lines 80'
+        Example = 'ccodex tail <job_id> --lines 80 --max-line 200'
     }
     cleanup = [ordered]@{
         Summary = 'Delete aged terminal jobs and optionally scrub stale session ids.'

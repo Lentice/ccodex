@@ -175,6 +175,153 @@ $shellUnknownExit = $LASTEXITCODE
 Assert-Equal $shellUnknownExit 2 'an unknown command exits 2'
 Assert-True ((($shellUnknownOut -join "`n")) -like '*tail*') 'the supported-commands message now lists tail'
 
+# ============================================================
+# (f) codex-events.jsonl per-line truncation (#11 / backlog #13)
+# ============================================================
+
+function Get-CcodexEventsBlockLines {
+    # Extracts just the codex-events.jsonl block body (everything after its header) from a
+    # tail result's stdout, as a string array.
+    param([Parameter(Mandatory)][string]$Stdout, [Parameter(Mandatory)][int]$Lines)
+    $all = $Stdout -split "`r?`n"
+    $header = "== codex-events.jsonl (last $Lines) =="
+    $idx = [Array]::IndexOf($all, $header)
+    if ($idx -lt 0) { throw "events header '$header' not found in tail output" }
+    if ($idx + 1 -ge $all.Count) { return @() }
+    return , $all[($idx + 1)..($all.Count - 1)]
+}
+
+Write-Host "Invoke-CcodexTailCommand: an oversized FINAL events line (within the read window) is truncated with a correct dropped-byte count, never dropped"
+$jobBigEvent = New-CcodexTestJobDir
+$smallEvents = (1..3 | ForEach-Object { "event $_" }) -join "`n"
+$bigLine = ('x' * 60000)
+Write-CcodexTextFile -Path (Join-Path $jobBigEvent.JobDir 'codex-events.jsonl') -Content ($smallEvents + "`n" + $bigLine + "`n")
+$resBigEvent = Invoke-CcodexTailCommand -JobId $jobBigEvent.JobId -Lines 40 -StateRoot $localAppData
+Assert-Equal $resBigEvent.WrapperExitCode 0 'oversized-events tail exits 0'
+$bigEventLines = Get-CcodexEventsBlockLines -Stdout $resBigEvent.Stdout -Lines 40
+Assert-Equal $bigEventLines.Count 4 'all four events lines are present (the oversized final line is NOT dropped)'
+$expectedBig = ('x' * 200) + ' …(+59800 bytes)'
+Assert-Equal $bigEventLines[3] $expectedBig 'final oversized line truncated to the 200-byte default width with a correct dropped-byte marker'
+Assert-Equal $bigEventLines[0] 'event 1' 'preceding small events lines render intact and unmarked'
+
+Write-Host "Invoke-CcodexTailCommand: an oversized FINAL events line LARGER than the read window is still shown as a truncated prefix with the true dropped count"
+$jobHugeEvent = New-CcodexTestJobDir
+$hugeLine = ('y' * 100000)
+Write-CcodexTextFile -Path (Join-Path $jobHugeEvent.JobDir 'codex-events.jsonl') -Content ("event a`nevent b`n" + $hugeLine + "`n")
+$resHugeEvent = Invoke-CcodexTailCommand -JobId $jobHugeEvent.JobId -Lines 40 -StateRoot $localAppData
+Assert-Equal $resHugeEvent.WrapperExitCode 0 'huge-events tail exits 0'
+$hugeEventLines = Get-CcodexEventsBlockLines -Stdout $resHugeEvent.Stdout -Lines 40
+Assert-Equal $hugeEventLines.Count 3 'the >window oversized final line is retrieved alongside the earlier lines, never dropped'
+Assert-Equal $hugeEventLines[2] (('y' * 200) + ' …(+99800 bytes)') 'the >window final line renders as a 200-byte prefix with its true full dropped-byte count'
+Assert-Equal $hugeEventLines[0] 'event a' 'lines before a >window oversized final line are still reached by the backward scan'
+
+Write-Host "Invoke-CcodexTailCommand: --max-line width is honored and the marker sits outside the width"
+$resNarrow = Invoke-CcodexTailCommand -JobId $jobBigEvent.JobId -Lines 40 -MaxLine 10 -StateRoot $localAppData
+$narrowLines = Get-CcodexEventsBlockLines -Stdout $resNarrow.Stdout -Lines 40
+Assert-Equal $narrowLines[3] (('x' * 10) + ' …(+59990 bytes)') '--max-line 10 keeps 10 content bytes; the marker is appended beyond the width'
+
+Write-Host "Invoke-CcodexTailCommand: --max-line 0 restores verbatim events output (no truncation, no marker)"
+$resVerbatim = Invoke-CcodexTailCommand -JobId $jobBigEvent.JobId -Lines 40 -MaxLine 0 -StateRoot $localAppData
+$verbatimLines = Get-CcodexEventsBlockLines -Stdout $resVerbatim.Stdout -Lines 40
+Assert-Equal $verbatimLines[3] $bigLine '--max-line 0 emits the full 60000-byte line verbatim with no marker'
+
+Write-Host "Invoke-CcodexTailCommand: truncation never splits a multi-byte UTF-8 sequence / surrogate pair, and dropped bytes use UTF-8 length"
+$jobUtf8 = New-CcodexTestJobDir
+# 198 ASCII 'a', then an astral emoji (U+1F600, 4 UTF-8 bytes) whose bytes straddle the 200-byte
+# cut, then trailing padding. A byte-blind cut at 200 would slice the 4-byte sequence.
+$emoji = [System.Char]::ConvertFromUtf32(0x1F600)
+$utf8Line = ('a' * 198) + $emoji + ('b' * 50)
+Write-CcodexTextFile -Path (Join-Path $jobUtf8.JobDir 'codex-events.jsonl') -Content ($utf8Line + "`n")
+$resUtf8 = Invoke-CcodexTailCommand -JobId $jobUtf8.JobId -Lines 40 -StateRoot $localAppData
+$utf8Lines = Get-CcodexEventsBlockLines -Stdout $resUtf8.Stdout -Lines 40
+$utf8Rendered = $utf8Lines[0]
+$utf8Content = $utf8Rendered -replace ' …\(\+\d+ bytes\)$', ''
+Assert-Equal $utf8Content ('a' * 198) 'the cut backs off to a UTF-8 boundary: the straddling emoji is dropped whole, not split'
+Assert-True ($utf8Rendered -notlike "*$([char]0xFFFD)*") 'no U+FFFD replacement char: the surrogate pair was never split mid-sequence'
+# Full UTF-8 byte length = 198 + 4 (emoji) + 50 = 252; kept 198 => dropped 54.
+Assert-True ($utf8Rendered -like '* …(+54 bytes)') 'dropped count is computed from UTF-8 byte length (198a + 4-byte emoji + 50b = 252; kept 198)'
+
+Write-Host "Invoke-CcodexTailCommand: a normal-width events line is emitted unchanged (no marker) under the default width"
+$jobPlain = New-CcodexTestJobDir
+New-CcodexLineFile -Path (Join-Path $jobPlain.JobDir 'codex-events.jsonl') -LineCount 3 -Prefix 'evt'
+$resPlain = Invoke-CcodexTailCommand -JobId $jobPlain.JobId -Lines 40 -StateRoot $localAppData
+$plainLines = Get-CcodexEventsBlockLines -Stdout $resPlain.Stdout -Lines 40
+Assert-Equal $plainLines[0] 'evt 1' 'a short events line renders verbatim with no truncation marker'
+Assert-True ($plainLines[2] -eq 'evt 3') 'the last short events line renders verbatim'
+
+# ---- Codex-review fixes (2026-07-21): CRLF marker correctness, honest verbatim cap, width clamp ----
+
+Write-Host "Invoke-CcodexTailCommand: an oversized INTERMEDIATE CRLF events line does not count its CR in the dropped-byte marker"
+$jobCrlf = New-CcodexTestJobDir
+# 60000 'x' + CRLF (an oversized intermediate line that WILL be read-capped), then a final line.
+Write-CcodexTextFile -Path (Join-Path $jobCrlf.JobDir 'codex-events.jsonl') -Content (('x' * 60000) + "`r`n" + "final`n")
+$resCrlf = Invoke-CcodexTailCommand -JobId $jobCrlf.JobId -Lines 40 -StateRoot $localAppData
+$crlfLines = Get-CcodexEventsBlockLines -Stdout $resCrlf.Stdout -Lines 40
+# Logical length is 60000 (CR excluded); kept 200 => dropped 59800, NOT 59801.
+Assert-Equal $crlfLines[0] (('x' * 200) + ' …(+59800 bytes)') 'the CRLF terminator is excluded from the logical length before the read cap (dropped count is not inflated by the CR)'
+Assert-Equal $crlfLines[1] 'final' 'the line after an oversized CRLF record renders intact'
+
+Write-Host "Invoke-CcodexTailCommand: verbatim (--max-line 0) past the per-line ceiling still surfaces an honest dropped-byte marker"
+$savedReadCap = $script:CcodexTailReadCap
+try {
+    $script:CcodexTailReadCap = 100
+    $jobVCap = New-CcodexTestJobDir
+    Write-CcodexTextFile -Path (Join-Path $jobVCap.JobDir 'codex-events.jsonl') -Content (('z' * 300) + "`n")
+    $resVCap = Invoke-CcodexTailCommand -JobId $jobVCap.JobId -Lines 40 -MaxLine 0 -StateRoot $localAppData
+    $vCapLines = Get-CcodexEventsBlockLines -Stdout $resVCap.Stdout -Lines 40
+    Assert-Equal $vCapLines[0] (('z' * 100) + ' …(+200 bytes)') 'verbatim beyond the read ceiling shows a 100-byte prefix + honest (+200 bytes) marker instead of silently dropping'
+
+    Write-Host "Invoke-CcodexTailCommand: an enormous --max-line is clamped to the per-line ceiling (bounded allocation), remainder marked"
+    $resHugeMax = Invoke-CcodexTailCommand -JobId $jobVCap.JobId -Lines 40 -MaxLine 1000000 -StateRoot $localAppData
+    $hugeMaxLines = Get-CcodexEventsBlockLines -Stdout $resHugeMax.Stdout -Lines 40
+    Assert-Equal $hugeMaxLines[0] (('z' * 100) + ' …(+200 bytes)') '--max-line 1000000 reads only the 100-byte ceiling (no 1 MB allocation) and marks the rest'
+
+    Write-Host "Invoke-CcodexTailCommand: a read-ceiling cut that lands mid multi-byte sequence backs off to a UTF-8 boundary"
+    $script:CcodexTailReadCap = 200
+    $jobMidSeq = New-CcodexTestJobDir
+    $emojiMid = [System.Char]::ConvertFromUtf32(0x1F600)   # 4 UTF-8 bytes, straddling the 200-byte ceiling
+    Write-CcodexTextFile -Path (Join-Path $jobMidSeq.JobDir 'codex-events.jsonl') -Content (('a' * 198) + $emojiMid + ('b' * 50) + "`n")
+    $resMidSeq = Invoke-CcodexTailCommand -JobId $jobMidSeq.JobId -Lines 40 -MaxLine 0 -StateRoot $localAppData
+    $midSeqLine = (Get-CcodexEventsBlockLines -Stdout $resMidSeq.Stdout -Lines 40)[0]
+    $midSeqContent = $midSeqLine -replace ' …\(\+\d+ bytes\)$', ''
+    Assert-Equal $midSeqContent ('a' * 198) 'a mid-sequence read-ceiling cut drops the dangling partial emoji, not a broken byte'
+    Assert-True ($midSeqLine -notlike "*$([char]0xFFFD)*") 'no U+FFFD replacement char when the read ceiling falls inside a 4-byte sequence'
+    Assert-True ($midSeqLine -like '* …(+54 bytes)') 'the ceiling-truncated line reports the true UTF-8 dropped count (252 total - 198 kept)'
+} finally {
+    $script:CcodexTailReadCap = $savedReadCap
+}
+
+Write-Host "Invoke-CcodexTailCommand: tail is read-only — it does not write status.json"
+$jobRO = New-CcodexTestJobDir
+New-CcodexLineFile -Path (Join-Path $jobRO.JobDir 'codex-events.jsonl') -LineCount 5 -Prefix 'ro'
+$roStatusPath = Join-Path $jobRO.JobDir 'status.json'
+$roBefore = (Get-FileHash -LiteralPath $roStatusPath -Algorithm SHA256).Hash
+Invoke-CcodexTailCommand -JobId $jobRO.JobId -Lines 40 -StateRoot $localAppData | Out-Null
+$roAfter = (Get-FileHash -LiteralPath $roStatusPath -Algorithm SHA256).Hash
+Assert-Equal $roAfter $roBefore 'status.json is byte-identical after tail (no reconciliation writes)'
+
+# ---- shell-level --max-line presence-aware validation ----
+
+Write-Host "shell-level: ccodex.ps1 tail <id> --max-line 0 -> exit 0 (0 is a valid, present value)"
+$jobMaxShell = New-CcodexTestJobDir
+New-CcodexLineFile -Path (Join-Path $jobMaxShell.JobDir 'codex-events.jsonl') -LineCount 3 -Prefix 'ml'
+$shellMax0Out = & pwsh -NoLogo -NoProfile -File $ccodexPs tail $jobMaxShell.JobId --max-line 0 --state-root $localAppData
+$shellMax0Exit = $LASTEXITCODE
+Assert-Equal $shellMax0Exit 0 '--max-line 0 exits 0 (valid)'
+
+Write-Host "shell-level: ccodex.ps1 tail <id> --max-line abc -> exit 2 (non-integer)"
+$shellMaxAbcOut = & pwsh -NoLogo -NoProfile -File $ccodexPs tail $jobMaxShell.JobId --max-line abc --state-root $localAppData
+Assert-Equal $LASTEXITCODE 2 'non-numeric --max-line exits 2'
+
+Write-Host "shell-level: ccodex.ps1 tail <id> --max-line -5 -> exit 2 (negative)"
+$shellMaxNegOut = & pwsh -NoLogo -NoProfile -File $ccodexPs tail $jobMaxShell.JobId --max-line -5 --state-root $localAppData
+Assert-Equal $LASTEXITCODE 2 'negative --max-line exits 2'
+
+Write-Host "shell-level: ccodex.ps1 tail <id> --max-line (no value) -> exit 2 (present-but-valueless)"
+$shellMaxMissingOut = & pwsh -NoLogo -NoProfile -File $ccodexPs tail $jobMaxShell.JobId --max-line
+$shellMaxMissingExit = $LASTEXITCODE
+Assert-Equal $shellMaxMissingExit 2 'a present-but-valueless --max-line exits 2'
+
 
 # ============================================================
 # Invoke-CcodexDebugCommand (design: "debug <job_id>", Phase 2b Task 7)

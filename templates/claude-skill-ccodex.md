@@ -151,7 +151,7 @@ Follow these steps literally after finishing a feature or fix:
 
 ```powershell
 ccodex cancel <job_id>          # stop a running job (cancel exits 0; later wait exits 22; read exits 11 unless a result.md was already produced)
-ccodex tail <job_id> [--lines <n>]   # last log lines of a running/finished job
+ccodex tail <job_id> [--lines <n>] [--max-line <bytes>]   # last log lines; events truncated to --max-line UTF-8 bytes (default 200, 0=verbatim) so a giant item.completed can't swamp the view
 ccodex debug <job_id>           # compact diagnostic bundle + suggested next command
 ccodex cleanup --dry-run        # preview retention sweep (default: terminal jobs older than 14d)
 ccodex cleanup                  # delete expired terminal jobs (never running/young ones)

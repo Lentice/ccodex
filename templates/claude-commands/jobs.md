@@ -10,7 +10,7 @@ the jobs submitted earlier in this conversation.
 ccodex status <job_id>              # one-line lifecycle check (running jobs show health=ok|stale)
 ccodex wait <job_id> --wait-timeout-sec 600   # block for the result; exit 20 = still running, re-wait
 ccodex read <job_id>                # non-blocking result read (exit 4 = not finished yet)
-ccodex tail <job_id> --lines 80     # raw log tail for a job that looks stuck
+ccodex tail <job_id> --lines 80     # log tail for a stuck job; events truncated to --max-line bytes (default 200, 0=verbatim)
 ccodex debug <job_id>               # compact diagnosis + suggested next command
 ccodex cancel <job_id>              # stop a job that's wrong or no longer needed — don't let it run out
 ```

@@ -29,6 +29,7 @@ and the delegation-run issue record
 | 16. Zero-wait orphan reconciliation on the `status`/`read`/`wait`/`wait --all` lifecycle polling paths | landed 2026-07-20 |
 | 19. Structured review findings schema (parser + `findings` in `read`/`wait`/`wait --all` `--json`; review-prompt appendix) | 394e73b / ee58261 / cfaec83 / 047c7c2 (+ docs) |
 | 15. Drop `confidence:low` failure-classification signatures (precision over recall) | landed 2026-07-20 |
+| 13. `tail --max-line` per-line events truncation + oversized-final-line retrieval fix | landed 2026-07-21 (#11) |
 
 ## Open — curated backlog items (user picks)
 
@@ -39,21 +40,6 @@ and the delegation-run issue record
 | 8 | `apply --check` (transactional preview) | 3 | validate the patch applies to the clean main repo before mutating |
 | 9 | `review --include-untracked` | 3 | review new/untracked files, not just tracked diffs |
 | 10 | Review profiles + `capabilities --json` | 3 | deterministic prompt presets; capability manifest consumed by skill/commands |
-| 13 | `tail --summary` / truncate `aggregated_output` | 2 | delegation-run friction (2026-07-16 s2): `tail` dumps `codex-events.jsonl` verbatim, and a single `item.completed` embeds full command stdout (a test-suite run was ~60 KB on one line), so `tail` is unusable for quick health-checks on long jobs. An event-type summary / per-line truncation mode fixes it. **Re-tiered 3→2 (2026-07-20):** health-checking long jobs is a high-frequency agent operation; also the natural first new registry flag to validate #14 (now landed) — add it as a `tail` handler flag + registry entry in `lib/CommandRegistry.ps1`. |
-
-> **#14 landed (2026-07-20, commits 246d5f3 / 025ccd1 / 27200bb / 5e89a7e).** The dispatcher is now
-> a data-driven registry (`lib/CommandRegistry.ps1`); items #6–#13 are each a new
-> `Invoke-Ccodex*Dispatch` handler + registry entry rather than switch surgery. See the reference's
-> module section and the dev-notes "Command registry / dispatch" section.
-
-> **Codex review of #11/#12 done (2026-07-20).** The scoped `ccodex review` was run once quota
-> recovered and surfaced two `apply` findings, both adopted and landed with tests: (1) `apply
-> --message` used the silent-null `Get-CcodexArgValue` (a valueless/flag-swallowing `--message` was
-> ignored or consumed the next flag) — now `Get-CcodexRequiredArgValue` → exit `2`; (2) the
-> `--message`/`--reset-author` amend-failure path claimed the main repo was restored without
-> verifying — now both apply failure paths verify via the shared `Get-CcodexApplyRestoreState` and
-> warn (naming the actual `HEAD`) on an incomplete rollback. See the dev-notes "apply flag-parse +
-> rollback honesty" section.
 
 ## Open — speed/stability review items (2026-07-20 assessment, user picks)
 
@@ -65,16 +51,6 @@ registry) is the same review's top speed item but was already listed above.
 | 17 | Flip `--embed-diff` off by default in review flow docs/templates | 3 | embed-diff existed for the `CreateProcessWithLogonW 1385` sandbox-spawn quirk, lifted as of codex 0.144.1. Wrapper-side `git diff` + size-capped embedding adds latency and can truncate the diff Codex sees. Keep the flag, but make self-diff the documented default and embed-diff the fallback (rule/skill/README updates). |
 | 18 | Simplify or drop `cleanup --scrub-thread-ids` | 3 | Scrubbing exists only to make old jobs non-resumable; an age check on the `resume` path achieves the same with far less destructive-path code in the largest lib module (`Cleanup.ps1`, 403 lines). Contract note: keep the flag accepted (append-only contract) even if it becomes a no-op alias for the age policy. |
 
-> **#15 landed (2026-07-20).** The five `confidence: low` bare tokens (`429`, bare `auth`, `401`,
-> `502`, `503`) were removed from the `lib/FailureClassify.ps1` signal table — precision over
-> recall: a bare token matching incidental stderr / embedded output stamped a wrong `failure_reason`,
-> and a misclassification is worse than no classification. Surviving rows are all `high`/`medium`;
-> `confidence` is never `low` for new jobs (historical values stay readable). Class order, precedence,
-> never-throws discipline, HTTP-code regex extraction, and the `failure`/`failure_reason` contract are
-> unchanged. A failure matching only a removed token now yields no signal and falls to the documented
-> "exit 10, no `failure_reason`" path (read the job's `stderr.log` — `status.json.error` is generally
-> null for async failures). Amendment in the adapter-design doc + reference/README/templates updated.
-
 ## Open — delegation-quality items (2026-07-20 assessment, user picks)
 
 From a Claude assessment of where the biggest leverage sits outside the existing items: the
@@ -83,17 +59,6 @@ consumability of Codex's output and quota economics dominate per-delegation cost
 | # | Item | Tier | Notes |
 |---|---|---|---|
 | 20 | Fan-out concurrency cap (`max_parallel` queue for `submit`) | 3 | `submit` + `--group` encourages fan-out with no guard against launching N jobs that exhaust quota or local resources at once. A simple config-driven cap: jobs beyond the limit queue as `created` and start as slots free. Defensive; lower priority than 19. |
-
-> **#19 landed (2026-07-20, commits 394e73b / ee58261 / cfaec83 / 047c7c2 + this docs commit).** Shipped
-> as four tracer-bullet tickets: `lib/ReviewFindings.ps1` parser (hint-only, degrade-to-null), the
-> review-prompt findings appendix in the shared instruction block (both self-diff/embed forms), and a
-> `findings` field in the `read`/`wait`/`wait --all` `--json` envelopes (plus `findings: null` on
-> their error envelopes; `status --json` untouched). **Correction to the original note:** this
-> *is* an append-only **lifecycle envelope** addition (the note above claimed it touched "not the
-> lifecycle contract") — `findings` is a new always-present key on `read`/`wait`; `schema_version`
-> stays `1` and no existing key changed meaning. It was implemented via envelope wiring rather than
-> result-file rewriting, so the raw `result` content is byte-unchanged. See the reference's
-> **findings field** note and the `review` section.
 
 ## Open — issues from the 2026-07-16 delegation run (user picks)
 

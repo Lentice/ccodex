@@ -614,12 +614,32 @@ ccodex cancel <job_id>
 # -> <job_id> cancelled
 ```
 
-**`ccodex tail <job_id> [--lines <n>]`** prints the last `n` lines (default `40`) of
-`stderr.log` and `codex-events.jsonl` for a job — read-only, never reconciles or mutates
-`status.json`. A missing file renders as `(absent)` rather than failing the whole command.
+**`ccodex tail <job_id> [--lines <n>] [--max-line <bytes>]`** prints the last `n` lines
+(default `40`) of `stderr.log` and `codex-events.jsonl` for a job — read-only, never reconciles
+or mutates `status.json`. A missing file renders as `(absent)` rather than failing the whole
+command.
+
+`stderr.log` lines are printed raw (byte-for-byte the last `n`). Each `codex-events.jsonl` line
+is truncated to at most `--max-line` UTF-8 bytes of content (default `200`), so a single giant
+`item.completed` event — one can embed a whole command's stdout, ~60 KB observed — cannot swamp a
+health check. When a line is truncated, a `…(+N bytes)` marker (appended *outside* the width
+budget) reports the dropped byte count, computed from the line's full UTF-8 byte length. The cut
+lands on a UTF-8 character boundary, so a multi-byte sequence (hence any surrogate pair) is never
+split. `--max-line 0` restores verbatim output (no per-line width limit). A single fixed 16 MB
+per-line read ceiling bounds memory in every mode, so a pathological multi-MB line — even under
+`--max-line 0` — is shown as a prefix with the same honest `…(+N bytes)` marker rather than
+silently losing its tail; realistic event lines are far below this. An oversized *final*
+record is always shown as a truncated prefix with its true dropped-byte count — never dropped,
+even when it is larger than the internal read window (retrieval locates line starts by scanning
+backward for newlines rather than reading a fixed end-window, and never loads the whole file).
+
+`--max-line` is presence-aware: an absent flag uses the default width, but a *present*
+`--max-line` must carry a value — `--max-line 0` is valid, while a trailing/valueless `--max-line`
+or a non-integer/negative value is a usage error (exit `2`).
 
 ```powershell
-ccodex tail <job_id> --lines 80
+ccodex tail <job_id> --lines 80 --max-line 200
+ccodex tail <job_id> --max-line 0          # verbatim codex-events.jsonl (old behavior)
 ```
 
 **`ccodex debug <job_id>`** prints a compact one-shot diagnosis: status (with `health=ok|stale`
@@ -934,7 +954,7 @@ Each dispatcher subcommand and `lib/` module, verified against the current code:
   Codex knobs (see [run and submit](#run-and-submit));
   `diff`/`apply` take a worktree job id (`diff` also `--stat`/`--name-only`; `apply` also
   `--allow-untracked`/`--message`/`--reset-author`); `cancel`/`tail`/`debug` take a job id (`tail` also
-  accepts `--lines`); `cleanup` accepts `--older-than`,
+  accepts `--lines` and `--max-line`); `cleanup` accepts `--older-than`,
   `--thread-ttl`, `--dry-run`, `--include-stalled`, `--scrub-thread-ids`, and `--repo`; `doctor`
   accepts `--no-smoke` and `--repo`
 - `lib/Help.ps1` — canonical ordered command metadata plus top-level/per-command help rendering;

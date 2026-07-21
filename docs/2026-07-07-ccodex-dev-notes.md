@@ -328,6 +328,53 @@ A scoped Codex review of the #11/#12 diff surfaced two `apply` gaps; both are fi
   fails), which is why its coverage is the helper's own unit test plus the existing `am`-failure
   integration tests (conflict / apply-twice / hook-conflict) that now exercise the shared helper.
 
+## tail events truncation + oversized-final-line retrieval (backlog #13, #11, 2026-07-21)
+
+`tail`'s `codex-events.jsonl` block is now retrieved and rendered by two dedicated functions in
+`ccodex.ps1`, guarded by the `(f)` block in `tests/TailDebug.tests.ps1`. Know these before touching
+either:
+
+- **`Get-CcodexTailEventsRecords` replaces `Get-CcodexTailLines` for events only** — `stderr.log`
+  (and `debug`'s 5-line stderr peek) still use `Get-CcodexTailLines` and must stay byte-for-byte
+  unchanged. The old fixed 64 KB end-window **dropped** an oversized final record: when the whole
+  window fell inside one line, the split produced a single partial element that the `seekedMidFile`
+  guard then removed → empty. The new function instead scans backward in 16 KB chunks collecting the
+  `\n` offsets that begin each retained line, so the last N *complete logical lines* are always
+  returned even when one is larger than any window, and it reads only those backward windows plus
+  each retained line's own bytes — never the whole file. It returns records `{ ByteLength; Bytes }`
+  where `ByteLength` is the line's true full UTF-8 content length and `Bytes` is only the first
+  `ReadCap` bytes (the display prefix). Do not "simplify" it back to a single end-window read. A
+  trailing CR (CRLF terminator) is excluded from `ByteLength` **up front** (a 1-byte peek at `e-1`
+  before the read cap is applied), so an oversized *intermediate* CRLF line's dropped count is not
+  inflated by one — a Codex-review finding; do not move the CR strip back to a post-read `readN==len`
+  check, which misses read-capped lines.
+- **`ReadCap` is width-driven and ceiling-clamped.** `Invoke-CcodexTailCommand` passes
+  `min(MaxLine + 4, $script:CcodexTailReadCap)` when truncating (all the renderer can need is the
+  width plus a few bytes of char-boundary slack) and the ceiling itself for `--max-line 0`. The
+  single `$script:CcodexTailReadCap` (16 MB) ceiling bounds the per-line byte-array allocation in
+  **every** mode — an enormous `--max-line` cannot force a giant allocation (Codex-review finding),
+  and anything past the ceiling surfaces via the marker rather than being read. This is why a 100 KB
+  final record costs ~204 bytes of retained memory in the default mode while still reporting the true
+  `…(+99800 bytes)` dropped count (dropped is computed from `ByteLength`, not from what was read).
+- **`Format-CcodexTailEventsLine` truncates by UTF-8 *bytes*, backing off continuation bytes.** When
+  the cut lands inside the held buffer, the point retreats while `Bytes[keep]` is a `10xxxxxx`
+  continuation byte; when the whole buffer was itself cut mid-content by the read ceiling, a dangling
+  trailing partial sequence is dropped by walking back to the last lead byte and checking its
+  expected length. Either way a multi-byte sequence — hence any surrogate pair (one astral code point
+  is a single 4-byte UTF-8 sequence) — is never split, and the decoded prefix never contains a
+  `U+FFFD`. The dropped count uses UTF-8 byte length, never `String.Length`; the `…(+N bytes)` marker
+  is appended *outside* the width budget. **Verbatim (`--max-line 0`) is honest, not silent:** if a
+  line exceeds the read ceiling it is still shown as a prefix + marker (Codex-review finding) rather
+  than quietly losing the tail. The surrogate-pair guards are pinned by the emoji (`U+1F600`) tests
+  (both the display-width cut and the read-ceiling cut) — do not switch the truncation to a
+  `.Substring`/char-index basis.
+- **`--max-line` is presence-aware** via `Get-CcodexRequiredArgValue` + `ConvertTo-CcodexMaxLineWidth`
+  (0 is a legal value distinct from an absent flag; valueless/negative/non-integer → exit `2`). A
+  very large positive width is accepted, not rejected — the ceiling clamp above makes it safe, and
+  the line renders full-or-prefix+marker as appropriate. Unknown-flag permissiveness is unchanged —
+  the `tail` Characterization test still asserts a bogus flag does not alter output or exit code, so
+  do NOT add unknown-flag rejection here.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them

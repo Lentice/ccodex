@@ -196,7 +196,7 @@ Top-level `ccodex --help` and all valid help forms exit `0`; help for an unknown
    ```powershell
    ccodex list                       # enumerate jobs (--repo/--state/--group/--label filter; --json for a machine envelope)
    ccodex cancel <job_id>            # a submitted job needs to be stopped now, not waited out
-   ccodex tail <job_id> --lines 80   # raw stderr.log / codex-events.jsonl tail for a stuck job
+   ccodex tail <job_id> --lines 80   # stderr.log (raw) + codex-events.jsonl tail; each event line truncated to --max-line UTF-8 bytes (default 200; 0=verbatim) so a huge item.completed can't swamp the view
    ccodex debug <job_id>             # compact one-shot diagnosis + suggested next command
    ccodex cleanup --dry-run          # periodic hygiene: preview the retention sweep first
    ccodex cleanup --older-than 14d   # then actually delete aged terminal jobs

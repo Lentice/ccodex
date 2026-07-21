@@ -281,6 +281,21 @@ effort; Codex rejects unsupported combinations):
 "Compare another option." | ccodex run --mode brainstorm --group design --label option-b
 ```
 
+**Inspect a job's raw logs** for a quick health check on a running or stuck job:
+
+```powershell
+ccodex tail <job_id>                    # last 40 lines of stderr.log + codex-events.jsonl
+ccodex tail <job_id> --lines 80         # more lines per log
+ccodex tail <job_id> --max-line 120     # truncate each event line to 120 UTF-8 bytes
+ccodex tail <job_id> --max-line 0       # verbatim events (no per-line truncation)
+```
+
+`tail` is read-only. `stderr.log` prints raw; each `codex-events.jsonl` line is truncated to
+`--max-line` UTF-8 bytes (default `200`) with a `…(+N bytes)` marker, so a single huge
+`item.completed` event can't swamp the view. The cut respects UTF-8 character boundaries; an
+oversized final record is shown truncated, never dropped. `--max-line 0` disables the per-line
+width limit (a 16 MB per-line read ceiling still bounds memory in every mode).
+
 **Cleanup**, periodically or when reclaiming disk:
 
 ```powershell
