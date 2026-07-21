@@ -120,6 +120,43 @@ function Test-CcodexWorkerAlive {
     }
 }
 
+function Test-CcodexBackendIdParsable {
+    # $true only when $BackendId is a well-formed <pid>;<UTC start time> identity. Distinguishes
+    # "we have a real identity to reason about" from "empty/malformed, nothing to check". This is
+    # the gate the #24c absent-evidence terminalization needs: Test-CcodexWorkerAlive returns
+    # $false for BOTH a proven-dead identity AND an empty/malformed one, but only the former proves
+    # the worker gone. An empty backend_id (a worker that died before stamping one) can never be
+    # PROVED gone, so it must not be force-failed from a missing exit_code.txt.
+    param([string]$BackendId)
+    if ([string]::IsNullOrEmpty($BackendId)) { return $false }
+    $parts = $BackendId.Split(';', 2)
+    if ($parts.Count -ne 2) { return $false }
+    $processId = 0
+    if (-not [int]::TryParse($parts[0], [ref]$processId)) { return $false }
+    $parsedStart = [DateTime]::MinValue
+    return [DateTime]::TryParse(
+        $parts[1],
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsedStart)
+}
+
+function Get-CcodexProcessIdentity {
+    # Captures a just-launched worker's PID-reuse-safe identity string (<pid>;<UTC start time>)
+    # from a live process id, using the SAME format ConvertTo-CcodexBackendId / Test-CcodexWorkerAlive
+    # speak. The startup sentinel (Wait-CcodexWorkerLaunch) uses this so its liveness check matches
+    # both the pid AND the process start time -- a reused pid (a different process that inherited the
+    # pid after the worker died) is then correctly seen as "worker gone" rather than mistaken for the
+    # worker still starting. Returns $null when the process cannot be found (already gone).
+    param([Parameter(Mandatory)][int]$ProcessId)
+    try {
+        $proc = Get-Process -Id $ProcessId -ErrorAction Stop
+        return ConvertTo-CcodexBackendId -ProcessId $ProcessId -StartTime $proc.StartTime
+    } catch {
+        return $null
+    }
+}
+
 function Update-CcodexOrphanStatus {
     # $LockTimeoutSec bounds how long the (write-side) reconciliation will wait for the
     # per-job lock before giving up. Reconciliation is triggered from read-only commands
@@ -146,22 +183,51 @@ function Update-CcodexOrphanStatus {
     }
 
     $exitCodePath = Join-Path $JobDir 'exit_code.txt'
-    if (-not (Test-Path -LiteralPath $exitCodePath -PathType Leaf)) {
-        return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
-    }
-
-    # Dogfood #2: exit_code.txt can be caught mid-write (empty/partial/corrupt) if the
-    # worker died at just the wrong instant. Treat anything that doesn't parse cleanly as
-    # a whole integer as no-usable-evidence rather than throwing — the job stays `running`
-    # with health=possibly-stale, to be reconciled on a later poll once the file settles.
-    $exitCodeRawContent = Get-Content -LiteralPath $exitCodePath -Raw
-    $exitCodeText = if ($null -ne $exitCodeRawContent) { $exitCodeRawContent.Trim() } else { '' }
-    $codexExitCode = 0
-    if (-not [int]::TryParse($exitCodeText, [ref]$codexExitCode)) {
-        return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
-    }
     $resultPath = Join-Path $JobDir 'result.md'
-    $verdict = Test-CcodexResult -CodexExitCode $codexExitCode -ResultPath $resultPath
+
+    if (Test-Path -LiteralPath $exitCodePath -PathType Leaf) {
+        # Dogfood #2: exit_code.txt can be caught mid-write (empty/partial/corrupt) if the
+        # worker died at just the wrong instant. Treat anything that doesn't parse cleanly as
+        # a whole integer as no-usable-evidence rather than throwing — the job stays `running`
+        # with health=possibly-stale, to be reconciled on a later poll once the file settles.
+        # A PRESENT-but-unparseable file means the worker had begun finalizing, so this is the
+        # mid-finalize case: we must NOT race it to a fabricated terminal state (backlog #24 c).
+        $exitCodeRawContent = Get-Content -LiteralPath $exitCodePath -Raw
+        $exitCodeText = if ($null -ne $exitCodeRawContent) { $exitCodeRawContent.Trim() } else { '' }
+        $codexExitCode = 0
+        if (-not [int]::TryParse($exitCodeText, [ref]$codexExitCode)) {
+            return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
+        }
+        $verdict = Test-CcodexResult -CodexExitCode $codexExitCode -ResultPath $resultPath
+        $reconciledStatus = $verdict.Status
+        $reconciledCodexExitCode = $codexExitCode
+        $reconciledWrapperExitCode = $verdict.WrapperExitCode
+        $reconciledError = if ($reconciledStatus -eq 'failed') {
+            'worker process exited; state reconciled from completion evidence'
+        } else {
+            $null
+        }
+    } elseif (-not (Test-CcodexBackendIdParsable -BackendId $status.backend_id)) {
+        # The worker is not alive, but with an empty/malformed backend_id we cannot PROVE it gone
+        # (as opposed to "died before ever stamping an identity" vs "about to appear"). A missing
+        # exit_code.txt here is the created-orphan case the backlog notes reconciliation "can never
+        # settle": the submit-path launch-failure terminalization (#24a) handles it at launch time.
+        # Never fabricate a terminal state from a non-provable liveness result — stay possibly-stale.
+        return [pscustomobject]@{ Status = $status.status; Reconciled = $false; PossiblyStale = $true }
+    } else {
+        # backlog #24 (c): the worker is provably gone (well-formed identity checked gone above) and
+        # it never recorded an exit code. Unlike a PRESENT-but-unparseable exit_code.txt (mid-finalize,
+        # handled above), an ABSENT file means the worker died before finalizing ANYTHING — no
+        # completion evidence exists and none can ever appear, because a dead process writes nothing
+        # more. Left non-terminal this is the "evidence-less killed running worker" orphan that hangs
+        # wait/wait --all forever, so terminalize it as failed from the dead-worker fact itself.
+        # codex_exit_code stays null (Codex never reported one); wrapper_exit_code 10 mirrors the
+        # generic run-failure code `wait` maps any failed job to when no {11,12} code is recorded.
+        $reconciledStatus = 'failed'
+        $reconciledCodexExitCode = $null
+        $reconciledWrapperExitCode = 10
+        $reconciledError = 'worker process exited before recording an exit code; reconciled as failed'
+    }
 
     # Same diagnostics normal completion records (ccodex.ps1's Invoke-CcodexJobExecution):
     # failure_reason/failure only on a failure terminal status (never stamped for a
@@ -170,7 +236,7 @@ function Update-CcodexOrphanStatus {
     # both compared to a worker that reached its own terminal status normally.
     $stderrPath = Join-Path $JobDir 'stderr.log'
     $eventsPath = Join-Path $JobDir 'codex-events.jsonl'
-    $failureSignal = if ($verdict.Status -eq 'failed') { Get-CcodexFailureSignal -CodexExitCode $codexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
+    $failureSignal = if ($reconciledStatus -eq 'failed') { Get-CcodexFailureSignal -CodexExitCode $reconciledCodexExitCode -StderrPath $stderrPath -EventsPath $eventsPath } else { $null }
     $failureReason = if ($failureSignal) { $failureSignal.reason } else { $null }
     $codexThreadId = Get-CcodexCodexThreadId -EventsPath $eventsPath
 
@@ -178,15 +244,11 @@ function Update-CcodexOrphanStatus {
     foreach ($property in $status.PSObject.Properties) {
         $updated[$property.Name] = $property.Value
     }
-    $updated['status'] = $verdict.Status
-    $updated['codex_exit_code'] = $codexExitCode
-    $updated['wrapper_exit_code'] = $verdict.WrapperExitCode
+    $updated['status'] = $reconciledStatus
+    $updated['codex_exit_code'] = $reconciledCodexExitCode
+    $updated['wrapper_exit_code'] = $reconciledWrapperExitCode
     $updated['finished_at'] = (Get-Date).ToUniversalTime().ToString('o')
-    $updated['error'] = if ($verdict.Status -eq 'failed') {
-        'worker process exited; state reconciled from completion evidence'
-    } else {
-        $null
-    }
+    $updated['error'] = $reconciledError
     # Append-only: these keys may not exist on an older status.json (pre-dating failure
     # classification); the indexer assignment below adds them either way.
     $updated['failure_reason'] = $failureReason
@@ -195,7 +257,7 @@ function Update-CcodexOrphanStatus {
 
     if ($DryRun) {
         # Preview only: report the computed terminal verdict WITHOUT taking the lock or writing.
-        return [pscustomobject]@{ Status = $verdict.Status; Reconciled = $true; PossiblyStale = $false; ReconciledStatus = [pscustomobject]$updated }
+        return [pscustomobject]@{ Status = $reconciledStatus; Reconciled = $true; PossiblyStale = $false; ReconciledStatus = [pscustomobject]$updated }
     }
 
     # The reconciliation rewrite is a status.json WRITE, so it goes through the per-job
@@ -225,5 +287,5 @@ function Update-CcodexOrphanStatus {
         Unlock-CcodexJob -JobDir $JobDir
     }
 
-    return [pscustomobject]@{ Status = $verdict.Status; Reconciled = $true; PossiblyStale = $false }
+    return [pscustomobject]@{ Status = $reconciledStatus; Reconciled = $true; PossiblyStale = $false }
 }

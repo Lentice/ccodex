@@ -382,6 +382,37 @@ either:
   the `tail` Characterization test still asserts a bogus flag does not alter output or exit code, so
   do NOT add unknown-flag rejection here.
 
+## Launch-failure orphans + PID-reuse-safe liveness (backlog #24, 2026-07-21)
+
+Two lifecycle-hardening fixes designed together; guarded by `tests/Detach.tests.ps1`,
+`tests/SubmitCommand.tests.ps1`, `tests/JobStatus.tests.ps1`, and the reconciliation assertions in
+`tests/StatusWaitRead.tests.ps1` / `tests/CancelCommand.tests.ps1`. Know these before touching the
+startup sentinel or `Update-CcodexOrphanStatus`:
+
+- **Sentinel liveness is identity-based, never a bare PID.** `Wait-CcodexWorkerLaunch` takes a
+  `-BackendId` (`<pid>;<UTC start time>`, captured right after launch by `Get-CcodexProcessIdentity`)
+  and checks it via `Test-CcodexWorkerAlive`, which matches the pid **and** the start time. A bare
+  `Get-Process -Id` was defeated by PID reuse: after the worker died its pid could be reassigned to an
+  unrelated live process, so the ~500 ms dead-worker fast-fail never fired and the caller waited the
+  full 120 s window. Do NOT revert `Wait-CcodexWorkerLaunch` to a `-ProcessId` + `Get-Process` check.
+- **A launch/sentinel failure terminalizes a provably-gone `created` job.** In `Invoke-CcodexSubmit`'s
+  catch, if the worker is gone (identity) AND the job is still `created`, it writes a terminal `failed`
+  `status.json` + `worker-complete.json` via `Complete-CcodexInternalFailure` (both resume and
+  non-resume branches), then still returns exit `23`. This closes the `created`-orphan that has no
+  `backend_id` for reconciliation to settle and would hang a later `wait`/`wait --all` forever. A
+  still-*alive* slow worker (or one already off `created`) is left untouched — terminalizing would race
+  its own `created`→`running` write. Mirror this guard order; do not terminalize unconditionally.
+- **Reconciliation distinguishes absent vs present-but-corrupt evidence (`#24c`).** In
+  `Update-CcodexOrphanStatus`, once the worker is proven dead: a PARSABLE `exit_code.txt` →
+  `Test-CcodexResult` terminal verdict; an **absent** `exit_code.txt` → terminal `failed`
+  (`codex_exit_code` null, `wrapper_exit_code` 10) because a dead process can never produce evidence;
+  a **present-but** empty/corrupt `exit_code.txt` is mid-finalize → stays `possibly-stale` (NOT raced
+  to a fabricated terminal). The alive-check at the top of the function must run first — the
+  absent-evidence terminalization is only ever reached for a provably-gone worker. This changed the
+  old "no evidence → possibly-stale forever" behavior: `tests/CancelCommand.tests.ps1` and
+  `tests/StatusWaitRead.tests.ps1` were updated to expect the reconciled `failed` verdict, while the
+  held-lock (contended) and present-but-corrupt cases still assert `possibly-stale`.
+
 ## Known accepted minors (deliberately not fixed)
 
 From the Phase 1 final review; re-fixing them is not required, but don't accidentally make them

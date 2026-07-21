@@ -122,16 +122,41 @@ Write-Host "Wait-CcodexWorkerLaunch: throws when the job is left in 'created' wi
 $jobB = New-CcodexTestJob
 Assert-Throws { Wait-CcodexWorkerLaunch -JobDir $jobB.JobDir -TimeoutSec 1 } "sentinel throws after timeout with no worker ever launched"
 
-Write-Host "Wait-CcodexWorkerLaunch: an already-exited worker fails fast with a distinct message"
-$exitedProcess = Start-Process -FilePath (Join-Path $PSHOME 'pwsh.exe') -ArgumentList '-NoLogo -NoProfile -Command "exit 0"' -WindowStyle Hidden -PassThru -Wait
+Write-Host "Wait-CcodexWorkerLaunch: a nonexistent-pid identity fails fast with a distinct message"
 $jobDead = New-CcodexTestJob
 $deadWorkerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 Assert-Throws {
-    Wait-CcodexWorkerLaunch -JobDir $jobDead.JobDir -ProcessId $exitedProcess.Id -TimeoutSec 30
-} "sentinel throws when the launched worker has already exited"
+    Wait-CcodexWorkerLaunch -JobDir $jobDead.JobDir -BackendId '999999;2020-01-01T00:00:00.0000000Z' -TimeoutSec 30
+} "sentinel throws when the launched worker identity is gone"
 $deadWorkerStopwatch.Stop()
 Assert-True ($script:CcodexLastError -like '*worker process exited before stamping startup*') 'dead-worker sentinel reports the distinct process-exited message'
 Assert-True ($deadWorkerStopwatch.Elapsed.TotalSeconds -lt 10) 'dead-worker sentinel returns well before the 30-second timeout (10s anti-hang guard)'
+
+# backlog #24 (b): PID-reuse safety. A backend id whose pid IS live (this test process) but whose
+# recorded start time does NOT match (a reused pid) must be treated as "worker gone" and fast-fail,
+# NOT mistaken for the original worker still alive (which would burn the full startup window).
+Write-Host "Wait-CcodexWorkerLaunch: a reused-pid identity (live pid, wrong start time) fails fast, not fooled into waiting"
+$jobReusedPid = New-CcodexTestJob
+$reusedPidBackendId = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime ([DateTime]::Parse('2000-01-01T00:00:00Z'))
+$reusedPidStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+Assert-Throws {
+    Wait-CcodexWorkerLaunch -JobDir $jobReusedPid.JobDir -BackendId $reusedPidBackendId -TimeoutSec 30
+} "sentinel throws when a reused pid's start time does not match the recorded worker identity"
+$reusedPidStopwatch.Stop()
+Assert-True ($script:CcodexLastError -like '*worker process exited before stamping startup*') 'reused-pid sentinel reports the distinct process-exited message'
+Assert-True ($reusedPidStopwatch.Elapsed.TotalSeconds -lt 10) 'reused-pid sentinel is not fooled by the live pid and returns well before the 30-second timeout'
+
+# A backend id that matches a genuinely live process (this one, correct start time) is seen as
+# alive, so the sentinel does NOT fast-fail; with the job left 'created' it runs to its timeout.
+Write-Host "Wait-CcodexWorkerLaunch: a live matching identity is seen alive (times out rather than fast-failing)"
+$jobAliveIdentity = New-CcodexTestJob
+$aliveIdentity = ConvertTo-CcodexBackendId -ProcessId $PID -StartTime (Get-Process -Id $PID).StartTime
+$aliveIdentityStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+Assert-Throws {
+    Wait-CcodexWorkerLaunch -JobDir $jobAliveIdentity.JobDir -BackendId $aliveIdentity -TimeoutSec 1
+} "sentinel times out when the identity is alive but the job never leaves created"
+$aliveIdentityStopwatch.Stop()
+Assert-True ($script:CcodexLastError -like '*did not start within 1s*') 'a live matching identity takes the timeout path, not the fast-fail path'
 
 # --- (c) cim mechanism smoke, env-independent ---
 

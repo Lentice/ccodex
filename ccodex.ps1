@@ -1045,15 +1045,46 @@ function Invoke-CcodexSubmit {
     $stateRootOverride = if ($PSBoundParameters.ContainsKey('LocalAppDataRoot')) { $LocalAppDataRoot } else { $null }
     $codexPathOverride = if ($PSBoundParameters.ContainsKey('CodexPath')) { $CodexPath } else { $null }
 
+    $workerIdentity = $null
     try {
         $workerProcessId = Start-CcodexDetachedWorker -ScriptPath $WorkerScriptPath -JobId $jobId -WorkingDirectory $init.RepoRoot `
             -StateRoot $stateRootOverride -CodexPath $codexPathOverride -Mechanism $DetachMechanism `
             -Model $Model -Effort $Effort
-        Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec -ProcessId $workerProcessId | Out-Null
+        # Capture the launched worker's PID-reuse-safe identity so the startup sentinel's liveness
+        # check matches both pid AND start time (backlog #24 b): a reused pid can no longer be
+        # mistaken for a still-starting worker.
+        $workerIdentity = Get-CcodexProcessIdentity -ProcessId $workerProcessId
+        Wait-CcodexWorkerLaunch -JobDir $jobDir -TimeoutSec $StartupTimeoutSec -BackendId $workerIdentity | Out-Null
     } catch {
-        # Do NOT rewrite status.json here: a slow-but-alive worker may still be starting,
-        # and the job must stay diagnosable in its current ('created') state.
-        $message = "ccodex: $($_.Exception.Message)`n  job:      $jobId`n  job dir:  $jobDir"
+        # Startup-sentinel failure (launch throw, dead-worker fast-fail, or timeout). backlog #24 (a):
+        # if the worker is provably GONE (identity) AND the job never moved off 'created', terminalize
+        # it as a launch failure -- otherwise it is a `created`-orphan (no backend_id) that
+        # reconciliation can never settle, so a later wait/wait --all hangs forever. If the worker is
+        # still alive (a genuinely slow start that merely overran the window), leave it 'created' for
+        # diagnosis: terminalizing would race the live worker's own created->running write.
+        $sentinelError = $_.Exception.Message
+        $currentLaunchStatus = Read-CcodexStatusFile -JobDir $jobDir
+        $workerGone = -not (Test-CcodexWorkerAlive -BackendId $workerIdentity)
+        if ($workerGone -and $currentLaunchStatus -and $currentLaunchStatus.status -eq 'created') {
+            # Mirror the pre-launch codex-path failure above: a terminal failed status.json +
+            # worker-complete.json (both wrapper_exit_code 12), taking the per-job lock and
+            # re-reading first so a concurrent cancel is preserved rather than clobbered.
+            if ($resumeContext) {
+                Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $submitMode -Access $init.ResolvedAccess `
+                    -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $sentinelError -Backend 'native' -ResultPath $resultPath `
+                    -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit -SeriesBaseCommit $init.SeriesBaseCommit `
+                    -ParentJobId $ResumeParentJobId -FallbackCodexThreadId $resumeContext.ThreadId -Group $submitGroup -Label $submitLabel | Out-Null
+            } else {
+                Complete-CcodexInternalFailure -JobDir $jobDir -JobId $jobId -Mode $Mode -Access $init.ResolvedAccess `
+                    -RepoRoot $init.RepoRoot -CreatedAt $init.CreatedAt -Message $sentinelError -Backend 'native' -ResultPath $resultPath `
+                    -MainRepo $init.MainRepo -WorktreeRepo $init.WorktreeRepo -BaseCommit $init.BaseCommit | Out-Null
+            }
+            $message = "ccodex: $sentinelError`n  the worker is gone and never stamped startup; job terminalized as failed for diagnosis.`n  job:      $jobId`n  job dir:  $jobDir"
+        } else {
+            # Worker still alive (or already off 'created'): leave status.json untouched so the
+            # slow-but-alive worker can still take ownership and be diagnosed in place.
+            $message = "ccodex: $sentinelError`n  job:      $jobId`n  job dir:  $jobDir"
+        }
         return [pscustomobject]@{ WrapperExitCode = 23; Stdout = $null; JobDir = $jobDir; JobId = $jobId; Message = $message }
     }
 

@@ -75,6 +75,16 @@ process; an explicitly bound `Invoke-CcodexSubmit -StartupTimeoutSec` value take
 A non-empty environment value that is not a non-negative integer is a usage error (exit `2`)
 before any job directory is reserved.
 
+The sentinel's liveness check is **PID-reuse-safe** (backlog #24b): it matches the worker's
+`<pid>;<UTC start-time>` identity, not a bare PID, so a PID reassigned to an unrelated process
+after the worker dies is correctly seen as "worker gone" and the ~500 ms dead-worker fast-fail
+fires instead of burning the whole window. On a sentinel failure the command still returns exit
+`23`, but if the worker is **provably gone and the job never left `created`**, `submit`
+terminalizes the job to a `failed` `status.json` + `worker-complete.json` (backlog #24a) rather
+than leaving a `created`-orphan that a later `wait`/`wait --all` could hang on forever; a
+still-alive but slow worker is left `created` for in-place diagnosis (terminalizing would race its
+own `created`→`running` write).
+
 `ccodex submit --resume <parent_job_id>` is the asynchronous follow-up form. Its task-text
 sources are identical to plain `submit` (stdin, `--prompt-file`, or positional task text), while
 the value following `--resume` names the finished parent job. It synchronously validates the

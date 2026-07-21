@@ -963,7 +963,7 @@ on a failure without reading logs.
 | Codex waits for interactive input | prevented by construction: `--ask-for-approval never` + wrapper closes stdin after writing the prompt (Codex sees EOF). A clarifying *question as the final answer* is a valid `done` result; future `codex exec resume <thread_id>` can answer it in-session | documentation only |
 | Codex hangs (no exit) | job-level `--hard-timeout-sec <n>` (default `0` = never) | on expiry: kill the process tree, status `timed_out`, `timeout_reason`, `terminated_at`, wrapper exit `24`; artifacts kept |
 | Codex CLI missing / not launchable | `Resolve-CcodexCodexPath` failure | `failed`/`12` with completion evidence — including in `submit`, which must write a terminal failed `status.json` + `worker-complete.json` before returning (a job must never sit at `created` after a known-fatal internal failure) |
-| Worker dies without evidence | narrow orphan reconciliation (2a) | evidence → terminal state; no evidence → `possibly-stale`; corrupt/empty `exit_code.txt` degrades to `possibly-stale`, never an uncaught throw |
+| Worker dies without evidence | narrow orphan reconciliation (2a; #24c) | parsable evidence → terminal state; **absent** `exit_code.txt` on a provably-gone worker → terminal `failed`/`10` (a dead process writes nothing more, so no evidence can ever appear — leaving it non-terminal would hang `wait`/`wait --all` forever); a **present-but** corrupt/empty `exit_code.txt` is mid-finalize → `possibly-stale` (never raced to a fabricated terminal), never an uncaught throw |
 | Empty/missing result with exit 0 | 2a validation | `failed`/`11` |
 
 Contract points: `failure_reason` is a conservative, append-only HINT (may be absent); exit codes

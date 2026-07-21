@@ -127,18 +127,62 @@ Assert-Equal $resultAlive.PossiblyStale $false 'alive worker is not possibly sta
 $afterAlive = (Get-Item (Join-Path $dirAlive 'status.json')).LastWriteTimeUtc
 Assert-Equal $afterAlive $beforeAlive 'alive worker status.json was not rewritten'
 
-Write-Host "Update-CcodexOrphanStatus: running + worker dead + no exit_code.txt -> no write, possibly stale"
+# backlog #24 (c): an ABSENT exit_code.txt from a provably-gone worker means it died before
+# finalizing anything -- no completion evidence exists and none can ever appear (a dead process
+# writes nothing more). Left as-is this is the "evidence-less killed running worker" orphan that
+# hangs wait/wait --all forever, so reconciliation now terminalizes it as failed. (Contrast the
+# PRESENT-but-empty/corrupt cases below: those are mid-finalize and stay possibly-stale.)
+Write-Host "Update-CcodexOrphanStatus: running + worker dead + no exit_code.txt -> reconcile to failed (no evidence can ever settle a gone worker)"
 $dirDeadNoEvidence = New-TestJobDir 'orphan-dead-no-evidence'
 $deadNoEvidenceStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
 Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadNoEvidence 'status.json') -Object $deadNoEvidenceStatus
-$beforeDeadNoEvidence = (Get-Item (Join-Path $dirDeadNoEvidence 'status.json')).LastWriteTimeUtc
-Start-Sleep -Milliseconds 50
 $resultDeadNoEvidence = Update-CcodexOrphanStatus -JobDir $dirDeadNoEvidence
-Assert-Equal $resultDeadNoEvidence.Status 'running' 'dead worker w/o evidence keeps running status'
-Assert-Equal $resultDeadNoEvidence.Reconciled $false 'dead worker w/o evidence is not reconciled'
-Assert-Equal $resultDeadNoEvidence.PossiblyStale $true 'dead worker w/o evidence is possibly stale'
-$afterDeadNoEvidence = (Get-Item (Join-Path $dirDeadNoEvidence 'status.json')).LastWriteTimeUtc
-Assert-Equal $afterDeadNoEvidence $beforeDeadNoEvidence 'dead worker w/o evidence status.json was not rewritten'
+Assert-Equal $resultDeadNoEvidence.Status 'failed' 'dead worker w/o evidence reconciles to failed'
+Assert-Equal $resultDeadNoEvidence.Reconciled $true 'dead worker w/o evidence is reconciled'
+Assert-Equal $resultDeadNoEvidence.PossiblyStale $false 'reconciled dead-no-evidence is not possibly stale'
+$rewrittenNoEvidence = Get-Content -LiteralPath (Join-Path $dirDeadNoEvidence 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $rewrittenNoEvidence.status 'failed' 'rewritten status.json status is failed (dead, no evidence)'
+Assert-Equal $rewrittenNoEvidence.codex_exit_code $null 'no codex_exit_code recorded when the worker died before writing one'
+Assert-Equal $rewrittenNoEvidence.wrapper_exit_code 10 'reconciled dead-no-evidence records wrapper_exit_code 10'
+Assert-True ($rewrittenNoEvidence.error -like '*exited before recording an exit code*') 'error explains the gone-without-evidence reconciliation'
+Assert-True ($null -ne $rewrittenNoEvidence.finished_at) 'reconciled dead-no-evidence has finished_at set'
+Assert-Equal $rewrittenNoEvidence.failure_reason $null 'dead-no-evidence failure_reason is null with no stderr/events signature'
+
+# backlog #24 (c) guard: the absent-evidence terminalization above requires a PROVABLY-gone
+# worker. A running job with an empty/malformed backend_id (a worker that died before ever
+# stamping an identity) cannot be proved gone, so a missing exit_code.txt must NOT be force-failed
+# -- it stays possibly-stale (the created-orphan the submit-path #24a terminalization settles at
+# launch time). Test-CcodexWorkerAlive returns $false for both a dead identity and an empty one, so
+# without this guard an empty-backend_id orphan would be wrongly terminalized.
+Write-Host "Update-CcodexOrphanStatus: running + EMPTY backend_id + no evidence -> possibly-stale, NOT terminalized"
+$dirNoIdentity = New-TestJobDir 'orphan-no-identity'
+$noIdentityStatus = New-TestStatusObject -Status 'running' -BackendId ''
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirNoIdentity 'status.json') -Object $noIdentityStatus
+$beforeNoIdentity = (Get-Item (Join-Path $dirNoIdentity 'status.json')).LastWriteTimeUtc
+Start-Sleep -Milliseconds 50
+$resultNoIdentity = Update-CcodexOrphanStatus -JobDir $dirNoIdentity
+Assert-Equal $resultNoIdentity.Status 'running' 'empty-backend_id orphan keeps running (not provably gone)'
+Assert-Equal $resultNoIdentity.Reconciled $false 'empty-backend_id orphan is not reconciled'
+Assert-Equal $resultNoIdentity.PossiblyStale $true 'empty-backend_id orphan reports possibly-stale'
+$afterNoIdentity = (Get-Item (Join-Path $dirNoIdentity 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterNoIdentity $beforeNoIdentity 'empty-backend_id orphan status.json was not rewritten'
+
+Write-Host "Update-CcodexOrphanStatus: running + worker dead + no exit_code.txt + held lock (zero-wait) -> possibly-stale, no rewrite"
+$dirDeadNoEvidenceHeld = New-TestJobDir 'orphan-dead-no-evidence-held'
+$deadNoEvidenceHeldStatus = New-TestStatusObject -Status 'running' -BackendId $fabricatedDeadBackendId
+Write-CcodexJsonFileAtomic -Path (Join-Path $dirDeadNoEvidenceHeld 'status.json') -Object $deadNoEvidenceHeldStatus
+$beforeDeadNoEvidenceHeld = (Get-Item (Join-Path $dirDeadNoEvidenceHeld 'status.json')).LastWriteTimeUtc
+Lock-CcodexJob -JobDir $dirDeadNoEvidenceHeld -CommandName 'test-holder' | Out-Null
+try {
+    $resultDeadNoEvidenceHeld = Update-CcodexOrphanStatus -JobDir $dirDeadNoEvidenceHeld -LockTimeoutSec 0
+} finally {
+    Unlock-CcodexJob -JobDir $dirDeadNoEvidenceHeld
+}
+Assert-Equal $resultDeadNoEvidenceHeld.Status 'running' 'the no-evidence terminalize write is contended by the held lock -> stays running'
+Assert-Equal $resultDeadNoEvidenceHeld.Reconciled $false 'held-lock no-evidence terminalize does not reconcile this pass'
+Assert-Equal $resultDeadNoEvidenceHeld.PossiblyStale $true 'held-lock no-evidence terminalize reports possibly-stale'
+$afterDeadNoEvidenceHeld = (Get-Item (Join-Path $dirDeadNoEvidenceHeld 'status.json')).LastWriteTimeUtc
+Assert-Equal $afterDeadNoEvidenceHeld $beforeDeadNoEvidenceHeld 'held-lock no-evidence terminalize left status.json unwritten'
 
 Write-Host "Update-CcodexOrphanStatus: running + worker dead + empty exit_code.txt -> no write, possibly stale, no throw"
 $dirDeadEmptyEvidence = New-TestJobDir 'orphan-dead-empty-evidence'

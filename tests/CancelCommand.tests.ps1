@@ -167,13 +167,17 @@ Assert-Equal $resultDeadFailed.Stdout "$($jobDeadFailed.JobId) failed" 'cancel r
 $statusDeadFailedAfter = Get-Content -LiteralPath (Join-Path $jobDeadFailed.JobDir 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $statusDeadFailedAfter.status 'failed' 'status.json is reconciled to failed, never forced to cancelled'
 
-Write-Host "Invoke-CcodexCancelCommand: running + dead worker + no evidence -> stays running, reported possibly-stale, not cancelled"
+# backlog #24 (c): a provably-gone worker with an ABSENT exit_code.txt can never produce
+# completion evidence, so reconciliation terminalizes it as failed rather than leaving a
+# non-terminal orphan that hangs wait/wait --all forever. cancel reflects that reconciled
+# verdict (never forces cancelled), exactly like the failure-evidence case above.
+Write-Host "Invoke-CcodexCancelCommand: running + dead worker + no evidence -> reconciled to failed, not cancelled"
 $jobDeadNoEvidence = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId
 $resultDeadNoEvidence = Invoke-CcodexCancelCommand -JobId $jobDeadNoEvidence.JobId -StateRoot $localAppData
 Assert-Equal $resultDeadNoEvidence.WrapperExitCode 0 'cancel against a dead-worker-no-evidence job exits 0'
-Assert-Equal $resultDeadNoEvidence.Stdout "$($jobDeadNoEvidence.JobId) running" 'cancel reports the still-running (unreconciled) status, not cancelled'
+Assert-Equal $resultDeadNoEvidence.Stdout "$($jobDeadNoEvidence.JobId) failed" 'cancel reports the reconciled failed status, not cancelled'
 $statusDeadNoEvidenceAfter = Get-Content -LiteralPath (Join-Path $jobDeadNoEvidence.JobDir 'status.json') -Raw | ConvertFrom-Json
-Assert-Equal $statusDeadNoEvidenceAfter.status 'running' 'status.json is left running when there is no completion evidence to reconcile from'
+Assert-Equal $statusDeadNoEvidenceAfter.status 'failed' 'status.json is reconciled to failed when a gone worker left no completion evidence'
 
 # ============================================================
 # (e) live fake worker mid-CCODEX_FAKE_DELAY_MS sleep -> killed, cancelled, artifacts preserved

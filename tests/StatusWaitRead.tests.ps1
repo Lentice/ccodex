@@ -112,17 +112,23 @@ Assert-True ($afterRewrite -gt $beforeRewrite) 'status.json was rewritten during
 $statusDeadEvidenceAfter = Get-Content -LiteralPath (Join-Path $jobDeadEvidence.JobDir 'status.json') -Raw | ConvertFrom-Json
 Assert-Equal $statusDeadEvidenceAfter.status 'done' 'status.json reflects reconciled done status'
 
-# --- status: running + worker dead + no evidence -> possibly-stale line, file NOT rewritten ---
+# --- status: running + worker dead + no evidence -> reconciled failed line, file rewritten (backlog #24 c) ---
+#
+# A provably-gone worker (dead identity) with NO exit_code.txt can never produce completion
+# evidence, so reconciliation terminalizes it as failed instead of leaving it a non-terminal
+# orphan that hangs wait/wait --all forever.
 
-Write-Host "Invoke-CcodexStatusCommand: running + dead worker + no evidence -> possibly-stale line, no rewrite"
+Write-Host "Invoke-CcodexStatusCommand: running + dead worker + no evidence -> reconciled failed line, status.json rewritten"
 $jobDeadNoEvidence = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId
-$beforeNoRewrite = (Get-Item (Join-Path $jobDeadNoEvidence.JobDir 'status.json')).LastWriteTimeUtc
+$beforeNoEvidenceRewrite = (Get-Item (Join-Path $jobDeadNoEvidence.JobDir 'status.json')).LastWriteTimeUtc
 Start-Sleep -Milliseconds 50
 $resultDeadNoEvidence = Invoke-CcodexStatusCommand -JobId $jobDeadNoEvidence.JobId -StateRoot $localAppData
-Assert-Equal $resultDeadNoEvidence.WrapperExitCode 0 'dead-worker-no-evidence job -> exit 0'
-Assert-Equal $resultDeadNoEvidence.Stdout "$($jobDeadNoEvidence.JobId) running health=possibly-stale" 'possibly-stale line appended for dead worker without evidence'
-$afterNoRewrite = (Get-Item (Join-Path $jobDeadNoEvidence.JobDir 'status.json')).LastWriteTimeUtc
-Assert-Equal $afterNoRewrite $beforeNoRewrite 'status.json was NOT rewritten when there is no completion evidence'
+Assert-Equal $resultDeadNoEvidence.WrapperExitCode 0 'reconciled dead-worker-no-evidence job -> status exit 0'
+Assert-Equal $resultDeadNoEvidence.Stdout "$($jobDeadNoEvidence.JobId) failed codex_exit_code=null wrapper_exit_code=10" 'reconciled failed line shown for a gone worker with no evidence'
+$afterNoEvidenceRewrite = (Get-Item (Join-Path $jobDeadNoEvidence.JobDir 'status.json')).LastWriteTimeUtc
+Assert-True ($afterNoEvidenceRewrite -gt $beforeNoEvidenceRewrite) 'status.json was rewritten to terminal failed for a gone worker with no evidence'
+$statusDeadNoEvidenceAfter = Get-Content -LiteralPath (Join-Path $jobDeadNoEvidence.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusDeadNoEvidenceAfter.status 'failed' 'status.json reflects reconciled failed status'
 
 # --- status: contended reconciliation lock -> prompt possibly-stale answer, no lock wait (backlog #16) ---
 
@@ -234,7 +240,17 @@ Assert-Equal $statusDoneJson.codex_exit_code 0 'status --json terminal includes 
 Assert-Equal $statusDoneJson.wrapper_exit_code 0 'status --json terminal includes wrapper exit code'
 Assert-Equal $statusDoneJson.command_exit_code 0 'status --json terminal includes command exit 0'
 
-$statusStaleJson = (Invoke-CcodexStatusCommand -JobId $jobDeadNoEvidence.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+# A dead-worker orphan whose reconciliation lock is held this pass cannot settle, so --json
+# surfaces health=possibly-stale (the #16 contended-lock verdict). $jobDeadNoEvidence is no longer
+# usable here: post-#24 a provably-gone worker with no evidence terminalizes to failed on the first
+# status call above, so it would report health=null now.
+$jobStaleJson = New-CcodexTestJobWithStatus -Status 'running' -BackendId $fabricatedDeadBackendId -WithExitCodeEvidence -EvidenceExitCode 0 -WithResultFile
+Lock-CcodexJob -JobDir $jobStaleJson.JobDir -TimeoutSec 1 -CommandName 'test-holder' | Out-Null
+try {
+    $statusStaleJson = (Invoke-CcodexStatusCommand -JobId $jobStaleJson.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json
+} finally {
+    Unlock-CcodexJob -JobDir $jobStaleJson.JobDir
+}
 Assert-Equal $statusStaleJson.health 'possibly-stale' 'status --json surfaces reconciliation health'
 
 $statusChildJson = (Invoke-CcodexStatusCommand -JobId $jobChild.JobId -Json -StateRoot $localAppData).Stdout | ConvertFrom-Json

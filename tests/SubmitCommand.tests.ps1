@@ -172,6 +172,25 @@ try {
     }
 }
 
+# --- (d2) startup-sentinel failure with a PROVABLY-GONE worker -> job terminalized as failed (backlog #24 a) ---
+#
+# The stub worker exits immediately without ever stamping 'running'. With a real (nonzero) startup
+# window, Wait-CcodexWorkerLaunch's identity-based liveness sees the worker gone and fast-fails.
+# Because the worker is provably gone AND the job never left 'created', submit now terminalizes the
+# job (terminal failed status.json + worker-complete.json) instead of leaving a 'created' orphan
+# that would hang a later wait/wait --all forever. submit still reports the launch-failure code 23.
+Write-Host "Invoke-CcodexSubmit: startup-sentinel failure with a gone worker terminalizes the job as failed (never a created-orphan)"
+$resultGone = Invoke-CcodexSubmitForTest -Overrides @{ StartupTimeoutSec = 10; WorkerScriptPath = $stubWorkerPs }
+Assert-Equal $resultGone.WrapperExitCode 23 'a gone-worker startup-sentinel failure still reports launch-failure exit 23'
+Assert-True (-not [string]::IsNullOrEmpty($resultGone.JobDir)) 'gone-worker launch failure still returns the job dir'
+$statusGone = Get-Content -LiteralPath (Join-Path $resultGone.JobDir 'status.json') -Raw | ConvertFrom-Json
+Assert-Equal $statusGone.status 'failed' 'a gone-worker launch failure is terminalized as failed (never left created)'
+Assert-Equal $statusGone.wrapper_exit_code 12 'terminalized launch-failure status.json records wrapper_exit_code 12 (internal failure)'
+Assert-True (Test-Path -LiteralPath (Join-Path $resultGone.JobDir 'worker-complete.json') -PathType Leaf) 'worker-complete.json evidence is written when a gone worker is terminalized'
+# A subsequent wait must settle promptly on the now-terminal job rather than hanging.
+$waitGone = Invoke-CcodexWaitCommand -JobId $resultGone.JobId -StateRoot $localAppData -WaitTimeoutSec 5
+Assert-Equal $waitGone.WrapperExitCode 12 'wait settles the terminalized launch-failed job (exit 12), never hangs on a created-orphan'
+
 # --- (e) shell-level: pwsh -File ccodex.ps1 submit ... --state-root ... --detach-mechanism startprocess ---
 
 Write-Host "shell-level: piped prompt through ccodex.ps1 submit prints exactly two stdout lines, no JSONL/result content"

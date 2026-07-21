@@ -126,10 +126,17 @@ function Start-CcodexDetachedWorker {
 }
 
 function Wait-CcodexWorkerLaunch {
+    # $BackendId is the launched worker's PID-reuse-safe identity (<pid>;<UTC start time>, as
+    # produced by Get-CcodexProcessIdentity right after launch). Liveness is checked against BOTH
+    # the pid AND the recorded start time via Test-CcodexWorkerAlive, NOT a bare `Get-Process -Id`:
+    # after the worker dies its pid can be reassigned to an unrelated process, and a bare pid check
+    # would see that reused pid as "still alive" and burn the whole startup window. Matching the
+    # start time too means a reused pid (different start time) is correctly seen as "worker gone",
+    # so the ~500ms dead-worker fast-fail actually fires (backlog #24 b).
     param(
         [Parameter(Mandatory)][string]$JobDir,
         [int]$TimeoutSec = 120,
-        [int]$ProcessId
+        [string]$BackendId
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -141,9 +148,8 @@ function Wait-CcodexWorkerLaunch {
         if ((Get-Date) -ge $deadline) {
             throw "ccodex: worker did not start within ${TimeoutSec}s; job left in 'created' state for diagnosis."
         }
-        if ($PSBoundParameters.ContainsKey('ProcessId')) {
-            $workerProcess = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-            if (-not $workerProcess) {
+        if ($PSBoundParameters.ContainsKey('BackendId')) {
+            if (-not (Test-CcodexWorkerAlive -BackendId $BackendId)) {
                 # Close the narrow race where the worker stamped status.json and then exited
                 # between the first status read and this liveness check.
                 Start-Sleep -Milliseconds 500
