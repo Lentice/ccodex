@@ -5,7 +5,9 @@ function Test-CcodexResult {
         [Parameter(Mandatory)][string]$ResultPath
     )
     $resultExists = Test-Path -LiteralPath $ResultPath -PathType Leaf
-    $resultContent = if ($resultExists) { Get-Content -LiteralPath $ResultPath -Raw -Encoding UTF8 } else { '' }
+    # Get-Content -Raw returns $null for a genuinely 0-byte file; coalesce to '' so the
+    # empty case is treated like whitespace-only instead of crashing on .Trim().
+    $resultContent = if ($resultExists) { (Get-Content -LiteralPath $ResultPath -Raw -Encoding UTF8) ?? '' } else { '' }
     $resultNonEmpty = $resultExists -and $resultContent.Trim().Length -gt 0
 
     if ($CodexExitCode -ne 0) {

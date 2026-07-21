@@ -29,6 +29,14 @@ $v3 = Test-CcodexResult -CodexExitCode 0 -ResultPath $emptyPath
 Assert-Equal $v3.Status 'failed' 'whitespace-only result counts as empty'
 Assert-Equal $v3.WrapperExitCode 11 'wrapper exit code is 11 for an empty result'
 
+Write-Host "codex exit 0 with a genuinely 0-byte result -> failed/11"
+$zeroBytePath = Join-Path $tempRoot 'result-zerobyte.md'
+[System.IO.File]::WriteAllText($zeroBytePath, '', $utf8NoBom)
+$v3b = Test-CcodexResult -CodexExitCode 0 -ResultPath $zeroBytePath
+Assert-Equal $v3b.Status 'failed' 'a 0-byte result counts as empty'
+Assert-Equal $v3b.WrapperExitCode 11 'wrapper exit code is 11 for a 0-byte result'
+Assert-Equal $v3b.ResultPresent $false 'result present is false for a 0-byte result'
+
 Write-Host "nonzero codex exit code -> failed/10 regardless of result presence"
 $v4 = Test-CcodexResult -CodexExitCode 5 -ResultPath $resultPath
 Assert-Equal $v4.Status 'failed' 'status is failed on nonzero codex exit'
